@@ -375,6 +375,74 @@ func TestValidatorLeaveCommandSendsSignedTx(t *testing.T) {
 	}
 }
 
+func TestValidatorSlashCommandSendsSignedTx(t *testing.T) {
+	proposerKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validatorKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposer := crypto.AddressFromPrivateKey(proposerKey)
+	validator := crypto.AddressFromPrivateKey(validatorKey)
+	n, err := node.New(node.Config{
+		ChainID:     "chainlab-local",
+		ProposerKey: proposerKey,
+		GenesisBalance: map[string]uint64{
+			proposer:  1_000_000,
+			validator: 1_000_000,
+		},
+		Validators: []string{proposer, validator},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	stake := signedCLITx(t, validatorKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxStake,
+		From:     validator,
+		Nonce:    0,
+		Value:    300,
+		GasLimit: 30_000,
+		GasPrice: 1,
+	})
+	if err := n.SubmitTx(stake); err != nil {
+		t.Fatal(err)
+	}
+
+	var slashOut bytes.Buffer
+	if err := validatorSlashCommand([]string{
+		"--rpc", server.URL,
+		"--private-key", crypto.PrivateKeyToHex(proposerKey),
+		"--target", validator,
+		"--amount", "300",
+		"--evidence", "double-sign-height-3",
+	}, &slashOut); err != nil {
+		t.Fatal(err)
+	}
+	slashBlock, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(slashBlock.Transactions) != 2 || slashBlock.Transactions[1].Type != types.TxValidatorSlash {
+		t.Fatalf("slash block transactions = %#v", slashBlock.Transactions)
+	}
+	if len(slashBlock.Receipts) != 2 || len(slashBlock.Receipts[1].Events) != 1 || slashBlock.Receipts[1].Events[0].Type != "validator.slashed" {
+		t.Fatalf("slash receipt = %#v", slashBlock.Receipts)
+	}
+	if got := n.StakeOf(validator); got != 0 {
+		t.Fatalf("validator stake = %d", got)
+	}
+	validators := n.Validators()
+	if len(validators) != 1 || validators[0] != proposer {
+		t.Fatalf("validators = %#v", validators)
+	}
+}
+
 func TestDeployAndContractCallCommandsSendSignedTx(t *testing.T) {
 	key, err := crypto.GenerateKey()
 	if err != nil {

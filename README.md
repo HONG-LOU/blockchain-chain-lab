@@ -8,7 +8,7 @@ It currently implements:
 - secp256k1 signatures and Ethereum-style 20-byte addresses
 - transfers, staking, unstaking, and governance voting
 - local proof-of-authority block production with deterministic multi-validator proposer rotation
-- dynamic validator joins and leaves through `validator.join` / `validator.leave` transactions, with validator set committed into state roots and snapshots
+- dynamic validator joins, leaves, and slashing through `validator.join` / `validator.leave` / `validator.slash` transactions, with validator set committed into state roots and snapshots
 - transaction, receipt, and state roots
 - native smart-contract runtime with `counter.v1` and `token.v1`
 - HTTP REST endpoints and a small JSON-RPC-style endpoint
@@ -98,6 +98,7 @@ Stake, join, and leave the validator set:
 go run ./cmd/chainlab tx stake --rpc http://127.0.0.1:8547 --private-key <hex-private-key> --value 500
 go run ./cmd/chainlab tx validator-join --rpc http://127.0.0.1:8547 --private-key <hex-private-key>
 go run ./cmd/chainlab tx validator-leave --rpc http://127.0.0.1:8547 --private-key <hex-private-key>
+go run ./cmd/chainlab tx validator-slash --rpc http://127.0.0.1:8547 --private-key <reporter-private-key> --target <validator-address> --amount 100 --evidence <evidence-ref>
 ```
 
 Produce a block:
@@ -137,7 +138,7 @@ go run ./cmd/chainlab query estimate-gas --rpc http://127.0.0.1:8547 --type call
 
 Next useful milestones:
 
-- validator slashing transactions and stronger fork-choice or finality rules
+- stronger fork-choice or finality rules
 - WASM contract runtime
 - block explorer UI
 - production-framework migration decision: OP Stack, Cosmos SDK, Avalanche L1, or another appchain stack

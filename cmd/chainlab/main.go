@@ -214,7 +214,7 @@ func usage() {
 
 func txCommand(args []string, out io.Writer) {
 	if len(args) < 1 {
-		log.Fatal("usage: chainlab tx <transfer|deploy|call|stake|validator-join|validator-leave>")
+		log.Fatal("usage: chainlab tx <transfer|deploy|call|stake|validator-join|validator-leave|validator-slash>")
 	}
 	switch args[0] {
 	case "transfer":
@@ -239,6 +239,10 @@ func txCommand(args []string, out io.Writer) {
 		}
 	case "validator-leave":
 		if err := validatorLeaveCommand(args[1:], out); err != nil {
+			log.Fatal(err)
+		}
+	case "validator-slash":
+		if err := validatorSlashCommand(args[1:], out); err != nil {
 			log.Fatal(err)
 		}
 	default:
@@ -359,6 +363,43 @@ func validatorLeaveCommand(args []string, out io.Writer) error {
 		return err
 	}
 	tx, err := buildSignedTransaction(*rpcURL, *privateKeyHex, types.TxValidatorLeave, "", 0, *gasLimit, *gasPrice, nil)
+	if err != nil {
+		return err
+	}
+	response, err := submitTransaction(*rpcURL, tx)
+	if err != nil {
+		return err
+	}
+	return writeTo(out, response)
+}
+
+func validatorSlashCommand(args []string, out io.Writer) error {
+	flags := flag.NewFlagSet("tx validator-slash", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
+	privateKeyHex := flags.String("private-key", "", "reporter validator private key")
+	target := flags.String("target", "", "validator address to slash")
+	amount := flags.Uint64("amount", 0, "stake amount to slash")
+	evidence := flags.String("evidence", "", "evidence reference or summary")
+	gasLimit := flags.Uint64("gas-limit", 45_000, "gas limit")
+	gasPrice := flags.Uint64("gas-price", 1, "gas price")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *target == "" {
+		return fmt.Errorf("target validator is required")
+	}
+	if *amount == 0 {
+		return fmt.Errorf("slash amount must be positive")
+	}
+	if strings.TrimSpace(*evidence) == "" {
+		return fmt.Errorf("evidence is required")
+	}
+	payload := map[string]string{
+		"target":   *target,
+		"amount":   strconv.FormatUint(*amount, 10),
+		"evidence": *evidence,
+	}
+	tx, err := buildSignedTransaction(*rpcURL, *privateKeyHex, types.TxValidatorSlash, "", 0, *gasLimit, *gasPrice, payload)
 	if err != nil {
 		return err
 	}

@@ -428,6 +428,109 @@ func TestValidatorLeaveUpdatesNextBlockScheduleAndPersists(t *testing.T) {
 	}
 }
 
+func TestValidatorSlashUpdatesNextBlockScheduleAndPersists(t *testing.T) {
+	keyA, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyB, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validatorA := chaincrypto.AddressFromPrivateKey(keyA)
+	validatorB := chaincrypto.AddressFromPrivateKey(keyB)
+	genesisBalances := map[string]uint64{
+		validatorA: 1_000_000,
+		validatorB: 1_000_000,
+	}
+	dataDirA := t.TempDir()
+	dataDirB := t.TempDir()
+
+	nodeA, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    keyA,
+		GenesisBalance: genesisBalances,
+		Validators:     []string{validatorA, validatorB},
+		DataDir:        dataDirA,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeB, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    keyB,
+		GenesisBalance: genesisBalances,
+		Validators:     []string{validatorA, validatorB},
+		DataDir:        dataDirB,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stakeB := signedNodeTx(t, keyB, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxStake,
+		From:     validatorB,
+		Nonce:    0,
+		Value:    500,
+		GasLimit: 30_000,
+		GasPrice: 1,
+	})
+	slashB := signedNodeTx(t, keyA, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxValidatorSlash,
+		From:     validatorA,
+		Nonce:    0,
+		GasLimit: 45_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"target":   validatorB,
+			"amount":   "500",
+			"evidence": "double-sign-height-4",
+		},
+	})
+	if err := nodeA.SubmitTx(stakeB); err != nil {
+		t.Fatal(err)
+	}
+	if err := nodeA.SubmitTx(slashB); err != nil {
+		t.Fatal(err)
+	}
+	block1, err := nodeA.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if block1.Header.Proposer != validatorA {
+		t.Fatalf("height 1 proposer = %q", block1.Header.Proposer)
+	}
+	if err := nodeB.ImportBlock(block1); err != nil {
+		t.Fatal(err)
+	}
+
+	reloadedA, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    keyA,
+		GenesisBalance: genesisBalances,
+		Validators:     []string{validatorA, validatorB},
+		DataDir:        dataDirA,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if validators := reloadedA.Validators(); len(validators) != 1 || validators[0] != validatorA {
+		t.Fatalf("validators = %#v", validators)
+	}
+	block2, err := reloadedA.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if block2.Header.Height != 2 || block2.Header.Proposer != validatorA {
+		t.Fatalf("height 2 block = %+v", block2.Header)
+	}
+	if _, err := nodeB.ProduceBlock(); err == nil {
+		t.Fatal("validator B should not produce after slashing removed it")
+	}
+}
+
 func TestNodeImportKnownCanonicalBlockIsIdempotent(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {

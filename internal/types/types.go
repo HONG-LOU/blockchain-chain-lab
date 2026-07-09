@@ -15,6 +15,7 @@ const (
 	TxVote           TxType = "vote"
 	TxValidatorJoin  TxType = "validator.join"
 	TxValidatorLeave TxType = "validator.leave"
+	TxValidatorSlash TxType = "validator.slash"
 )
 
 type Account struct {

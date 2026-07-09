@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strconv"
+	"strings"
 
 	"chainlab/internal/contracts"
 	chaincrypto "chainlab/internal/crypto"
@@ -117,6 +119,41 @@ func (e *Executor) Execute(store *state.Store, tx types.Transaction) (types.Rece
 			return types.Receipt{}, err
 		}
 		receipt.Events = append(receipt.Events, types.Event{Type: "validator.left", Attributes: map[string]string{"validator": tx.From}})
+	case types.TxValidatorSlash:
+		target, slashAmount, evidence, err := parseSlashPayload(tx.Payload)
+		if err != nil {
+			return types.Receipt{}, err
+		}
+		if !isActiveValidator(working, tx.From) {
+			return types.Receipt{}, errors.New("slash reporter must be an active validator")
+		}
+		if !isActiveValidator(working, target) {
+			return types.Receipt{}, errors.New("slash target must be an active validator")
+		}
+		currentStake := working.StakeOf(target)
+		if currentStake == 0 {
+			return types.Receipt{}, errors.New("slash target has no stake")
+		}
+		if slashAmount > currentStake {
+			slashAmount = currentStake
+		}
+		if err := working.SubStake(target, slashAmount); err != nil {
+			return types.Receipt{}, err
+		}
+		removed := "false"
+		if working.StakeOf(target) == 0 {
+			if err := working.RemoveValidator(target); err != nil {
+				return types.Receipt{}, err
+			}
+			removed = "true"
+		}
+		receipt.Events = append(receipt.Events, types.Event{Type: "validator.slashed", Attributes: map[string]string{
+			"reporter": tx.From,
+			"target":   strings.ToLower(target),
+			"amount":   strconv.FormatUint(slashAmount, 10),
+			"evidence": evidence,
+			"removed":  removed,
+		}})
 	case types.TxDeploy:
 		codeID := tx.Payload["code_id"]
 		if codeID == "" {
@@ -169,6 +206,8 @@ func EstimateGas(txType types.TxType) (uint64, error) {
 		return 25_000, nil
 	case types.TxValidatorJoin, types.TxValidatorLeave:
 		return 40_000, nil
+	case types.TxValidatorSlash:
+		return 45_000, nil
 	case types.TxDeploy:
 		return 80_000, nil
 	case types.TxCall:
@@ -183,4 +222,34 @@ func checkedMul(left uint64, right uint64) (uint64, error) {
 		return 0, errors.New("fee overflow")
 	}
 	return left * right, nil
+}
+
+func parseSlashPayload(payload map[string]string) (string, uint64, string, error) {
+	target := strings.ToLower(strings.TrimSpace(payload["target"]))
+	if target == "" {
+		return "", 0, "", errors.New("slash target is required")
+	}
+	amountRaw := payload["amount"]
+	if amountRaw == "" {
+		return "", 0, "", errors.New("slash amount is required")
+	}
+	amount, err := strconv.ParseUint(amountRaw, 10, 64)
+	if err != nil || amount == 0 {
+		return "", 0, "", errors.New("slash amount must be positive")
+	}
+	evidence := strings.TrimSpace(payload["evidence"])
+	if evidence == "" {
+		return "", 0, "", errors.New("slash evidence is required")
+	}
+	return target, amount, evidence, nil
+}
+
+func isActiveValidator(store *state.Store, address string) bool {
+	address = strings.ToLower(strings.TrimSpace(address))
+	for _, validator := range store.Validators() {
+		if validator == address {
+			return true
+		}
+	}
+	return false
 }

@@ -38,7 +38,7 @@ Phase 1 creates a runnable local blockchain with these capabilities:
 - Account model with balances, nonces, optional contract code id, and key-value storage.
 - Secp256k1 transaction signatures and Ethereum-style 20-byte addresses.
 - Transaction types for transfer, contract deployment, contract calls, staking, unstaking, and governance voting.
-- Validator lifecycle starts with staked validator join transactions and explicit validator leave transactions. The active validator set is committed into state roots.
+- Validator lifecycle starts with staked validator join transactions, explicit validator leave transactions, and validator slashing transactions. The active validator set is committed into state roots.
 - Gas accounting with gas limit, gas price, and deterministic fee charging.
 - Block production with deterministic transaction, receipt, and state roots.
 - Local proof-of-authority validation with a validator set.
@@ -196,6 +196,7 @@ Phase 2 progress:
 - PoA now enforces deterministic proposer rotation and treats repeated imports of already-known canonical blocks as idempotent peer sync events.
 - Staked accounts can submit `validator.join`; accepted joins update the active validator set for subsequent block scheduling, are included in state roots, persist in snapshots, and can be queried over REST, JSON-RPC, and CLI.
 - Active validators can submit `validator.leave`; accepted leaves remove them from the active validator set, refuse to remove the final validator, update subsequent block scheduling, persist in snapshots, and are available through CLI transaction submission.
+- Active validators can submit `validator.slash` with target, amount, and evidence; accepted slashes burn target stake, remove a depleted target from the active validator set while preserving at least one validator, update scheduling, and are available through CLI transaction submission.
 
 Phase 3:
 

@@ -244,3 +244,116 @@ func TestValidatorLeaveRemovesActiveValidator(t *testing.T) {
 		t.Fatal("last validator should not be able to leave")
 	}
 }
+
+func TestValidatorSlashReducesStakeAndRemovesDepletedValidator(t *testing.T) {
+	store, executor, keyA, validatorA, _ := newExecutorFixture(t)
+	keyB, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validatorB := chaincrypto.AddressFromPrivateKey(keyB)
+	store.SetBalance(validatorB, 1_000_000)
+	store.SetValidators([]string{validatorA, validatorB})
+	if err := store.AddStake(validatorB, 600); err != nil {
+		t.Fatal(err)
+	}
+
+	partial := signedTx(t, keyA, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxValidatorSlash,
+		From:     validatorA,
+		Nonce:    0,
+		GasLimit: 45_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"target":   validatorB,
+			"amount":   "200",
+			"evidence": "double-sign-height-7",
+		},
+	})
+	partialReceipt, err := executor.Execute(store, partial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := store.StakeOf(validatorB); got != 400 {
+		t.Fatalf("stake after partial slash = %d", got)
+	}
+	if len(partialReceipt.Events) != 1 || partialReceipt.Events[0].Type != "validator.slashed" {
+		t.Fatalf("partial slash events = %#v", partialReceipt.Events)
+	}
+
+	deplete := signedTx(t, keyA, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxValidatorSlash,
+		From:     validatorA,
+		Nonce:    1,
+		GasLimit: 45_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"target":   validatorB,
+			"amount":   "500",
+			"evidence": "downtime-window-9",
+		},
+	})
+	receipt, err := executor.Execute(store, deplete)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := store.StakeOf(validatorB); got != 0 {
+		t.Fatalf("stake after depleted slash = %d", got)
+	}
+	validators := store.Validators()
+	if len(validators) != 1 || validators[0] != validatorA {
+		t.Fatalf("validators = %#v", validators)
+	}
+	if len(receipt.Events) != 1 || receipt.Events[0].Attributes["removed"] != "true" {
+		t.Fatalf("depleted slash event = %#v", receipt.Events)
+	}
+}
+
+func TestValidatorSlashRequiresActiveReporterAndEvidence(t *testing.T) {
+	store, executor, keyA, validatorA, _ := newExecutorFixture(t)
+	keyReporter, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reporter := chaincrypto.AddressFromPrivateKey(keyReporter)
+	store.SetBalance(reporter, 1_000_000)
+	store.SetValidators([]string{validatorA})
+	if err := store.AddStake(validatorA, 600); err != nil {
+		t.Fatal(err)
+	}
+
+	notValidator := signedTx(t, keyReporter, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxValidatorSlash,
+		From:     reporter,
+		Nonce:    0,
+		GasLimit: 45_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"target":   validatorA,
+			"amount":   "100",
+			"evidence": "bad-signature",
+		},
+	})
+	if _, err := executor.Execute(store, notValidator); err == nil {
+		t.Fatal("inactive reporter should not slash validators")
+	}
+
+	missingEvidence := signedTx(t, keyA, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxValidatorSlash,
+		From:     validatorA,
+		Nonce:    0,
+		GasLimit: 45_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"target": validatorA,
+			"amount": "100",
+		},
+	})
+	if _, err := executor.Execute(store, missingEvidence); err == nil {
+		t.Fatal("slash without evidence should fail")
+	}
+}
