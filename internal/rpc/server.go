@@ -525,6 +525,23 @@ func (s *Server) handleSingleJSONRPC(w http.ResponseWriter, request rpcRequest) 
 		}
 		block, _ := n.Block(record.BlockHeight)
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: evmReceipt(record, block)})
+	case "debug_traceTransaction":
+		params, err := rpcParams(request.Params)
+		if err != nil || len(params) < 1 {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "transaction hash is required"})
+			return
+		}
+		txHash, ok := params[0].(string)
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "transaction hash must be a string"})
+			return
+		}
+		record, ok := n.Transaction(txHash)
+		if !ok {
+			writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: nil})
+			return
+		}
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: debugTransactionTrace(record)})
 	case "eth_getBlockReceipts":
 		params, err := rpcParams(request.Params)
 		if err != nil || len(params) < 1 {
@@ -1702,6 +1719,55 @@ func evmBlockReceipts(block types.Block) []map[string]any {
 		}, block))
 	}
 	return receipts
+}
+
+func debugTransactionTrace(record types.TransactionRecord) map[string]any {
+	return map[string]any{
+		"gas":         quantity(record.Receipt.GasUsed),
+		"failed":      !record.Receipt.Success,
+		"returnValue": "0x",
+		"structLogs":  []any{},
+		"chainLab":    chainLabTraceSummary(record),
+	}
+}
+
+func chainLabTraceSummary(record types.TransactionRecord) map[string]any {
+	return map[string]any{
+		"transactionHash":   record.Transaction.Hash(),
+		"blockHash":         record.BlockHash,
+		"blockNumber":       quantity(record.BlockHeight),
+		"transactionIndex":  quantity(uint64(record.Index)),
+		"type":              string(record.Transaction.Type),
+		"from":              strings.ToLower(record.Transaction.From),
+		"signer":            nullableAddress(record.Transaction.Signer),
+		"to":                nullableAddress(record.Transaction.To),
+		"value":             quantity(record.Transaction.Value),
+		"gasLimit":          quantity(record.Transaction.GasLimit),
+		"gasUsed":           quantity(record.Receipt.GasUsed),
+		"effectiveGasPrice": quantity(record.Receipt.EffectiveGasPrice),
+		"feePayer":          strings.ToLower(traceFeePayer(record)),
+		"contractAddress":   nullableAddress(record.Receipt.ContractAddress),
+		"error":             record.Receipt.Error,
+		"events":            chainLabTraceEvents(record.Receipt.Events),
+	}
+}
+
+func traceFeePayer(record types.TransactionRecord) string {
+	if strings.TrimSpace(record.Receipt.FeePayer) != "" {
+		return record.Receipt.FeePayer
+	}
+	return record.Transaction.From
+}
+
+func chainLabTraceEvents(events []types.Event) []map[string]any {
+	output := make([]map[string]any, 0, len(events))
+	for _, event := range events {
+		output = append(output, map[string]any{
+			"type":       event.Type,
+			"attributes": event.Attributes,
+		})
+	}
+	return output
 }
 
 func evmBlock(block types.Block, fullTransactions bool) map[string]any {

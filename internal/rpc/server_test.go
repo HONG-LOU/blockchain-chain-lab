@@ -1355,6 +1355,68 @@ func TestRPCGetBlockReceiptsReturnsReceiptsForBlock(t *testing.T) {
 	}
 }
 
+func TestRPCDebugTraceTransactionReturnsReceiptBackedTrace(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	tx := signedTransfer(t, key, alice, bob, 0, 100)
+	if err := n.SubmitTx(tx); err != nil {
+		t.Fatal(err)
+	}
+	block, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result := callRPC(t, server.URL, "debug_traceTransaction", []any{tx.Hash()})
+	trace, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("trace result type = %T", result)
+	}
+	if trace["gas"] != "0x5208" || trace["failed"] != false || trace["returnValue"] != "0x" {
+		t.Fatalf("trace summary = %#v", trace)
+	}
+	structLogs, ok := trace["structLogs"].([]any)
+	if !ok || len(structLogs) != 0 {
+		t.Fatalf("struct logs = %#v", trace["structLogs"])
+	}
+	summary, ok := trace["chainLab"].(map[string]any)
+	if !ok {
+		t.Fatalf("chainLab summary = %#v", trace["chainLab"])
+	}
+	if summary["transactionHash"] != tx.Hash() || summary["blockHash"] != block.Hash() || summary["blockNumber"] != "0x1" || summary["transactionIndex"] != "0x0" {
+		t.Fatalf("trace location = %#v", summary)
+	}
+	if summary["type"] != "transfer" || summary["from"] != strings.ToLower(alice) || summary["to"] != bob || summary["value"] != "0x64" {
+		t.Fatalf("trace transaction fields = %#v", summary)
+	}
+	if summary["gasUsed"] != "0x5208" || summary["effectiveGasPrice"] != "0x1" || summary["feePayer"] != strings.ToLower(alice) {
+		t.Fatalf("trace fee fields = %#v", summary)
+	}
+	events, ok := summary["events"].([]any)
+	if !ok || len(events) != 1 {
+		t.Fatalf("trace events = %#v", summary["events"])
+	}
+	firstEvent, ok := events[0].(map[string]any)
+	if !ok || firstEvent["type"] != "transfer" {
+		t.Fatalf("trace first event = %#v", events[0])
+	}
+}
+
 func TestRPCSendRawTransactionSubmitsSignedTx(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {
