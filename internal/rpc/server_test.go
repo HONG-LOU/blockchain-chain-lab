@@ -1299,6 +1299,87 @@ func TestExplorerRendersDetailPages(t *testing.T) {
 	getHTML(t, server.URL+"/explorer/tx/0xmissing", http.StatusNotFound)
 }
 
+func TestExplorerRendersEventPages(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deploy := signedRPCTransaction(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxDeploy,
+		From:     alice,
+		Nonce:    0,
+		GasLimit: 80_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"code_id": "counter.v1",
+			"initial": "1",
+		},
+	})
+	if err := n.SubmitTx(deploy); err != nil {
+		t.Fatal(err)
+	}
+	deployBlock, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	counter := deployBlock.Receipts[0].ContractAddress
+
+	call := signedRPCTransaction(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxCall,
+		From:     alice,
+		To:       counter,
+		Nonce:    1,
+		GasLimit: 50_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"method": "increment",
+			"amount": "2",
+		},
+	})
+	if err := n.SubmitTx(call); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	overview := getHTML(t, server.URL+"/explorer", http.StatusOK)
+	if !strings.Contains(overview, `href="/explorer/events"`) {
+		t.Fatalf("overview missing events link:\n%s", overview)
+	}
+
+	eventsPage := getHTML(t, server.URL+"/explorer/events", http.StatusOK)
+	for _, expected := range []string{
+		"Contract Events",
+		"counter.initialized",
+		"counter.incremented",
+		hash.KeccakHex([]byte("counter.incremented")),
+		counter,
+		`href="/explorer/block/2"`,
+		`href="/explorer/tx/` + call.Hash() + `"`,
+		`href="/explorer/account/` + counter + `"`,
+		"count",
+		"3",
+	} {
+		if !strings.Contains(eventsPage, expected) {
+			t.Fatalf("events page missing %q:\n%s", expected, eventsPage)
+		}
+	}
+}
+
 func TestEthGetLogsFiltersContractEvents(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {

@@ -11,6 +11,7 @@ import (
 )
 
 const explorerRecentBlockLimit = 8
+const explorerRecentEventLimit = 32
 
 type explorerPageData struct {
 	ChainID             string
@@ -75,6 +76,26 @@ type explorerAccountPageData struct {
 	IsValidator bool
 }
 
+type explorerEventsPageData struct {
+	ChainID string
+	Events  []explorerEvent
+}
+
+type explorerEvent struct {
+	Type             string
+	Topic            string
+	Address          string
+	AddressURL       string
+	BlockHeight      uint64
+	BlockHash        string
+	BlockURL         string
+	TransactionHash  string
+	TransactionURL   string
+	TransactionIndex int
+	EventIndex       int
+	Attributes       map[string]string
+}
+
 func (s *Server) handleExplorer(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/explorer" {
 		http.NotFound(w, r)
@@ -86,6 +107,14 @@ func (s *Server) handleExplorer(w http.ResponseWriter, r *http.Request) {
 	if err := explorerTemplate.Execute(w, data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+func (s *Server) handleExplorerEvents(w http.ResponseWriter, r *http.Request) {
+	data := explorerEventsPageData{
+		ChainID: s.node.ChainID(),
+		Events:  s.explorerEvents(explorerRecentEventLimit),
+	}
+	writeExplorerHTML(w, explorerEventsTemplate, data)
 }
 
 func (s *Server) handleExplorerBlock(w http.ResponseWriter, r *http.Request) {
@@ -192,6 +221,65 @@ func (s *Server) explorerData() explorerPageData {
 		Validators:          validators,
 		Blocks:              blocks,
 	}
+}
+
+func (s *Server) explorerEvents(limit int) []explorerEvent {
+	if limit <= 0 {
+		return nil
+	}
+	head := s.node.Head()
+	events := make([]explorerEvent, 0, limit)
+	for height := head.Header.Height; ; height-- {
+		block, ok := s.node.Block(height)
+		if !ok {
+			break
+		}
+		events = append(events, newExplorerEvents(block, limit-len(events))...)
+		if height == 0 || len(events) == limit {
+			break
+		}
+	}
+	return events
+}
+
+func newExplorerEvents(block types.Block, remaining int) []explorerEvent {
+	if remaining <= 0 {
+		return nil
+	}
+	blockHash := block.Hash()
+	events := make([]explorerEvent, 0, remaining)
+	for txIndex, tx := range block.Transactions {
+		if txIndex >= len(block.Receipts) {
+			continue
+		}
+		receipt := block.Receipts[txIndex]
+		address := strings.ToLower(logAddress(tx, receipt))
+		for eventIndex, event := range receipt.Events {
+			topics := eventTopics(event)
+			topic := ""
+			if len(topics) > 0 {
+				topic = topics[0]
+			}
+			events = append(events, explorerEvent{
+				Type:             event.Type,
+				Topic:            topic,
+				Address:          address,
+				AddressURL:       explorerAccountURL(address),
+				BlockHeight:      block.Header.Height,
+				BlockHash:        blockHash,
+				BlockURL:         explorerBlockURL(block.Header.Height),
+				TransactionHash:  tx.Hash(),
+				TransactionURL:   explorerTransactionURL(tx.Hash()),
+				TransactionIndex: txIndex,
+				EventIndex:       eventIndex,
+				Attributes:       event.Attributes,
+			})
+			if len(events) == remaining {
+				return events
+			}
+		}
+	}
+	return events
 }
 
 func newExplorerBlock(block types.Block) explorerBlock {
@@ -322,6 +410,7 @@ var explorerTemplate = template.Must(template.New("explorer").Parse(`<!doctype h
       white-space: nowrap;
     }
     .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+    .header-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
     .stats {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -392,7 +481,10 @@ var explorerTemplate = template.Must(template.New("explorer").Parse(`<!doctype h
         <h1>ChainLab Explorer</h1>
         <div class="network">{{.ChainID}}</div>
       </div>
-      <div class="badge"><span class="dot"></span> Local devnet</div>
+      <div class="header-actions">
+        <a class="badge" href="/explorer/events">Events</a>
+        <div class="badge"><span class="dot"></span> Local devnet</div>
+      </div>
     </header>
 
     <section class="stats" aria-label="Chain overview">
@@ -693,3 +785,51 @@ var explorerAccountTemplate = template.Must(template.New("explorer-account").Par
       </table>
     </section>
     {{end}}`)))
+
+var explorerEventsTemplate = template.Must(template.New("explorer-events").Parse(explorerDetailHTML("Contract Events", `
+    <header>
+      <div>
+        <h1>Contract Events</h1>
+        <div class="network">{{.ChainID}}</div>
+      </div>
+      <a href="/explorer">Back to Explorer</a>
+    </header>
+
+    <section class="section">
+      <h2>Recent Events</h2>
+      {{if .Events}}
+      <table>
+        <thead>
+          <tr><th>Event</th><th>Address</th><th>Block</th><th>Transaction</th><th>Attributes</th></tr>
+        </thead>
+        <tbody>
+          {{range .Events}}
+          <tr>
+            <td>
+              <span class="pill">{{.Type}}</span>
+              <div class="hash">{{.Topic}}</div>
+            </td>
+            <td>{{if .AddressURL}}<a class="hash" href="{{.AddressURL}}">{{.Address}}</a>{{else}}-{{end}}</td>
+            <td>
+              <a href="{{.BlockURL}}">{{.BlockHeight}}</a>
+              <div class="hash">{{.BlockHash}}</div>
+            </td>
+            <td>
+              <a class="hash" href="{{.TransactionURL}}">{{.TransactionHash}}</a>
+              <div class="label">tx {{.TransactionIndex}} event {{.EventIndex}}</div>
+            </td>
+            <td>
+              {{if .Attributes}}
+              {{range $key, $value := .Attributes}}
+              <div><span class="label">{{$key}}</span> <span class="hash">{{$value}}</span></div>
+              {{end}}
+              {{else}}-{{end}}
+            </td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+      {{else}}
+      <div class="label">No contract events have been emitted yet.</div>
+      {{end}}
+    </section>`)))

@@ -28,7 +28,7 @@ It currently implements:
 - pending nonce calculation and txpool inspection for uncommitted transactions
 - ChainLab-native raw transaction envelope for offline signing and later broadcast
 - devnet faucet that creates a normal proposer-signed transfer into the mempool
-- local block explorer pages for head, finality, recent blocks, transactions, accounts, validators, and mempool
+- local block explorer pages for head, finality, recent blocks, transactions, accounts, validators, mempool, and recent contract events
 - EVM-style contract event logs projected from native receipts, with block range, address, and topic filtering
 - EVM-style log filter polling with `eth_newFilter`, `eth_getFilterLogs`, `eth_getFilterChanges`, and `eth_uninstallFilter`
 - local multi-node devnet sync over HTTP peers: transaction relay, block import, produced-block broadcast, and finality vote relay
@@ -65,7 +65,7 @@ Start a local node:
 go run ./cmd/chainlab node --genesis config/genesis.json --listen :8547
 ```
 
-Open the local explorer at `http://127.0.0.1:8547/explorer`. Block, transaction, and account detail pages are linked from the overview.
+Open the local explorer at `http://127.0.0.1:8547/explorer`. Block, transaction, account, and recent event pages are linked from the overview.
 
 Start a persistent local node:
 
@@ -253,6 +253,7 @@ go run ./cmd/chainlab query estimate-gas --rpc http://127.0.0.1:8547 --type call
 
 - `GET /health`
 - `GET /explorer`
+- `GET /explorer/events`
 - `GET /explorer/block/{height}`
 - `GET /explorer/tx/{hash}`
 - `GET /explorer/account/{address}`
@@ -284,6 +285,6 @@ Next useful milestones:
 - BFT timeout/round handling, richer fork-choice safety rules, and production-grade slashing economics
 - broader WASM ABI with deterministic runtime step limits, ABI encoding, and richer host functions
 - richer account abstraction, including policy-based paymasters, social recovery/session-key smart accounts, and ERC-4337/EIP-7702 compatibility experiments
-- richer contract explorer views with decoded native contract state, event pages, and longer-lived external indexer support
+- richer contract explorer views with decoded native contract state and longer-lived external indexer support
 - richer governance thresholds, quorum rules, deposits, and upgrade proposal handlers
 - production-framework migration decision: OP Stack, Cosmos SDK, Avalanche L1, or another appchain stack
