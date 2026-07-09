@@ -1,18 +1,22 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	"chainlab/examples"
 	"chainlab/internal/crypto"
 	"chainlab/internal/node"
 	chainrpc "chainlab/internal/rpc"
+	"chainlab/internal/types"
 )
 
 type peerListFlag []string
@@ -73,6 +77,12 @@ func main() {
 		initCommand(os.Args[2:])
 	case "node":
 		nodeCommand(os.Args[2:])
+	case "tx":
+		txCommand(os.Args[2:], os.Stdout)
+	case "query":
+		queryCommand(os.Args[2:], os.Stdout)
+	case "chain":
+		chainCommand(os.Args[2:], os.Stdout)
 	default:
 		usage()
 		os.Exit(2)
@@ -172,7 +182,303 @@ func buildNodeConfig(options nodeOptions) (node.Config, error) {
 }
 
 func usage() {
-	fmt.Println("usage: chainlab <keygen|init|demo|node>")
+	fmt.Println("usage: chainlab <keygen|init|demo|node|tx|query|chain>")
+}
+
+func txCommand(args []string, out io.Writer) {
+	if len(args) < 1 {
+		log.Fatal("usage: chainlab tx <transfer>")
+	}
+	switch args[0] {
+	case "transfer":
+		if err := transferCommand(args[1:], out); err != nil {
+			log.Fatal(err)
+		}
+	default:
+		log.Fatalf("unknown tx command %q", args[0])
+	}
+}
+
+func queryCommand(args []string, out io.Writer) {
+	if len(args) < 1 {
+		log.Fatal("usage: chainlab query <account|tx|head>")
+	}
+	var err error
+	switch args[0] {
+	case "account":
+		err = accountCommand(args[1:], out)
+	case "tx":
+		err = txQueryCommand(args[1:], out)
+	case "head":
+		err = headCommand(args[1:], out)
+	default:
+		log.Fatalf("unknown query command %q", args[0])
+	}
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
+func chainCommand(args []string, out io.Writer) {
+	if len(args) < 1 {
+		log.Fatal("usage: chainlab chain <produce>")
+	}
+	if args[0] != "produce" {
+		log.Fatalf("unknown chain command %q", args[0])
+	}
+	if err := produceCommand(args[1:], out); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func transferCommand(args []string, out io.Writer) error {
+	flags := flag.NewFlagSet("tx transfer", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
+	privateKeyHex := flags.String("private-key", "", "sender private key")
+	to := flags.String("to", "", "recipient address")
+	value := flags.Uint64("value", 0, "transfer amount")
+	gasLimit := flags.Uint64("gas-limit", 21_000, "gas limit")
+	gasPrice := flags.Uint64("gas-price", 1, "gas price")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	tx, err := buildSignedTransfer(*rpcURL, *privateKeyHex, *to, *value, *gasLimit, *gasPrice)
+	if err != nil {
+		return err
+	}
+	response, err := submitTransaction(*rpcURL, tx)
+	if err != nil {
+		return err
+	}
+	return writeTo(out, response)
+}
+
+func buildSignedTransfer(rpcURL string, privateKeyHex string, to string, value uint64, gasLimit uint64, gasPrice uint64) (types.Transaction, error) {
+	if privateKeyHex == "" {
+		return types.Transaction{}, fmt.Errorf("private key is required")
+	}
+	if to == "" {
+		return types.Transaction{}, fmt.Errorf("recipient is required")
+	}
+	key, err := crypto.PrivateKeyFromHex(privateKeyHex)
+	if err != nil {
+		return types.Transaction{}, err
+	}
+	from := crypto.AddressFromPrivateKey(key)
+	var chainIDHex string
+	if err := rpcCall(rpcURL, "eth_chainId", []any{}, &chainIDHex); err != nil {
+		return types.Transaction{}, err
+	}
+	chainID := chainIDFromHex(chainIDHex)
+	var nonceHex string
+	if err := rpcCall(rpcURL, "eth_getTransactionCount", []any{from, "latest"}, &nonceHex); err != nil {
+		return types.Transaction{}, err
+	}
+	nonce, err := parseQuantity(nonceHex)
+	if err != nil {
+		return types.Transaction{}, err
+	}
+	tx := types.Transaction{
+		ChainID:  chainID,
+		Type:     types.TxTransfer,
+		From:     from,
+		To:       to,
+		Nonce:    nonce,
+		Value:    value,
+		GasLimit: gasLimit,
+		GasPrice: gasPrice,
+	}
+	signature, err := crypto.Sign(key, tx.SigningBytes())
+	if err != nil {
+		return types.Transaction{}, err
+	}
+	tx.Signature = signature
+	return tx, nil
+}
+
+func submitTransaction(rpcURL string, tx types.Transaction) (map[string]any, error) {
+	raw, err := json.Marshal(tx)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.Post(trimSlash(rpcURL)+"/tx", "application/json", bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("submit transaction failed: status %d: %s", resp.StatusCode, string(body))
+	}
+	var response map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return nil, err
+	}
+	return response, nil
+}
+
+func accountCommand(args []string, out io.Writer) error {
+	flags := flag.NewFlagSet("query account", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
+	address := flags.String("address", "", "account address")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *address == "" {
+		return fmt.Errorf("address is required")
+	}
+	resp, err := http.Get(trimSlash(*rpcURL) + "/account/" + *address)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("account query failed: status %d: %s", resp.StatusCode, string(body))
+	}
+	var account types.Account
+	if err := json.NewDecoder(resp.Body).Decode(&account); err != nil {
+		return err
+	}
+	return writeTo(out, account)
+}
+
+func txQueryCommand(args []string, out io.Writer) error {
+	flags := flag.NewFlagSet("query tx", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
+	hash := flags.String("hash", "", "transaction hash")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *hash == "" {
+		return fmt.Errorf("transaction hash is required")
+	}
+	resp, err := http.Get(trimSlash(*rpcURL) + "/tx/" + *hash)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("transaction query failed: status %d: %s", resp.StatusCode, string(body))
+	}
+	var record types.TransactionRecord
+	if err := json.NewDecoder(resp.Body).Decode(&record); err != nil {
+		return err
+	}
+	return writeTo(out, record)
+}
+
+func headCommand(args []string, out io.Writer) error {
+	flags := flag.NewFlagSet("query head", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	resp, err := http.Get(trimSlash(*rpcURL) + "/chain/head")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("head query failed: status %d: %s", resp.StatusCode, string(body))
+	}
+	var block types.Block
+	if err := json.NewDecoder(resp.Body).Decode(&block); err != nil {
+		return err
+	}
+	return writeTo(out, block)
+}
+
+func produceCommand(args []string, out io.Writer) error {
+	flags := flag.NewFlagSet("chain produce", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	resp, err := http.Post(trimSlash(*rpcURL)+"/chain/produce", "application/json", bytes.NewReader([]byte("{}")))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("produce failed: status %d: %s", resp.StatusCode, string(body))
+	}
+	var block types.Block
+	if err := json.NewDecoder(resp.Body).Decode(&block); err != nil {
+		return err
+	}
+	return writeTo(out, block)
+}
+
+type rpcResponseEnvelope struct {
+	Result json.RawMessage `json:"result"`
+	Error  string          `json:"error"`
+}
+
+func rpcCall(rpcURL string, method string, params []any, result any) error {
+	request := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  method,
+		"params":  params,
+	}
+	raw, err := json.Marshal(request)
+	if err != nil {
+		return err
+	}
+	resp, err := http.Post(trimSlash(rpcURL)+"/rpc", "application/json", bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("rpc %s failed: status %d: %s", method, resp.StatusCode, string(body))
+	}
+	var envelope rpcResponseEnvelope
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return err
+	}
+	if envelope.Error != "" {
+		return fmt.Errorf("rpc %s failed: %s", method, envelope.Error)
+	}
+	if result == nil {
+		return nil
+	}
+	return json.Unmarshal(envelope.Result, result)
+}
+
+func chainIDFromHex(chainIDHex string) string {
+	if chainIDHex == "0x7a69" {
+		return "chainlab-local"
+	}
+	return chainIDHex
+}
+
+func parseQuantity(value string) (uint64, error) {
+	if len(value) >= 2 && value[:2] == "0x" {
+		return strconv.ParseUint(value[2:], 16, 64)
+	}
+	return strconv.ParseUint(value, 10, 64)
+}
+
+func trimSlash(value string) string {
+	for len(value) > 0 && value[len(value)-1] == '/' {
+		value = value[:len(value)-1]
+	}
+	return value
+}
+
+func writeTo(out io.Writer, value any) error {
+	encoded, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(out, string(encoded))
+	return err
 }
 
 func createGenesisFile(path string) (GenesisFile, error) {

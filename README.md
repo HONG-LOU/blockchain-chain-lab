@@ -14,7 +14,7 @@ It currently implements:
 - persistent node snapshots with committed blocks, state, and transaction index
 - EVM-compatible JSON-RPC read subset: `eth_chainId`, `eth_blockNumber`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`
 - local multi-node devnet sync over HTTP peers: transaction relay, block import, and produced-block broadcast
-- CLI commands for keys, genesis, nodes, and demos
+- CLI commands for keys, genesis, nodes, signed transfers, block production, queries, and demos
 
 This is not a production mainnet. It is a verified development chain designed so the consensus, storage, runtime, and RPC layers can be replaced or expanded.
 
@@ -69,6 +69,26 @@ Run the built-in demo:
 go run ./cmd/chainlab demo
 ```
 
+Submit a signed transfer through a running node:
+
+```powershell
+go run ./cmd/chainlab tx transfer --rpc http://127.0.0.1:8547 --private-key <hex-private-key> --to <address> --value 100
+```
+
+Produce a block:
+
+```powershell
+go run ./cmd/chainlab chain produce --rpc http://127.0.0.1:8547
+```
+
+Query chain state:
+
+```powershell
+go run ./cmd/chainlab query head --rpc http://127.0.0.1:8547
+go run ./cmd/chainlab query account --rpc http://127.0.0.1:8547 --address <address>
+go run ./cmd/chainlab query tx --rpc http://127.0.0.1:8547 --hash <tx-hash>
+```
+
 ## HTTP API
 
 - `GET /health`
@@ -88,7 +108,6 @@ go run ./cmd/chainlab demo
 Next useful milestones:
 
 - multi-validator scheduling and fork-choice rules
-- signed raw transaction CLI
 - WASM contract runtime
 - block explorer UI
 - production-framework migration decision: OP Stack, Cosmos SDK, Avalanche L1, or another appchain stack

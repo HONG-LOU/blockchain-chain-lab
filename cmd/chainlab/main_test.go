@@ -1,11 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"chainlab/internal/crypto"
+	"chainlab/internal/node"
+	chainrpc "chainlab/internal/rpc"
+	"chainlab/internal/types"
 )
 
 func TestWriteAndReadGenesisFile(t *testing.T) {
@@ -88,5 +96,154 @@ func TestPeerListFlagAcceptsRepeatedPeers(t *testing.T) {
 	}
 	if got[0] != "http://127.0.0.1:18547" || got[1] != "http://127.0.0.1:18548" {
 		t.Fatalf("peers = %#v", got)
+	}
+}
+
+func TestBuildSignedTransferFetchesNonceFromRPC(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := crypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	tx, err := buildSignedTransfer(server.URL, crypto.PrivateKeyToHex(key), bob, 100, 21_000, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tx.From != alice {
+		t.Fatalf("from = %q", tx.From)
+	}
+	if tx.Nonce != 0 {
+		t.Fatalf("nonce = %d", tx.Nonce)
+	}
+	if tx.Signature == "" {
+		t.Fatal("transaction should be signed")
+	}
+	if !crypto.Verify(alice, tx.SigningBytes(), tx.Signature) {
+		t.Fatal("signature should verify")
+	}
+}
+
+func TestSubmitTransferCommandSendsSignedTx(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := crypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	var out bytes.Buffer
+	if err := transferCommand([]string{
+		"--rpc", server.URL,
+		"--private-key", crypto.PrivateKeyToHex(key),
+		"--to", bob,
+		"--value", "100",
+	}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var response struct {
+		Hash string `json:"hash"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Hash == "" {
+		t.Fatal("transfer command should print transaction hash")
+	}
+	block, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(block.Transactions) != 1 {
+		t.Fatalf("block transactions = %d", len(block.Transactions))
+	}
+	if got := n.Account(bob).Balance; got != 100 {
+		t.Fatalf("bob balance = %d", got)
+	}
+}
+
+func TestQueryAccountAndProduceCommands(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := crypto.AddressFromPrivateKey(key)
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	var accountOut bytes.Buffer
+	if err := accountCommand([]string{"--rpc", server.URL, "--address", alice}, &accountOut); err != nil {
+		t.Fatal(err)
+	}
+	var account types.Account
+	if err := json.Unmarshal(accountOut.Bytes(), &account); err != nil {
+		t.Fatal(err)
+	}
+	if account.Balance != 1_000_000 {
+		t.Fatalf("balance = %d", account.Balance)
+	}
+
+	var blockOut bytes.Buffer
+	if err := produceCommand([]string{"--rpc", server.URL}, &blockOut); err != nil {
+		t.Fatal(err)
+	}
+	var block types.Block
+	if err := json.Unmarshal(blockOut.Bytes(), &block); err != nil {
+		t.Fatal(err)
+	}
+	if block.Header.Height != 1 {
+		t.Fatalf("produced height = %d", block.Header.Height)
+	}
+}
+
+func TestRPCJSONCall(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if request["method"] != "eth_blockNumber" {
+			t.Fatalf("method = %v", request["method"])
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": request["id"], "result": "0x2"})
+	})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	var result string
+	if err := rpcCall(server.URL, "eth_blockNumber", []any{}, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result != "0x2" {
+		t.Fatalf("result = %q", result)
 	}
 }
