@@ -1330,7 +1330,7 @@ func callCommand(args []string, out io.Writer) error {
 	if err := rpcCall(*rpcURL, "eth_call", []any{request, "latest"}, &raw); err != nil {
 		return err
 	}
-	decoded, err := decodeDataHex(raw)
+	decoded, err := decodeDataHex(raw, *method)
 	if err != nil {
 		return err
 	}
@@ -1395,12 +1395,61 @@ func parseBatchTransferArgs(values []string) ([]types.BatchOperation, error) {
 	return batch, nil
 }
 
-func decodeDataHex(value string) (string, error) {
+func decodeDataHex(value string, method string) (string, error) {
 	raw, err := hex.DecodeString(strings.TrimPrefix(value, "0x"))
 	if err != nil {
 		return "", err
 	}
+	if decoded, ok, err := decodeABIString(raw); err != nil {
+		return "", err
+	} else if ok {
+		return decoded, nil
+	}
+	if len(raw) == 32 {
+		if method == "owner" {
+			return "0x" + hex.EncodeToString(raw[12:]), nil
+		}
+		if method == "get" || method == "balanceOf" || method == "threshold" {
+			if value, ok := abiWordUint64(raw); ok {
+				return strconv.FormatUint(value, 10), nil
+			}
+		}
+	}
 	return string(raw), nil
+}
+
+func decodeABIString(raw []byte) (string, bool, error) {
+	if len(raw) < 64 || len(raw)%32 != 0 {
+		return "", false, nil
+	}
+	offset, ok := abiWordUint64(raw[:32])
+	if !ok || offset != 32 {
+		return "", false, nil
+	}
+	length, ok := abiWordUint64(raw[32:64])
+	if !ok {
+		return "", false, nil
+	}
+	if length > uint64(len(raw)-64) {
+		return "", false, fmt.Errorf("ABI string length exceeds return data")
+	}
+	return string(raw[64 : 64+length]), true, nil
+}
+
+func abiWordUint64(word []byte) (uint64, bool) {
+	if len(word) != 32 {
+		return 0, false
+	}
+	for _, b := range word[:24] {
+		if b != 0 {
+			return 0, false
+		}
+	}
+	var value uint64
+	for _, b := range word[24:] {
+		value = value<<8 | uint64(b)
+	}
+	return value, true
 }
 
 func produceCommand(args []string, out io.Writer) error {

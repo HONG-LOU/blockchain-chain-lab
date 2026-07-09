@@ -104,7 +104,7 @@ Uploaded contract code:
 - Deploy can use either a built-in code id or an uploaded WASM code id.
 
 This gives the chain smart-contract behavior now, while leaving a clean slot for EVM, CosmWasm, or a richer WASM ABI later.
-Native contracts expose read-only methods through `eth_call` and CLI `query call`; return data is hex-encoded string data until a full ABI encoder exists.
+Native contracts expose read-only methods through `eth_call` and CLI `query call`; `eth_call` returns minimal ABI-shaped data for `uint256`, `address`, and dynamic `string` results, while Solidity calldata parsing and a full ABI registry remain later work.
 The first WASM path is intentionally constrained to the ChainLab host ABI, not CosmWasm compatibility or unrestricted system access.
 
 ### `internal/core`
@@ -202,7 +202,7 @@ Phase 2 progress:
 - JSON-RPC adds an EVM-compatible read subset: `eth_chainId`, `eth_blockNumber`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`, `eth_getLogs`, `eth_newFilter`, `eth_getFilterLogs`, `eth_getFilterChanges`, `eth_uninstallFilter`, `eth_call`, and `eth_estimateGas`.
 - Contract receipt events are projected from the node event index into EVM-style logs with block range, contract address, and topic filtering. `topic[0]` is the Keccak hash of the native event type string, not a full Solidity ABI signature.
 - RPC keeps an in-memory EVM-style log filter registry for polling incremental event changes. Filters are node-local and restart-volatile, matching the development-chain scope; a separate external indexer remains a later milestone.
-- `eth_call` supports native contract read methods such as `counter.get`, `token.balanceOf`, `token.symbol`, and `token.owner`; `eth_estimateGas` returns the deterministic gas schedule for supported transaction types.
+- `eth_call` supports native contract read methods such as `counter.get`, `token.balanceOf`, `token.symbol`, and `token.owner`, returning minimal ABI-shaped `uint256`, `address`, and dynamic `string` data while CLI `query call` decodes it back to a readable value; `eth_estimateGas` returns the deterministic gas schedule for supported transaction types.
 - Local devnet peers can relay submitted transactions, produce a block through `POST /chain/produce`, broadcast produced blocks, relay finality votes, and import peer blocks after replaying transactions and checking receipt root, state root, PoA signature, height, and parent hash.
 - Nodes now retain known imported branches and use a simple longest-branch fork-choice for the local devnet: equal-height side branches are stored without replacing the canonical head, and a longer validated branch triggers a canonical reorg by replaying from the persisted genesis state and rebuilding state plus transaction and event indexes. This is still not BFT finality.
 - CLI nodes accept repeated `--peer` URLs for HTTP peer sync.

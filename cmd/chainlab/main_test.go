@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"chainlab/internal/consensus"
@@ -1638,7 +1639,8 @@ func TestQueryCallAndEstimateGasCommands(t *testing.T) {
 	if err := json.Unmarshal(callOut.Bytes(), &callResult); err != nil {
 		t.Fatal(err)
 	}
-	if callResult.Result != "7" || callResult.Raw == "" {
+	wantRaw := "0x" + strings.Repeat("0", 63) + "7"
+	if callResult.Result != "7" || callResult.Raw != wantRaw {
 		t.Fatalf("call result = %+v", callResult)
 	}
 

@@ -1696,8 +1696,49 @@ func TestEthCallAndEstimateGas(t *testing.T) {
 			"method": "get",
 		},
 	}, "latest"})
-	if result != hexData("3") {
+	if result != abiUint256Hex(3) {
 		t.Fatalf("eth_call result = %v", result)
+	}
+
+	tokenDeploy := signedRPCTransaction(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxDeploy,
+		From:     alice,
+		Nonce:    2,
+		GasLimit: 80_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"code_id": "token.v1",
+			"symbol":  "LAB",
+		},
+	})
+	if err := n.SubmitTx(tokenDeploy); err != nil {
+		t.Fatal(err)
+	}
+	tokenBlock, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := tokenBlock.Receipts[0].ContractAddress
+	symbol := callRPC(t, server.URL, "eth_call", []any{map[string]any{
+		"from": alice,
+		"to":   token,
+		"payload": map[string]any{
+			"method": "symbol",
+		},
+	}, "latest"})
+	if symbol != abiStringHex("LAB") {
+		t.Fatalf("eth_call symbol result = %v", symbol)
+	}
+	owner := callRPC(t, server.URL, "eth_call", []any{map[string]any{
+		"from": alice,
+		"to":   token,
+		"payload": map[string]any{
+			"method": "owner",
+		},
+	}, "latest"})
+	if owner != abiAddressHex(alice) {
+		t.Fatalf("eth_call owner result = %v", owner)
 	}
 
 	estimateCall := callRPC(t, server.URL, "eth_estimateGas", []any{map[string]any{
@@ -1789,6 +1830,20 @@ func TestRPCBroadcastsTransactionsToPeers(t *testing.T) {
 
 func hexData(value string) string {
 	return "0x" + hex.EncodeToString([]byte(value))
+}
+
+func abiUint256Hex(value uint64) string {
+	return fmt.Sprintf("0x%064x", value)
+}
+
+func abiStringHex(value string) string {
+	raw := hex.EncodeToString([]byte(value))
+	padding := strings.Repeat("0", (64-len(raw)%64)%64)
+	return "0x" + fmt.Sprintf("%064x%064x", 32, len([]byte(value))) + raw + padding
+}
+
+func abiAddressHex(value string) string {
+	return "0x" + strings.Repeat("0", 24) + strings.ToLower(strings.TrimPrefix(value, "0x"))
 }
 
 func getHTML(t *testing.T, url string, expectedStatus int) string {

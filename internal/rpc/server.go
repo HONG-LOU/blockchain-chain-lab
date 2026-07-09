@@ -508,7 +508,7 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: dataHex(result)})
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: abiEncodeCallResult(call.method, result)})
 	case "eth_estimateGas":
 		params, err := rpcParams(request.Params)
 		if err != nil || len(params) < 1 {
@@ -913,8 +913,51 @@ func stringMap(value any) (map[string]string, error) {
 	return output, nil
 }
 
-func dataHex(value string) string {
-	return "0x" + hex.EncodeToString([]byte(value))
+func abiEncodeCallResult(method string, value string) string {
+	if isAddressReturn(method, value) {
+		return abiAddressHex(value)
+	}
+	if isUintReturn(method, value) {
+		parsed, _ := strconv.ParseUint(value, 10, 64)
+		return abiUint256Hex(parsed)
+	}
+	return abiStringHex(value)
+}
+
+func isUintReturn(method string, value string) bool {
+	switch method {
+	case "get", "balanceOf", "threshold":
+		_, err := strconv.ParseUint(value, 10, 64)
+		return err == nil
+	default:
+		return false
+	}
+}
+
+func isAddressReturn(method string, value string) bool {
+	return method == "owner" && isHexAddress(value)
+}
+
+func isHexAddress(value string) bool {
+	if len(value) != 42 || !strings.HasPrefix(value, "0x") {
+		return false
+	}
+	_, err := hex.DecodeString(value[2:])
+	return err == nil
+}
+
+func abiUint256Hex(value uint64) string {
+	return fmt.Sprintf("0x%064x", value)
+}
+
+func abiAddressHex(value string) string {
+	return "0x" + strings.Repeat("0", 24) + strings.ToLower(strings.TrimPrefix(value, "0x"))
+}
+
+func abiStringHex(value string) string {
+	raw := hex.EncodeToString([]byte(value))
+	padding := strings.Repeat("0", (64-len(raw)%64)%64)
+	return "0x" + fmt.Sprintf("%064x%064x", 32, len([]byte(value))) + raw + padding
 }
 
 func evmTransaction(record types.TransactionRecord) map[string]any {
