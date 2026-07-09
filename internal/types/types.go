@@ -16,6 +16,7 @@ const (
 	TxBatch           TxType = "batch"
 	TxDeploy          TxType = "deploy"
 	TxCall            TxType = "call"
+	TxSetCode         TxType = "set_code"
 	TxWASMUpload      TxType = "wasm.upload"
 	TxStake           TxType = "stake"
 	TxUnstake         TxType = "unstake"

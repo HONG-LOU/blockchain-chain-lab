@@ -234,6 +234,12 @@ func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, 
 			"evidence": evidence,
 			"removed":  removed,
 		}})
+	case types.TxSetCode:
+		eventType, attributes, err := executeSetCode(working, tx)
+		if err != nil {
+			return types.Receipt{}, err
+		}
+		receipt.Events = append(receipt.Events, types.Event{Type: eventType, Attributes: attributes})
 	case types.TxWASMUpload:
 		bytecode, err := parseWASMUploadPayload(tx.Payload)
 		if err != nil {
@@ -372,6 +378,15 @@ func tagBatchEvents(events []types.Event, index int) {
 }
 
 func validateTransactionAuthorization(store *state.Store, tx types.Transaction) error {
+	if tx.Type == types.TxSetCode {
+		if strings.TrimSpace(tx.Signer) != "" || len(tx.Authorizations) > 0 || tx.SignatureKind != "" {
+			return errors.New("set_code must be signed directly by from")
+		}
+		if !chaincrypto.Verify(tx.From, tx.SigningBytes(), tx.Signature) {
+			return errors.New("invalid transaction signature")
+		}
+		return nil
+	}
 	if tx.SignatureKind == types.SignatureKindEthereumType2 {
 		return validateEthereumType2Authorization(tx)
 	}
@@ -389,6 +404,16 @@ func validateTransactionAuthorization(store *state.Store, tx types.Transaction) 
 		return errors.New("invalid transaction signature")
 	}
 	account := store.GetAccount(tx.From)
+	if account.CodeID == "" && account.DelegatedCodeID == contracts.AccountCodeID {
+		owner := strings.ToLower(strings.TrimSpace(store.GetStorage(tx.From, "owner")))
+		if owner == "" {
+			return errors.New("delegated account owner is not set")
+		}
+		if signer != owner {
+			return errors.New("transaction signer is not delegated account owner")
+		}
+		return nil
+	}
 	if account.CodeID != contracts.AccountCodeID {
 		return errors.New("transaction signer requires account.v1 from account")
 	}
@@ -566,6 +591,8 @@ func EstimateGas(txType types.TxType) (uint64, error) {
 		return 40_000, nil
 	case types.TxValidatorSlash:
 		return 45_000, nil
+	case types.TxSetCode:
+		return 45_000, nil
 	case types.TxWASMUpload:
 		return 120_000, nil
 	case types.TxDeploy:
@@ -708,6 +735,31 @@ func parseWASMUploadPayload(payload map[string]string) ([]byte, error) {
 		return nil, errors.New("wasm bytecode is required")
 	}
 	return bytecode, nil
+}
+
+func executeSetCode(store *state.Store, tx types.Transaction) (string, map[string]string, error) {
+	account := store.GetAccount(tx.From)
+	if strings.TrimSpace(account.CodeID) != "" {
+		return "", nil, errors.New("set_code cannot target a contract account")
+	}
+	codeID := strings.TrimSpace(tx.Payload["code_id"])
+	attributes := map[string]string{"account": strings.ToLower(tx.From)}
+	if codeID == "" {
+		store.ClearDelegation(tx.From)
+		return "account.delegation_cleared", attributes, nil
+	}
+	if codeID != contracts.AccountCodeID {
+		return "", nil, fmt.Errorf("unsupported delegated code id %q", codeID)
+	}
+	owner := strings.ToLower(strings.TrimSpace(tx.Payload["owner"]))
+	if owner == "" {
+		return "", nil, errors.New("set_code account.v1 requires owner")
+	}
+	store.SetDelegatedCodeID(tx.From, codeID)
+	store.SetStorage(tx.From, "owner", owner)
+	attributes["code_id"] = codeID
+	attributes["owner"] = owner
+	return "account.delegation_set", attributes, nil
 }
 
 func parseSlashPayload(payload map[string]string) (string, uint64, string, error) {

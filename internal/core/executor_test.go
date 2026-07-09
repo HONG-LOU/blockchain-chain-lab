@@ -498,6 +498,149 @@ func TestSmartAccountTransferUsesOwnerSignatureAndContractNonce(t *testing.T) {
 	}
 }
 
+func TestSetCodeDelegatesEOAToAccountOwnerAndOwnerCanTransfer(t *testing.T) {
+	eoaKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	eoa := chaincrypto.AddressFromPrivateKey(eoaKey)
+	owner := chaincrypto.AddressFromPrivateKey(ownerKey)
+	receiver := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	store := state.NewStore()
+	store.SetBalance(eoa, 100_000)
+	executor := core.NewExecutor("chainlab-local", "0xfee0000000000000000000000000000000000000", contracts.NewRuntimeWithDefaults())
+
+	setCode := signedTx(t, eoaKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxSetCode,
+		From:     eoa,
+		Nonce:    0,
+		GasLimit: 45_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"code_id": contracts.AccountCodeID,
+			"owner":   owner,
+		},
+	})
+	receipt, err := executor.Execute(store, setCode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.GetAccount(eoa).DelegatedCodeID != contracts.AccountCodeID {
+		t.Fatalf("delegation = %+v", store.GetAccount(eoa))
+	}
+	if store.GetStorage(eoa, "owner") != owner {
+		t.Fatalf("owner = %q", store.GetStorage(eoa, "owner"))
+	}
+	if len(receipt.Events) == 0 || receipt.Events[0].Type != "account.delegation_set" {
+		t.Fatalf("set-code events = %#v", receipt.Events)
+	}
+
+	transfer := signedTx(t, ownerKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     eoa,
+		Signer:   owner,
+		To:       receiver,
+		Nonce:    1,
+		Value:    100,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+	transferReceipt, err := executor.Execute(store, transfer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !transferReceipt.Success {
+		t.Fatalf("transfer receipt = %+v", transferReceipt)
+	}
+	if got := store.GetAccount(eoa).Nonce; got != 2 {
+		t.Fatalf("eoa nonce = %d", got)
+	}
+	if got := store.GetAccount(receiver).Balance; got != 100 {
+		t.Fatalf("receiver balance = %d", got)
+	}
+	if got := store.GetAccount(owner).Nonce; got != 0 {
+		t.Fatalf("owner nonce = %d", got)
+	}
+}
+
+func TestDelegatedEOARejectsUnauthorizedSignerAndClearDisablesDelegation(t *testing.T) {
+	eoaKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	intruderKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	eoa := chaincrypto.AddressFromPrivateKey(eoaKey)
+	owner := chaincrypto.AddressFromPrivateKey(ownerKey)
+	intruder := chaincrypto.AddressFromPrivateKey(intruderKey)
+	store := state.NewStore()
+	store.SetBalance(eoa, 200_000)
+	store.SetDelegatedCodeID(eoa, contracts.AccountCodeID)
+	store.SetStorage(eoa, "owner", owner)
+	executor := core.NewExecutor("chainlab-local", "0xfee0000000000000000000000000000000000000", contracts.NewRuntimeWithDefaults())
+
+	unauthorized := signedTx(t, intruderKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     eoa,
+		Signer:   intruder,
+		To:       "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Nonce:    0,
+		Value:    10,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+	if _, err := executor.Execute(store, unauthorized); err == nil {
+		t.Fatal("unauthorized delegated signer should fail")
+	}
+	if got := store.GetAccount(eoa).Nonce; got != 0 {
+		t.Fatalf("nonce after unauthorized tx = %d", got)
+	}
+
+	clear := signedTx(t, eoaKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxSetCode,
+		From:     eoa,
+		Nonce:    0,
+		GasLimit: 45_000,
+		GasPrice: 1,
+		Payload:  map[string]string{"code_id": ""},
+	})
+	if _, err := executor.Execute(store, clear); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.GetAccount(eoa).DelegatedCodeID; got != "" {
+		t.Fatalf("delegation after clear = %q", got)
+	}
+
+	afterClear := signedTx(t, ownerKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     eoa,
+		Signer:   owner,
+		To:       "0xcccccccccccccccccccccccccccccccccccccccc",
+		Nonce:    1,
+		Value:    10,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+	if _, err := executor.Execute(store, afterClear); err == nil {
+		t.Fatal("owner signer should fail after delegation is cleared")
+	}
+}
+
 func TestSmartAccountRejectsUnauthorizedSigner(t *testing.T) {
 	ownerKey, err := chaincrypto.GenerateKey()
 	if err != nil {
