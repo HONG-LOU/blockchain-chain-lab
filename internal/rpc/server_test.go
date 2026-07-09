@@ -187,6 +187,66 @@ func TestEVMCompatibleJSONRPCSubset(t *testing.T) {
 	}
 }
 
+func TestJSONRPCBatchRequestsPreserveOrder(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	body, err := json.Marshal([]map[string]any{
+		{"jsonrpc": "2.0", "id": 1, "method": "eth_chainId", "params": []any{}},
+		{"jsonrpc": "2.0", "id": "head", "method": "eth_blockNumber", "params": []any{}},
+		{"jsonrpc": "2.0", "id": 3, "method": "eth_getBalance", "params": []any{alice, "latest"}},
+		{"jsonrpc": "2.0", "id": 99, "method": "eth_missing", "params": []any{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post(server.URL+"/rpc", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("batch status = %d", resp.StatusCode)
+	}
+
+	var batch []struct {
+		ID     any    `json:"id"`
+		Result any    `json:"result"`
+		Error  string `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&batch); err != nil {
+		t.Fatal(err)
+	}
+	if len(batch) != 4 {
+		t.Fatalf("batch length = %d", len(batch))
+	}
+	if batch[0].ID != float64(1) || batch[0].Result != "0x7a69" || batch[0].Error != "" {
+		t.Fatalf("first batch response = %#v", batch[0])
+	}
+	if batch[1].ID != "head" || batch[1].Result != "0x0" || batch[1].Error != "" {
+		t.Fatalf("second batch response = %#v", batch[1])
+	}
+	if batch[2].ID != float64(3) || batch[2].Result != "0xf4240" || batch[2].Error != "" {
+		t.Fatalf("third batch response = %#v", batch[2])
+	}
+	if batch[3].ID != float64(99) || batch[3].Result != nil || batch[3].Error != "unknown method" {
+		t.Fatalf("fourth batch response = %#v", batch[3])
+	}
+}
+
 func TestEVMBlockHashAndIndexedTransactionReads(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {

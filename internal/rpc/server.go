@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strconv"
@@ -302,11 +303,80 @@ type rpcResponse struct {
 }
 
 func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
-	var request rpcRequest
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
 		writeJSON(w, http.StatusBadRequest, rpcResponse{Error: "invalid json"})
 		return
 	}
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		writeJSON(w, http.StatusBadRequest, rpcResponse{Error: "invalid json"})
+		return
+	}
+	if raw[0] == '[' {
+		var requests []rpcRequest
+		if err := json.Unmarshal(raw, &requests); err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{Error: "invalid json"})
+			return
+		}
+		if len(requests) == 0 {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{Error: "batch must include at least one request"})
+			return
+		}
+		responses := make([]rpcResponse, 0, len(requests))
+		for _, request := range requests {
+			responses = append(responses, s.responseForJSONRPCBatchRequest(request))
+		}
+		writeJSON(w, http.StatusOK, responses)
+		return
+	}
+
+	var request rpcRequest
+	if err := json.Unmarshal(raw, &request); err != nil {
+		writeJSON(w, http.StatusBadRequest, rpcResponse{Error: "invalid json"})
+		return
+	}
+	s.handleSingleJSONRPC(w, request)
+}
+
+func (s *Server) responseForJSONRPCBatchRequest(request rpcRequest) rpcResponse {
+	recorder := newRPCResponseRecorder()
+	s.handleSingleJSONRPC(recorder, request)
+	var response rpcResponse
+	if err := json.Unmarshal(recorder.body.Bytes(), &response); err != nil {
+		return rpcResponse{ID: request.ID, Error: "invalid response"}
+	}
+	return response
+}
+
+type rpcResponseRecorder struct {
+	header http.Header
+	status int
+	body   bytes.Buffer
+}
+
+func newRPCResponseRecorder() *rpcResponseRecorder {
+	return &rpcResponseRecorder{header: make(http.Header)}
+}
+
+func (r *rpcResponseRecorder) Header() http.Header {
+	return r.header
+}
+
+func (r *rpcResponseRecorder) WriteHeader(status int) {
+	if r.status == 0 {
+		r.status = status
+	}
+}
+
+func (r *rpcResponseRecorder) Write(data []byte) (int, error) {
+	if r.status == 0 {
+		r.status = http.StatusOK
+	}
+	return r.body.Write(data)
+}
+
+func (s *Server) handleSingleJSONRPC(w http.ResponseWriter, request rpcRequest) {
 	n := s.node
 	switch request.Method {
 	case "eth_chainId":

@@ -138,7 +138,7 @@ Exposes HTTP endpoints:
 - `GET /proposal/{id}`
 - `GET /param/{key}`
 - `POST /tx`
-- `POST /rpc` for JSON-RPC-style calls
+- `POST /rpc` for JSON-RPC-style single calls and batch calls
 - EVM-style read calls include account, block, transaction, receipt, and log queries.
 
 ### `cmd/chainlab`
@@ -199,7 +199,7 @@ Phase 2 progress:
 - Committed transactions are indexed by hash with receipt, block hash, height, and index.
 - Receipt events are indexed from the canonical chain with block hash, height, transaction index, event index, EVM-style log index, address, topic0, and attributes. The node rebuilds this event index from persisted blocks on restart and after longer-branch reorg replay.
 - REST adds `GET /tx/{hash}`.
-- JSON-RPC adds an EVM-compatible read subset: `eth_chainId`, `eth_blockNumber`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getCode`, `eth_getStorageAt`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`, `eth_getBlockByHash`, `eth_getBlockTransactionCountByHash`, `eth_getBlockTransactionCountByNumber`, `eth_getTransactionByBlockHashAndIndex`, `eth_getTransactionByBlockNumberAndIndex`, `eth_feeHistory`, `eth_getLogs`, `eth_newFilter`, `eth_getFilterLogs`, `eth_getFilterChanges`, `eth_uninstallFilter`, `eth_call`, and `eth_estimateGas`.
+- JSON-RPC accepts either one request object or a batch array with ordered responses, and adds an EVM-compatible read subset: `eth_chainId`, `eth_blockNumber`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getCode`, `eth_getStorageAt`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`, `eth_getBlockByHash`, `eth_getBlockTransactionCountByHash`, `eth_getBlockTransactionCountByNumber`, `eth_getTransactionByBlockHashAndIndex`, `eth_getTransactionByBlockNumberAndIndex`, `eth_feeHistory`, `eth_getLogs`, `eth_newFilter`, `eth_getFilterLogs`, `eth_getFilterChanges`, `eth_uninstallFilter`, `eth_call`, and `eth_estimateGas`.
 - Contract receipt events are projected from the node event index into EVM-style logs with block range, contract address, and topic filtering. `topic[0]` is the Keccak hash of the native event type string, not a full Solidity ABI signature.
 - RPC keeps an in-memory EVM-style log filter registry for polling incremental event changes. Filters are node-local and restart-volatile, matching the development-chain scope; a separate external indexer remains a later milestone.
 - `eth_call` supports native contract read methods such as `counter.get`, `token.balanceOf`, `token.symbol`, and `token.owner`; callers can use ChainLab `payload` objects or limited Solidity-style calldata selectors for `get()`, `symbol()`, `owner()`, and `balanceOf(address)`. Results return minimal ABI-shaped `uint256`, `address`, and dynamic `string` data while CLI `query call` decodes it back to a readable value; `eth_estimateGas` returns the deterministic gas schedule for supported transaction types.
