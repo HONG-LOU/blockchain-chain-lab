@@ -24,7 +24,7 @@ It currently implements:
 - persistent node snapshots with committed blocks, state, transaction index, and a canonical event index rebuilt on restart or reorg
 - local fork-choice that stores known branches and reorgs to a longer validated branch
 - EVM-compatible JSON-RPC read subset: `eth_chainId`, `eth_blockNumber`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`, `eth_getLogs`, `eth_call`, `eth_estimateGas`
-- minimal ABI-encoded `eth_call` return data for native read methods, currently covering `uint256`, `address`, and dynamic `string` results
+- minimal ABI-compatible `eth_call` support for native read methods, including Solidity-style calldata selectors for `get()`, `symbol()`, `owner()`, and `balanceOf(address)`, plus ABI-shaped `uint256`, `address`, and dynamic `string` return data
 - EVM-style `safe` and `finalized` block tags for block and log reads
 - pending nonce calculation and txpool inspection for uncommitted transactions
 - ChainLab-native raw transaction envelope for offline signing and later broadcast
@@ -276,7 +276,7 @@ go run ./cmd/chainlab query estimate-gas --rpc http://127.0.0.1:8547 --type call
 - `POST /peer/block`
 - `POST /peer/finality-vote`
 - `POST /rpc` with methods `chain_head`, `chain_finality`, `chain_finalityEvidence`, `chain_sendFinalityVote`, `chain_feeMarket`, `chain_getAccount`, `chain_validators`, `chain_proposal`, `chain_param`, `chain_sendTx`, `chain_sendUserOperation`, and `chain_faucet`
-- `POST /rpc` with EVM-style methods `eth_chainId`, `eth_blockNumber`, `eth_gasPrice`, `eth_maxPriorityFeePerGas`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`, `eth_getLogs`, `eth_newFilter`, `eth_getFilterLogs`, `eth_getFilterChanges`, `eth_uninstallFilter`, `eth_call`, `eth_estimateGas`, and `eth_sendRawTransaction`. Block range tags support `earliest`, `latest`, `safe`, `finalized`, and hex quantities. `eth_getTransactionCount` also supports `pending` for mempool-aware nonce calculation. `eth_call` returns ABI-shaped data for ChainLab native read results, but ChainLab does not yet parse Solidity calldata or expose a full contract ABI registry.
+- `POST /rpc` with EVM-style methods `eth_chainId`, `eth_blockNumber`, `eth_gasPrice`, `eth_maxPriorityFeePerGas`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`, `eth_getLogs`, `eth_newFilter`, `eth_getFilterLogs`, `eth_getFilterChanges`, `eth_uninstallFilter`, `eth_call`, `eth_estimateGas`, and `eth_sendRawTransaction`. Block range tags support `earliest`, `latest`, `safe`, `finalized`, and hex quantities. `eth_getTransactionCount` also supports `pending` for mempool-aware nonce calculation. `eth_call` accepts ChainLab-native `payload` read calls or a limited Solidity-style `data` / `input` selector for `get()`, `symbol()`, `owner()`, and `balanceOf(address)`, and returns ABI-shaped data. ChainLab does not yet expose a full contract ABI registry or general calldata decoder.
 - `POST /rpc` with txpool-style methods `txpool_status` and `txpool_content`
 
 ## Roadmap

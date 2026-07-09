@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"chainlab/internal/core"
+	"chainlab/internal/hash"
 	"chainlab/internal/node"
 	"chainlab/internal/types"
 )
@@ -826,7 +827,82 @@ func parseCallObject(value any) (callObject, error) {
 		call.method = method
 		call.payload["method"] = method
 	}
+	if data, ok := callData(raw); ok {
+		payload, err := parseCallData(data)
+		if err != nil {
+			return callObject{}, err
+		}
+		call.payload = payload
+		call.method = payload["method"]
+		call.txType = types.TxCall
+	}
 	return call, nil
+}
+
+func callData(raw map[string]any) (string, bool) {
+	for _, field := range []string{"data", "input"} {
+		value, ok := raw[field].(string)
+		if !ok {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		if value == "" || value == "0x" {
+			continue
+		}
+		return value, true
+	}
+	return "", false
+}
+
+func parseCallData(value string) (map[string]string, error) {
+	raw := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(value)), "0x")
+	if len(raw) < 8 || len(raw)%2 != 0 {
+		return nil, fmt.Errorf("call data must include a 4-byte selector")
+	}
+	selector := raw[:8]
+	args := raw[8:]
+	switch selector {
+	case abiSelector("get()"):
+		if args != "" {
+			return nil, fmt.Errorf("get() call data must not include arguments")
+		}
+		return map[string]string{"method": "get"}, nil
+	case abiSelector("symbol()"):
+		if args != "" {
+			return nil, fmt.Errorf("symbol() call data must not include arguments")
+		}
+		return map[string]string{"method": "symbol"}, nil
+	case abiSelector("owner()"):
+		if args != "" {
+			return nil, fmt.Errorf("owner() call data must not include arguments")
+		}
+		return map[string]string{"method": "owner"}, nil
+	case abiSelector("balanceOf(address)"):
+		address, err := parseABIAddressArgument(args)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]string{"method": "balanceOf", "address": address}, nil
+	default:
+		return nil, fmt.Errorf("unsupported call data selector 0x%s", selector)
+	}
+}
+
+func abiSelector(signature string) string {
+	return hex.EncodeToString(hash.Keccak([]byte(signature))[:4])
+}
+
+func parseABIAddressArgument(args string) (string, error) {
+	if len(args) != 64 {
+		return "", fmt.Errorf("balanceOf(address) call data must include one address argument")
+	}
+	if _, err := hex.DecodeString(args); err != nil {
+		return "", fmt.Errorf("invalid ABI address argument")
+	}
+	if strings.Trim(args[:24], "0") != "" {
+		return "", fmt.Errorf("ABI address argument must be left padded")
+	}
+	return "0x" + args[24:], nil
 }
 
 func batchOperations(value any) ([]types.BatchOperation, error) {

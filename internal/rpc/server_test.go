@@ -1699,6 +1699,14 @@ func TestEthCallAndEstimateGas(t *testing.T) {
 	if result != abiUint256Hex(3) {
 		t.Fatalf("eth_call result = %v", result)
 	}
+	resultByCalldata := callRPC(t, server.URL, "eth_call", []any{map[string]any{
+		"from": alice,
+		"to":   counter,
+		"data": abiCallData("get()"),
+	}, "latest"})
+	if resultByCalldata != abiUint256Hex(3) {
+		t.Fatalf("eth_call calldata result = %v", resultByCalldata)
+	}
 
 	tokenDeploy := signedRPCTransaction(t, key, types.Transaction{
 		ChainID:  "chainlab-local",
@@ -1730,6 +1738,14 @@ func TestEthCallAndEstimateGas(t *testing.T) {
 	if symbol != abiStringHex("LAB") {
 		t.Fatalf("eth_call symbol result = %v", symbol)
 	}
+	symbolByCalldata := callRPC(t, server.URL, "eth_call", []any{map[string]any{
+		"from": alice,
+		"to":   token,
+		"data": abiCallData("symbol()"),
+	}, "latest"})
+	if symbolByCalldata != abiStringHex("LAB") {
+		t.Fatalf("eth_call calldata symbol result = %v", symbolByCalldata)
+	}
 	owner := callRPC(t, server.URL, "eth_call", []any{map[string]any{
 		"from": alice,
 		"to":   token,
@@ -1739,6 +1755,22 @@ func TestEthCallAndEstimateGas(t *testing.T) {
 	}, "latest"})
 	if owner != abiAddressHex(alice) {
 		t.Fatalf("eth_call owner result = %v", owner)
+	}
+	ownerByCalldata := callRPC(t, server.URL, "eth_call", []any{map[string]any{
+		"from": alice,
+		"to":   token,
+		"data": abiCallData("owner()"),
+	}, "latest"})
+	if ownerByCalldata != abiAddressHex(alice) {
+		t.Fatalf("eth_call calldata owner result = %v", ownerByCalldata)
+	}
+	balanceByCalldata := callRPC(t, server.URL, "eth_call", []any{map[string]any{
+		"from": alice,
+		"to":   token,
+		"data": abiCallData("balanceOf(address)", abiAddressArgument(alice)),
+	}, "latest"})
+	if balanceByCalldata != abiUint256Hex(0) {
+		t.Fatalf("eth_call calldata balance result = %v", balanceByCalldata)
 	}
 
 	estimateCall := callRPC(t, server.URL, "eth_estimateGas", []any{map[string]any{
@@ -1844,6 +1876,15 @@ func abiStringHex(value string) string {
 
 func abiAddressHex(value string) string {
 	return "0x" + strings.Repeat("0", 24) + strings.ToLower(strings.TrimPrefix(value, "0x"))
+}
+
+func abiCallData(signature string, args ...string) string {
+	selector := hash.Keccak([]byte(signature))[:4]
+	return "0x" + hex.EncodeToString(selector) + strings.Join(args, "")
+}
+
+func abiAddressArgument(value string) string {
+	return strings.Repeat("0", 24) + strings.ToLower(strings.TrimPrefix(value, "0x"))
 }
 
 func getHTML(t *testing.T, url string, expectedStatus int) string {
