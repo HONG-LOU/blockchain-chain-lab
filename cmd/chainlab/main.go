@@ -538,6 +538,8 @@ func sessionKeyCommand(args []string, out io.Writer) error {
 	limit := flags.Uint64("limit", 0, "session transfer value limit")
 	expires := flags.Uint64("expires", 0, "optional expiration block height")
 	to := flags.String("to", "", "optional allowed recipient address")
+	callTo := flags.String("call-to", "", "optional allowed contract call target")
+	callMethod := flags.String("call-method", "", "optional allowed contract call method")
 	revoke := flags.Bool("revoke", false, "revoke the session key")
 	gasLimit := flags.Uint64("gas-limit", 45_000, "gas limit")
 	gasPrice := flags.Uint64("gas-price", 1, "gas price")
@@ -556,16 +558,27 @@ func sessionKeyCommand(args []string, out io.Writer) error {
 	if *revoke {
 		payload["action"] = "revoke"
 	} else {
-		if *limit == 0 {
-			return fmt.Errorf("limit must be positive")
+		allowedCallTo := strings.TrimSpace(*callTo)
+		allowedCallMethod := strings.TrimSpace(*callMethod)
+		if (allowedCallTo == "") != (allowedCallMethod == "") {
+			return fmt.Errorf("call policy requires call-to and call-method")
+		}
+		if *limit == 0 && allowedCallTo == "" {
+			return fmt.Errorf("limit or call policy is required")
 		}
 		payload["action"] = "add"
-		payload["limit"] = strconv.FormatUint(*limit, 10)
+		if *limit != 0 {
+			payload["limit"] = strconv.FormatUint(*limit, 10)
+		}
 		if *expires != 0 {
 			payload["expires"] = strconv.FormatUint(*expires, 10)
 		}
 		if strings.TrimSpace(*to) != "" {
 			payload["to"] = *to
+		}
+		if allowedCallTo != "" {
+			payload["call_to"] = allowedCallTo
+			payload["call_method"] = allowedCallMethod
 		}
 	}
 	tx, err := buildSignedTransactionFromSpec(*rpcURL, *privateKeyHex, signedTransactionSpec{
@@ -901,6 +914,7 @@ func deployCommand(args []string, out io.Writer) error {
 func contractCallCommand(args []string, out io.Writer) error {
 	flags := flag.NewFlagSet("tx call", flag.ContinueOnError)
 	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
+	from := flags.String("from", "", "optional account address to call from; private key signs as owner or session key")
 	privateKeyHex := flags.String("private-key", "", "caller private key")
 	to := flags.String("to", "", "contract address")
 	method := flags.String("method", "", "contract write method")
@@ -922,7 +936,14 @@ func contractCallCommand(args []string, out io.Writer) error {
 		return err
 	}
 	payload["method"] = *method
-	tx, err := buildSignedTransaction(*rpcURL, *privateKeyHex, types.TxCall, *to, 0, *gasLimit, *gasPrice, payload)
+	tx, err := buildSignedTransactionFromSpec(*rpcURL, *privateKeyHex, signedTransactionSpec{
+		txType:       types.TxCall,
+		fromOverride: *from,
+		to:           *to,
+		gasLimit:     *gasLimit,
+		gasPrice:     *gasPrice,
+		payload:      payload,
+	})
 	if err != nil {
 		return err
 	}
