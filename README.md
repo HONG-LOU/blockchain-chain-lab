@@ -85,6 +85,13 @@ Submit a signed transfer through a running node:
 go run ./cmd/chainlab tx transfer --rpc http://127.0.0.1:8547 --private-key <hex-private-key> --to <address> --value 100
 ```
 
+Deploy and write-call a native contract:
+
+```powershell
+go run ./cmd/chainlab tx deploy --rpc http://127.0.0.1:8547 --private-key <hex-private-key> --code-id counter.v1 --arg initial=0
+go run ./cmd/chainlab tx call --rpc http://127.0.0.1:8547 --private-key <hex-private-key> --to <contract-address> --method increment --arg amount=1
+```
+
 Stake and join the validator set:
 
 ```powershell

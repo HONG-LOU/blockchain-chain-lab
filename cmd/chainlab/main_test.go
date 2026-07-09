@@ -326,6 +326,100 @@ func TestStakeAndValidatorJoinCommandsSendSignedTx(t *testing.T) {
 	}
 }
 
+func TestDeployAndContractCallCommandsSendSignedTx(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := crypto.AddressFromPrivateKey(key)
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	var deployOut bytes.Buffer
+	if err := deployCommand([]string{
+		"--rpc", server.URL,
+		"--private-key", crypto.PrivateKeyToHex(key),
+		"--code-id", "counter.v1",
+		"--arg", "initial=2",
+	}, &deployOut); err != nil {
+		t.Fatal(err)
+	}
+	var deployResponse struct {
+		Hash string `json:"hash"`
+	}
+	if err := json.Unmarshal(deployOut.Bytes(), &deployResponse); err != nil {
+		t.Fatal(err)
+	}
+	if deployResponse.Hash == "" {
+		t.Fatal("deploy command should print transaction hash")
+	}
+	deployBlock, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deployBlock.Transactions) != 1 || deployBlock.Transactions[0].Type != types.TxDeploy {
+		t.Fatalf("deploy block transactions = %#v", deployBlock.Transactions)
+	}
+	counter := deployBlock.Receipts[0].ContractAddress
+	if counter == "" {
+		t.Fatal("deploy receipt should include contract address")
+	}
+
+	var callOut bytes.Buffer
+	if err := contractCallCommand([]string{
+		"--rpc", server.URL,
+		"--private-key", crypto.PrivateKeyToHex(key),
+		"--to", counter,
+		"--method", "increment",
+		"--arg", "amount=5",
+	}, &callOut); err != nil {
+		t.Fatal(err)
+	}
+	var callResponse struct {
+		Hash string `json:"hash"`
+	}
+	if err := json.Unmarshal(callOut.Bytes(), &callResponse); err != nil {
+		t.Fatal(err)
+	}
+	if callResponse.Hash == "" {
+		t.Fatal("call command should print transaction hash")
+	}
+	callBlock, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(callBlock.Transactions) != 1 || callBlock.Transactions[0].Type != types.TxCall {
+		t.Fatalf("call block transactions = %#v", callBlock.Transactions)
+	}
+
+	var readOut bytes.Buffer
+	if err := callCommand([]string{
+		"--rpc", server.URL,
+		"--from", alice,
+		"--to", counter,
+		"--method", "get",
+	}, &readOut); err != nil {
+		t.Fatal(err)
+	}
+	var readResult struct {
+		Result string `json:"result"`
+	}
+	if err := json.Unmarshal(readOut.Bytes(), &readResult); err != nil {
+		t.Fatal(err)
+	}
+	if readResult.Result != "7" {
+		t.Fatalf("counter value = %q", readResult.Result)
+	}
+}
+
 func TestQueryAccountAndProduceCommands(t *testing.T) {
 	key, err := crypto.GenerateKey()
 	if err != nil {

@@ -214,11 +214,19 @@ func usage() {
 
 func txCommand(args []string, out io.Writer) {
 	if len(args) < 1 {
-		log.Fatal("usage: chainlab tx <transfer|stake|validator-join>")
+		log.Fatal("usage: chainlab tx <transfer|deploy|call|stake|validator-join>")
 	}
 	switch args[0] {
 	case "transfer":
 		if err := transferCommand(args[1:], out); err != nil {
+			log.Fatal(err)
+		}
+	case "deploy":
+		if err := deployCommand(args[1:], out); err != nil {
+			log.Fatal(err)
+		}
+	case "call":
+		if err := contractCallCommand(args[1:], out); err != nil {
 			log.Fatal(err)
 		}
 	case "stake":
@@ -327,6 +335,72 @@ func validatorJoinCommand(args []string, out io.Writer) error {
 		return err
 	}
 	tx, err := buildSignedTransaction(*rpcURL, *privateKeyHex, types.TxValidatorJoin, "", 0, *gasLimit, *gasPrice, nil)
+	if err != nil {
+		return err
+	}
+	response, err := submitTransaction(*rpcURL, tx)
+	if err != nil {
+		return err
+	}
+	return writeTo(out, response)
+}
+
+func deployCommand(args []string, out io.Writer) error {
+	flags := flag.NewFlagSet("tx deploy", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
+	privateKeyHex := flags.String("private-key", "", "deployer private key")
+	codeID := flags.String("code-id", "", "native contract code id")
+	gasLimit := flags.Uint64("gas-limit", 80_000, "gas limit")
+	gasPrice := flags.Uint64("gas-price", 1, "gas price")
+	var deployArgs stringListFlag
+	flags.Var(&deployArgs, "arg", "deployment argument key=value; can be repeated")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *codeID == "" {
+		return fmt.Errorf("code id is required")
+	}
+	payload, err := parseKeyValueArgs(deployArgs.Values())
+	if err != nil {
+		return err
+	}
+	payload["code_id"] = *codeID
+	tx, err := buildSignedTransaction(*rpcURL, *privateKeyHex, types.TxDeploy, "", 0, *gasLimit, *gasPrice, payload)
+	if err != nil {
+		return err
+	}
+	response, err := submitTransaction(*rpcURL, tx)
+	if err != nil {
+		return err
+	}
+	return writeTo(out, response)
+}
+
+func contractCallCommand(args []string, out io.Writer) error {
+	flags := flag.NewFlagSet("tx call", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
+	privateKeyHex := flags.String("private-key", "", "caller private key")
+	to := flags.String("to", "", "contract address")
+	method := flags.String("method", "", "contract write method")
+	gasLimit := flags.Uint64("gas-limit", 50_000, "gas limit")
+	gasPrice := flags.Uint64("gas-price", 1, "gas price")
+	var callArgs stringListFlag
+	flags.Var(&callArgs, "arg", "method argument key=value; can be repeated")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *to == "" {
+		return fmt.Errorf("contract address is required")
+	}
+	if *method == "" {
+		return fmt.Errorf("method is required")
+	}
+	payload, err := parseKeyValueArgs(callArgs.Values())
+	if err != nil {
+		return err
+	}
+	payload["method"] = *method
+	tx, err := buildSignedTransaction(*rpcURL, *privateKeyHex, types.TxCall, *to, 0, *gasLimit, *gasPrice, payload)
 	if err != nil {
 		return err
 	}
