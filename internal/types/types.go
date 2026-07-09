@@ -13,6 +13,7 @@ type TxType string
 
 const (
 	TxTransfer        TxType = "transfer"
+	TxBatch           TxType = "batch"
 	TxDeploy          TxType = "deploy"
 	TxCall            TxType = "call"
 	TxWASMUpload      TxType = "wasm.upload"
@@ -47,8 +48,16 @@ type Transaction struct {
 	MaxPriorityFeePerGas uint64            `json:"max_priority_fee_per_gas,omitempty"`
 	Paymaster            string            `json:"paymaster,omitempty"`
 	Payload              map[string]string `json:"payload,omitempty"`
+	Batch                []BatchOperation  `json:"batch,omitempty"`
 	Signature            string            `json:"signature,omitempty"`
 	PaymasterSignature   string            `json:"paymaster_signature,omitempty"`
+}
+
+type BatchOperation struct {
+	Type    TxType            `json:"type"`
+	To      string            `json:"to,omitempty"`
+	Value   uint64            `json:"value,omitempty"`
+	Payload map[string]string `json:"payload,omitempty"`
 }
 
 func (tx Transaction) SigningBytes() []byte {

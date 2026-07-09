@@ -15,6 +15,8 @@ type Summary struct {
 	TransferReceiverBalance  uint64
 	SponsoredReceiverBalance uint64
 	SponsoredUserBalance     uint64
+	BatchReceiverBalance     uint64
+	BatchCounterValue        string
 	CounterValue             string
 	TokenReceiverBalance     string
 	WASMValue                string
@@ -36,6 +38,7 @@ func RunDemo() (Summary, error) {
 	sponsoredUser := crypto.AddressFromPrivateKey(sponsoredKey)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	sponsoredReceiver := "0xdddddddddddddddddddddddddddddddddddddddd"
+	batchReceiver := "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 	n, err := node.New(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
@@ -278,11 +281,52 @@ func RunDemo() (Summary, error) {
 		return Summary{}, err
 	}
 
+	batchCounterBlock, err := submitAndProduce(n, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxDeploy,
+		From:     alice,
+		Nonce:    13,
+		GasLimit: 80_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"code_id": "counter.v1",
+			"initial": "0",
+		},
+	})
+	if err != nil {
+		return Summary{}, err
+	}
+	batchCounter := batchCounterBlock.Receipts[0].ContractAddress
+
+	if _, err := submitAndProduce(n, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxBatch,
+		From:     alice,
+		Nonce:    14,
+		GasLimit: 113_000,
+		GasPrice: 1,
+		Batch: []types.BatchOperation{
+			{
+				Type: types.TxCall,
+				To:   batchCounter,
+				Payload: map[string]string{
+					"method": "increment",
+					"amount": "2",
+				},
+			},
+			{Type: types.TxTransfer, To: batchReceiver, Value: 7},
+		},
+	}); err != nil {
+		return Summary{}, err
+	}
+
 	return Summary{
 		Height:                   n.Head().Header.Height,
 		TransferReceiverBalance:  n.Account(bob).Balance,
 		SponsoredReceiverBalance: n.Account(sponsoredReceiver).Balance,
 		SponsoredUserBalance:     n.Account(sponsoredUser).Balance,
+		BatchReceiverBalance:     n.Account(batchReceiver).Balance,
+		BatchCounterValue:        n.Account(batchCounter).Storage["count"],
 		CounterValue:             n.Account(counter).Storage["count"],
 		TokenReceiverBalance:     n.Account(token).Storage["balance:"+bob],
 		WASMValue:                wasmValue,

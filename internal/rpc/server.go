@@ -428,7 +428,12 @@ func handleJSONRPC(w http.ResponseWriter, r *http.Request, n *node.Node) {
 			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
 			return
 		}
-		gas, err := core.EstimateGasForPayload(call.txType, call.payload)
+		var gas uint64
+		if call.txType == types.TxBatch {
+			gas, err = core.EstimateGasForBatch(call.batch)
+		} else {
+			gas, err = core.EstimateGasForPayload(call.txType, call.payload)
+		}
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
 			return
@@ -660,6 +665,7 @@ type callObject struct {
 	txType  types.TxType
 	method  string
 	payload map[string]string
+	batch   []types.BatchOperation
 }
 
 func parseCallObject(value any) (callObject, error) {
@@ -679,6 +685,14 @@ func parseCallObject(value any) (callObject, error) {
 	} else if call.to == "" {
 		call.txType = types.TxTransfer
 	}
+	if batchRaw, ok := raw["batch"]; ok {
+		batch, err := batchOperations(batchRaw)
+		if err != nil {
+			return callObject{}, err
+		}
+		call.batch = batch
+		call.txType = types.TxBatch
+	}
 	if payloadRaw, ok := raw["payload"]; ok {
 		payload, err := stringMap(payloadRaw)
 		if err != nil {
@@ -692,6 +706,71 @@ func parseCallObject(value any) (callObject, error) {
 		call.payload["method"] = method
 	}
 	return call, nil
+}
+
+func batchOperations(value any) ([]types.BatchOperation, error) {
+	raw, ok := value.([]any)
+	if !ok {
+		return nil, fmt.Errorf("batch must be an array")
+	}
+	operations := make([]types.BatchOperation, 0, len(raw))
+	for index, item := range raw {
+		object, ok := item.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("batch operation %d must be an object", index)
+		}
+		operation := types.BatchOperation{}
+		if txType, ok := object["type"].(string); ok && strings.TrimSpace(txType) != "" {
+			operation.Type = types.TxType(txType)
+		} else {
+			return nil, fmt.Errorf("batch operation %d type is required", index)
+		}
+		if to, ok := object["to"].(string); ok {
+			operation.To = to
+		}
+		if value, ok := object["value"]; ok {
+			parsed, err := uint64RPCValue(value, "value")
+			if err != nil {
+				return nil, fmt.Errorf("batch operation %d: %w", index, err)
+			}
+			operation.Value = parsed
+		}
+		if payloadRaw, ok := object["payload"]; ok {
+			payload, err := stringMap(payloadRaw)
+			if err != nil {
+				return nil, fmt.Errorf("batch operation %d: %w", index, err)
+			}
+			operation.Payload = payload
+		}
+		operations = append(operations, operation)
+	}
+	return operations, nil
+}
+
+func uint64RPCValue(value any, field string) (uint64, error) {
+	switch typed := value.(type) {
+	case string:
+		raw := strings.TrimSpace(typed)
+		if strings.HasPrefix(raw, "0x") {
+			parsed, err := strconv.ParseUint(strings.TrimPrefix(raw, "0x"), 16, 64)
+			if err != nil {
+				return 0, fmt.Errorf("%s must be a uint64 quantity", field)
+			}
+			return parsed, nil
+		}
+		parsed, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("%s must be a uint64 quantity", field)
+		}
+		return parsed, nil
+	case float64:
+		if typed < 0 || typed != float64(uint64(typed)) {
+			return 0, fmt.Errorf("%s must be a uint64 quantity", field)
+		}
+		return uint64(typed), nil
+	default:
+		return 0, fmt.Errorf("%s must be a uint64 quantity", field)
+	}
 }
 
 func stringMap(value any) (map[string]string, error) {
@@ -732,6 +811,8 @@ func evmTransaction(record types.TransactionRecord) map[string]any {
 		"gasPrice":             quantity(tx.GasPrice),
 		"maxFeePerGas":         quantity(tx.MaxFeePerGas),
 		"maxPriorityFeePerGas": quantity(tx.MaxPriorityFeePerGas),
+		"chainType":            string(tx.Type),
+		"batchOperationCount":  quantity(uint64(len(tx.Batch))),
 		"paymaster":            nullableAddress(tx.Paymaster),
 		"input":                "0x",
 		"type":                 "0x0",
@@ -752,6 +833,8 @@ func evmPendingTransaction(tx types.Transaction) map[string]any {
 		"gasPrice":             quantity(tx.GasPrice),
 		"maxFeePerGas":         quantity(tx.MaxFeePerGas),
 		"maxPriorityFeePerGas": quantity(tx.MaxPriorityFeePerGas),
+		"chainType":            string(tx.Type),
+		"batchOperationCount":  quantity(uint64(len(tx.Batch))),
 		"paymaster":            nullableAddress(tx.Paymaster),
 		"input":                "0x",
 		"type":                 "0x0",
@@ -814,6 +897,8 @@ func evmBlock(block types.Block, fullTransactions bool) map[string]any {
 				"gasPrice":             quantity(tx.GasPrice),
 				"maxFeePerGas":         quantity(tx.MaxFeePerGas),
 				"maxPriorityFeePerGas": quantity(tx.MaxPriorityFeePerGas),
+				"chainType":            string(tx.Type),
+				"batchOperationCount":  quantity(uint64(len(tx.Batch))),
 				"paymaster":            nullableAddress(tx.Paymaster),
 				"input":                "0x",
 				"type":                 "0x0",

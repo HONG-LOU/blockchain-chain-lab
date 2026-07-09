@@ -365,6 +365,69 @@ func TestTransferCommandSupportsPaymasterSponsoredFees(t *testing.T) {
 	}
 }
 
+func TestBatchTransferCommandSendsSignedBatchTx(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := crypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	var out bytes.Buffer
+	if err := batchTransferCommand([]string{
+		"--rpc", server.URL,
+		"--private-key", crypto.PrivateKeyToHex(key),
+		"--to", bob + ":10",
+		"--to", carol + ":20",
+	}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var response struct {
+		Hash string `json:"hash"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Hash == "" {
+		t.Fatal("batch transfer command should print transaction hash")
+	}
+	pool := n.TxPool()
+	if pool.PendingCount != 1 {
+		t.Fatalf("txpool = %+v", pool)
+	}
+	tx := pool.Pending[0]
+	if tx.Type != types.TxBatch || len(tx.Batch) != 2 || tx.GasLimit != 84_000 {
+		t.Fatalf("batch tx = %+v", tx)
+	}
+	if !crypto.Verify(alice, tx.SigningBytes(), tx.Signature) {
+		t.Fatal("batch transaction signature should verify")
+	}
+	block, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(block.Transactions) != 1 || block.Transactions[0].Type != types.TxBatch {
+		t.Fatalf("block transactions = %#v", block.Transactions)
+	}
+	if got := n.Account(bob).Balance; got != 10 {
+		t.Fatalf("bob balance = %d", got)
+	}
+	if got := n.Account(carol).Balance; got != 20 {
+		t.Fatalf("carol balance = %d", got)
+	}
+}
+
 func TestTransferCommandUsesPendingNonceAndQueryMempool(t *testing.T) {
 	key, err := crypto.GenerateKey()
 	if err != nil {

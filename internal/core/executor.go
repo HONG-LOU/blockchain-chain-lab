@@ -79,6 +79,24 @@ func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, 
 			return types.Receipt{}, err
 		}
 		receipt.Events = append(receipt.Events, types.Event{Type: "transfer", Attributes: map[string]string{"from": tx.From, "to": tx.To}})
+	case types.TxBatch:
+		if len(tx.Batch) == 0 {
+			return types.Receipt{}, errors.New("batch requires at least one operation")
+		}
+		receipt.Events = append(receipt.Events, types.Event{Type: "batch.executed", Attributes: map[string]string{
+			"operations": strconv.Itoa(len(tx.Batch)),
+		}})
+		for index, operation := range tx.Batch {
+			events, operationGas, err := e.executeBatchOperation(working, tx, operation, index)
+			if err != nil {
+				return types.Receipt{}, err
+			}
+			gasUsed, err = checkedAdd(gasUsed, operationGas)
+			if err != nil {
+				return types.Receipt{}, err
+			}
+			receipt.Events = append(receipt.Events, events...)
+		}
 	case types.TxStake:
 		if tx.Value == 0 {
 			return types.Receipt{}, errors.New("stake value must be positive")
@@ -299,6 +317,60 @@ func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, 
 	return receipt, nil
 }
 
+func (e *Executor) executeBatchOperation(store *state.Store, tx types.Transaction, operation types.BatchOperation, index int) ([]types.Event, uint64, error) {
+	switch operation.Type {
+	case types.TxTransfer:
+		if strings.TrimSpace(operation.To) == "" {
+			return nil, 0, fmt.Errorf("batch operation %d transfer requires to", index)
+		}
+		if err := store.Transfer(tx.From, operation.To, operation.Value); err != nil {
+			return nil, 0, err
+		}
+		gas, err := EstimateGas(types.TxTransfer)
+		if err != nil {
+			return nil, 0, err
+		}
+		return []types.Event{{
+			Type: "transfer",
+			Attributes: map[string]string{
+				"from":     tx.From,
+				"to":       operation.To,
+				"op_index": strconv.Itoa(index),
+			},
+		}}, gas, nil
+	case types.TxCall:
+		method := operation.Payload["method"]
+		if strings.TrimSpace(operation.To) == "" || strings.TrimSpace(method) == "" {
+			return nil, 0, fmt.Errorf("batch operation %d call requires to and method", index)
+		}
+		events, resourceGas, err := e.runtime.CallMetered(store, operation.To, tx.From, method, operation.Payload)
+		if err != nil {
+			return nil, 0, err
+		}
+		gas, err := EstimateGas(types.TxCall)
+		if err != nil {
+			return nil, 0, err
+		}
+		gas, err = checkedAdd(gas, resourceGas)
+		if err != nil {
+			return nil, 0, err
+		}
+		tagBatchEvents(events, index)
+		return events, gas, nil
+	default:
+		return nil, 0, fmt.Errorf("unsupported batch operation type %q", operation.Type)
+	}
+}
+
+func tagBatchEvents(events []types.Event, index int) {
+	for i := range events {
+		if events[i].Attributes == nil {
+			events[i].Attributes = make(map[string]string)
+		}
+		events[i].Attributes["op_index"] = strconv.Itoa(index)
+	}
+}
+
 func validatePaymasterAuthorization(tx types.Transaction) error {
 	if strings.TrimSpace(tx.Paymaster) == "" {
 		return nil
@@ -380,6 +452,8 @@ func EstimateGas(txType types.TxType) (uint64, error) {
 	switch txType {
 	case types.TxTransfer:
 		return 21_000, nil
+	case types.TxBatch:
+		return 42_000, nil
 	case types.TxStake, types.TxUnstake:
 		return 30_000, nil
 	case types.TxVote:
@@ -398,6 +472,36 @@ func EstimateGas(txType types.TxType) (uint64, error) {
 		return 50_000, nil
 	default:
 		return 0, fmt.Errorf("unsupported transaction type %q", txType)
+	}
+}
+
+func EstimateGasForBatch(batch []types.BatchOperation) (uint64, error) {
+	if len(batch) == 0 {
+		return 0, errors.New("batch requires at least one operation")
+	}
+	total, err := EstimateGas(types.TxBatch)
+	if err != nil {
+		return 0, err
+	}
+	for _, operation := range batch {
+		operationGas, err := EstimateGasForBatchOperation(operation)
+		if err != nil {
+			return 0, err
+		}
+		total, err = checkedAdd(total, operationGas)
+		if err != nil {
+			return 0, err
+		}
+	}
+	return total, nil
+}
+
+func EstimateGasForBatchOperation(operation types.BatchOperation) (uint64, error) {
+	switch operation.Type {
+	case types.TxTransfer, types.TxCall:
+		return EstimateGas(operation.Type)
+	default:
+		return 0, fmt.Errorf("unsupported batch operation type %q", operation.Type)
 	}
 }
 

@@ -41,4 +41,10 @@ func TestRunDemo(t *testing.T) {
 	if summary.SponsoredUserBalance != 0 {
 		t.Fatalf("sponsored user balance = %d", summary.SponsoredUserBalance)
 	}
+	if summary.BatchReceiverBalance != 7 {
+		t.Fatalf("batch receiver balance = %d", summary.BatchReceiverBalance)
+	}
+	if summary.BatchCounterValue != "2" {
+		t.Fatalf("batch counter value = %q", summary.BatchCounterValue)
+	}
 }

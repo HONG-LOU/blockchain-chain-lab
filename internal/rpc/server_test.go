@@ -305,6 +305,85 @@ func TestRPCSubmitsSponsoredUserOperation(t *testing.T) {
 	}
 }
 
+func TestRPCSubmitsSponsoredBatchUserOperationAndEstimatesGas(t *testing.T) {
+	userKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	paymasterKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	user := chaincrypto.AddressFromPrivateKey(userKey)
+	paymaster := chaincrypto.AddressFromPrivateKey(paymasterKey)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
+	n, err := node.New(node.Config{
+		ChainID:     "chainlab-local",
+		ProposerKey: paymasterKey,
+		GenesisBalance: map[string]uint64{
+			user:      30,
+			paymaster: 500_000,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	estimate := callRPC(t, server.URL, "eth_estimateGas", []any{map[string]any{
+		"type": "batch",
+		"batch": []any{
+			map[string]any{"type": "transfer", "to": bob, "value": "0xa"},
+			map[string]any{"type": "transfer", "to": carol, "value": "0x14"},
+		},
+	}})
+	if estimate != "0x14820" {
+		t.Fatalf("batch gas estimate = %v", estimate)
+	}
+
+	tx := sponsoredRPCTransaction(t, userKey, paymasterKey, types.Transaction{
+		ChainID:   "chainlab-local",
+		Type:      types.TxBatch,
+		From:      user,
+		Nonce:     0,
+		GasLimit:  84_000,
+		GasPrice:  2,
+		Paymaster: paymaster,
+		Batch: []types.BatchOperation{
+			{Type: types.TxTransfer, To: bob, Value: 10},
+			{Type: types.TxTransfer, To: carol, Value: 20},
+		},
+	})
+	result := callRPC(t, server.URL, "chain_sendUserOperation", []any{tx})
+	resultMap, ok := result.(map[string]any)
+	if !ok || resultMap["hash"] != tx.Hash() {
+		t.Fatalf("send batch user operation result = %#v", result)
+	}
+	pool := n.TxPool()
+	if pool.PendingCount != 1 || pool.Pending[0].Type != types.TxBatch || len(pool.Pending[0].Batch) != 2 {
+		t.Fatalf("txpool = %+v", pool)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+	receiptResult := callRPC(t, server.URL, "eth_getTransactionReceipt", []any{tx.Hash()})
+	receiptMap, ok := receiptResult.(map[string]any)
+	if !ok || receiptMap["feePayer"] != paymaster || receiptMap["gasUsed"] != "0x14820" {
+		t.Fatalf("receipt = %#v", receiptResult)
+	}
+	if got := n.Account(user).Balance; got != 0 {
+		t.Fatalf("user balance = %d", got)
+	}
+	if got := n.Account(bob).Balance; got != 10 {
+		t.Fatalf("bob balance = %d", got)
+	}
+	if got := n.Account(carol).Balance; got != 20 {
+		t.Fatalf("carol balance = %d", got)
+	}
+}
+
 func TestRPCExposesValidatorSet(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {

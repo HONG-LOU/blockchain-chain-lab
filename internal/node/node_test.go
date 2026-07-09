@@ -193,6 +193,64 @@ func TestNodeSponsoredTransferUsesPaymasterInBlock(t *testing.T) {
 	}
 }
 
+func TestNodeBatchTransactionProducesSingleIndexedReceipt(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tx := signedNodeTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxBatch,
+		From:     alice,
+		Nonce:    0,
+		GasLimit: 84_000,
+		GasPrice: 1,
+		Batch: []types.BatchOperation{
+			{Type: types.TxTransfer, To: bob, Value: 10},
+			{Type: types.TxTransfer, To: carol, Value: 20},
+		},
+	})
+	if err := n.SubmitTx(tx); err != nil {
+		t.Fatal(err)
+	}
+	block, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(block.Transactions) != 1 || block.Transactions[0].Type != types.TxBatch {
+		t.Fatalf("block transactions = %#v", block.Transactions)
+	}
+	if block.Header.GasUsed != 84_000 || block.Receipts[0].GasUsed != 84_000 {
+		t.Fatalf("gas used header=%d receipt=%d", block.Header.GasUsed, block.Receipts[0].GasUsed)
+	}
+	if got := n.Account(bob).Balance; got != 10 {
+		t.Fatalf("bob balance = %d", got)
+	}
+	if got := n.Account(carol).Balance; got != 20 {
+		t.Fatalf("carol balance = %d", got)
+	}
+	record, ok := n.Transaction(tx.Hash())
+	if !ok {
+		t.Fatal("batch transaction should be indexed")
+	}
+	if record.Transaction.Type != types.TxBatch || record.Receipt.GasUsed != 84_000 || record.BlockHeight != 1 {
+		t.Fatalf("record = %+v", record)
+	}
+}
+
 func TestNodePersistsChainStateAndTransactionIndex(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {

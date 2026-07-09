@@ -16,6 +16,7 @@ It currently implements:
 - deterministic WASM resource metering for uploaded bytecode size and ChainLab host ABI storage/event/arg/return usage
 - EIP-1559-style local fee market with block base fee, gas used/limit, base fee burn, priority fee rewards, and legacy `gas_price` compatibility
 - native paymaster-sponsored transactions: the user signs the operation and consumes their own nonce, while a paymaster signs an authorization and pays gas
+- ChainLab-native batched user operations: one signed transaction can atomically execute multiple transfer/call operations with one sender nonce and one fee settlement
 - HTTP REST endpoints and a small JSON-RPC-style endpoint
 - persistent node snapshots with committed blocks, state, and transaction index
 - local fork-choice that stores known branches and reorgs to a longer validated branch
@@ -114,6 +115,14 @@ go run ./cmd/chainlab tx transfer --rpc http://127.0.0.1:8547 --private-key <use
 ```
 
 The user's signature covers the operation, the paymaster signature covers the user-signed transaction, and the receipt records `fee_payer`. This models the account-abstraction/paymaster workflow in a ChainLab-native way; it is not a full ERC-4337 EntryPoint or EIP-7702 implementation.
+
+Submit a batched transfer with one user signature and one nonce:
+
+```powershell
+go run ./cmd/chainlab tx batch-transfer --rpc http://127.0.0.1:8547 --private-key <hex-private-key> --to <address-1>:10 --to <address-2>:20
+```
+
+Batch transactions use type `batch` and carry a `batch` array of operations. The first version supports `transfer` and contract `call` operations. Execution is atomic on a cloned state: if any operation fails, earlier operations in the same batch roll back and the sender nonce is not consumed. A batch can also include `--paymaster-private-key`, so a sponsor pays the single transaction-level fee.
 
 Build a signed raw ChainLab transaction without broadcasting, then submit it later:
 
@@ -221,7 +230,7 @@ go run ./cmd/chainlab query estimate-gas --rpc http://127.0.0.1:8547 --type call
 - `GET /param/{key}`
 - `GET /tx/{hash}`
 - `GET /txpool`
-- `POST /tx` for signed transactions, including `transfer`, `deploy`, `call`, `wasm.upload`, staking, validator, and governance transaction types
+- `POST /tx` for signed transactions, including `transfer`, `batch`, `deploy`, `call`, `wasm.upload`, staking, validator, and governance transaction types
 - `POST /tx/raw`
 - `POST /faucet`
 - `POST /chain/produce`
@@ -237,7 +246,7 @@ Next useful milestones:
 
 - real BFT finality and richer fork-choice safety rules
 - broader WASM ABI with CPU instruction/fuel metering
-- richer account abstraction, including policy-based paymasters, batched operations, and contract accounts
+- richer account abstraction, including policy-based paymasters and contract accounts
 - richer contract explorer views with decoded native contract state and events
 - richer governance thresholds, quorum rules, deposits, and upgrade proposal handlers
 - production-framework migration decision: OP Stack, Cosmos SDK, Avalanche L1, or another appchain stack

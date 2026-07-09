@@ -269,11 +269,15 @@ func faucetRequestCommand(args []string, out io.Writer) error {
 
 func txCommand(args []string, out io.Writer) {
 	if len(args) < 1 {
-		log.Fatal("usage: chainlab tx <transfer|deploy|call|wasm-upload|stake|proposal-submit|vote|proposal-execute|validator-join|validator-leave|validator-slash|raw-submit>")
+		log.Fatal("usage: chainlab tx <transfer|batch-transfer|deploy|call|wasm-upload|stake|proposal-submit|vote|proposal-execute|validator-join|validator-leave|validator-slash|raw-submit>")
 	}
 	switch args[0] {
 	case "transfer":
 		if err := transferCommand(args[1:], out); err != nil {
+			log.Fatal(err)
+		}
+	case "batch-transfer":
+		if err := batchTransferCommand(args[1:], out); err != nil {
 			log.Fatal(err)
 		}
 	case "deploy":
@@ -391,6 +395,50 @@ func transferCommand(args []string, out io.Writer) error {
 		return err
 	}
 	tx, err := buildSignedTransferWithFeeCapsAndPaymaster(*rpcURL, *privateKeyHex, *to, *value, *gasLimit, *gasPrice, *maxFeePerGas, *maxPriorityFeePerGas, *paymasterPrivateKeyHex)
+	if err != nil {
+		return err
+	}
+	if *rawOnly {
+		raw, err := types.EncodeRawTransaction(tx)
+		if err != nil {
+			return err
+		}
+		return writeTo(out, map[string]any{"hash": tx.Hash(), "raw": raw, "transaction": tx})
+	}
+	response, err := submitTransaction(*rpcURL, tx)
+	if err != nil {
+		return err
+	}
+	return writeTo(out, response)
+}
+
+func batchTransferCommand(args []string, out io.Writer) error {
+	flags := flag.NewFlagSet("tx batch-transfer", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
+	privateKeyHex := flags.String("private-key", "", "sender private key")
+	gasLimit := flags.Uint64("gas-limit", 0, "gas limit; defaults to estimated batch gas")
+	gasPrice := flags.Uint64("gas-price", 1, "gas price")
+	maxFeePerGas := flags.Uint64("max-fee-per-gas", 0, "EIP-1559-style max fee per gas")
+	maxPriorityFeePerGas := flags.Uint64("max-priority-fee-per-gas", 0, "EIP-1559-style max priority fee per gas")
+	paymasterPrivateKeyHex := flags.String("paymaster-private-key", "", "optional paymaster private key for sponsored gas")
+	rawOnly := flags.Bool("raw-only", false, "print signed raw transaction without submitting")
+	var transfers stringListFlag
+	flags.Var(&transfers, "to", "recipient:amount transfer; can be repeated")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	batch, err := parseBatchTransferArgs(transfers.Values())
+	if err != nil {
+		return err
+	}
+	limit := *gasLimit
+	if limit == 0 {
+		limit, err = core.EstimateGasForBatch(batch)
+		if err != nil {
+			return err
+		}
+	}
+	tx, err := buildSignedBatchTransactionWithFeeCapsAndPaymaster(*rpcURL, *privateKeyHex, batch, limit, *gasPrice, *maxFeePerGas, *maxPriorityFeePerGas, *paymasterPrivateKeyHex)
 	if err != nil {
 		return err
 	}
@@ -800,6 +848,48 @@ func buildSignedTransactionWithFeeCaps(rpcURL string, privateKeyHex string, txTy
 }
 
 func buildSignedTransactionWithFeeCapsAndPaymaster(rpcURL string, privateKeyHex string, txType types.TxType, to string, value uint64, gasLimit uint64, gasPrice uint64, maxFeePerGas uint64, maxPriorityFeePerGas uint64, payload map[string]string, paymasterPrivateKeyHex string) (types.Transaction, error) {
+	return buildSignedTransactionFromSpec(rpcURL, privateKeyHex, signedTransactionSpec{
+		txType:                 txType,
+		to:                     to,
+		value:                  value,
+		gasLimit:               gasLimit,
+		gasPrice:               gasPrice,
+		maxFeePerGas:           maxFeePerGas,
+		maxPriorityFeePerGas:   maxPriorityFeePerGas,
+		payload:                payload,
+		paymasterPrivateKeyHex: paymasterPrivateKeyHex,
+	})
+}
+
+func buildSignedBatchTransactionWithFeeCapsAndPaymaster(rpcURL string, privateKeyHex string, batch []types.BatchOperation, gasLimit uint64, gasPrice uint64, maxFeePerGas uint64, maxPriorityFeePerGas uint64, paymasterPrivateKeyHex string) (types.Transaction, error) {
+	if len(batch) == 0 {
+		return types.Transaction{}, fmt.Errorf("batch requires at least one operation")
+	}
+	return buildSignedTransactionFromSpec(rpcURL, privateKeyHex, signedTransactionSpec{
+		txType:                 types.TxBatch,
+		gasLimit:               gasLimit,
+		gasPrice:               gasPrice,
+		maxFeePerGas:           maxFeePerGas,
+		maxPriorityFeePerGas:   maxPriorityFeePerGas,
+		batch:                  batch,
+		paymasterPrivateKeyHex: paymasterPrivateKeyHex,
+	})
+}
+
+type signedTransactionSpec struct {
+	txType                 types.TxType
+	to                     string
+	value                  uint64
+	gasLimit               uint64
+	gasPrice               uint64
+	maxFeePerGas           uint64
+	maxPriorityFeePerGas   uint64
+	payload                map[string]string
+	batch                  []types.BatchOperation
+	paymasterPrivateKeyHex string
+}
+
+func buildSignedTransactionFromSpec(rpcURL string, privateKeyHex string, spec signedTransactionSpec) (types.Transaction, error) {
 	if privateKeyHex == "" {
 		return types.Transaction{}, fmt.Errorf("private key is required")
 	}
@@ -809,8 +899,8 @@ func buildSignedTransactionWithFeeCapsAndPaymaster(rpcURL string, privateKeyHex 
 	}
 	var paymasterKey crypto.PrivateKey
 	var paymaster string
-	if strings.TrimSpace(paymasterPrivateKeyHex) != "" {
-		paymasterKey, err = crypto.PrivateKeyFromHex(paymasterPrivateKeyHex)
+	if strings.TrimSpace(spec.paymasterPrivateKeyHex) != "" {
+		paymasterKey, err = crypto.PrivateKeyFromHex(spec.paymasterPrivateKeyHex)
 		if err != nil {
 			return types.Transaction{}, err
 		}
@@ -832,17 +922,18 @@ func buildSignedTransactionWithFeeCapsAndPaymaster(rpcURL string, privateKeyHex 
 	}
 	tx := types.Transaction{
 		ChainID:              chainID,
-		Type:                 txType,
+		Type:                 spec.txType,
 		From:                 from,
-		To:                   to,
+		To:                   spec.to,
 		Nonce:                nonce,
-		Value:                value,
-		GasLimit:             gasLimit,
-		GasPrice:             gasPrice,
-		MaxFeePerGas:         maxFeePerGas,
-		MaxPriorityFeePerGas: maxPriorityFeePerGas,
+		Value:                spec.value,
+		GasLimit:             spec.gasLimit,
+		GasPrice:             spec.gasPrice,
+		MaxFeePerGas:         spec.maxFeePerGas,
+		MaxPriorityFeePerGas: spec.maxPriorityFeePerGas,
 		Paymaster:            paymaster,
-		Payload:              payload,
+		Payload:              spec.payload,
+		Batch:                spec.batch,
 	}
 	signature, err := crypto.Sign(key, tx.SigningBytes())
 	if err != nil {
@@ -1182,6 +1273,31 @@ func parseKeyValueArgs(values []string) (map[string]string, error) {
 		output[key] = raw
 	}
 	return output, nil
+}
+
+func parseBatchTransferArgs(values []string) ([]types.BatchOperation, error) {
+	if len(values) == 0 {
+		return nil, fmt.Errorf("at least one --to recipient:amount is required")
+	}
+	batch := make([]types.BatchOperation, 0, len(values))
+	for _, value := range values {
+		to, amountRaw, ok := strings.Cut(value, ":")
+		to = strings.TrimSpace(to)
+		amountRaw = strings.TrimSpace(amountRaw)
+		if !ok || to == "" || amountRaw == "" {
+			return nil, fmt.Errorf("batch transfer must be recipient:amount")
+		}
+		amount, err := strconv.ParseUint(amountRaw, 10, 64)
+		if err != nil || amount == 0 {
+			return nil, fmt.Errorf("batch transfer amount must be positive")
+		}
+		batch = append(batch, types.BatchOperation{
+			Type:  types.TxTransfer,
+			To:    to,
+			Value: amount,
+		})
+	}
+	return batch, nil
 }
 
 func decodeDataHex(value string) (string, error) {
