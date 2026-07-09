@@ -282,6 +282,10 @@ func handleJSONRPC(w http.ResponseWriter, r *http.Request, n *node.Node) {
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: quantity(chainNumber(n.ChainID()))})
 	case "eth_blockNumber":
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: quantity(n.Head().Header.Height)})
+	case "eth_gasPrice":
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: quantity(n.FeeMarket().GasPrice)})
+	case "eth_maxPriorityFeePerGas":
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: quantity(n.FeeMarket().MaxPriorityFeePerGas)})
 	case "eth_getBalance":
 		params, err := rpcParams(request.Params)
 		if err != nil || len(params) < 1 {
@@ -455,6 +459,16 @@ func handleJSONRPC(w http.ResponseWriter, r *http.Request, n *node.Node) {
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: n.Head()})
 	case "chain_finality":
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: n.Finality()})
+	case "chain_feeMarket":
+		feeMarket := n.FeeMarket()
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: map[string]string{
+			"base_fee_per_gas":         quantity(feeMarket.BaseFeePerGas),
+			"next_base_fee_per_gas":    quantity(feeMarket.NextBaseFeePerGas),
+			"max_priority_fee_per_gas": quantity(feeMarket.MaxPriorityFeePerGas),
+			"gas_price":                quantity(feeMarket.GasPrice),
+			"block_gas_limit":          quantity(feeMarket.BlockGasLimit),
+			"last_block_gas_used":      quantity(feeMarket.LastBlockGasUsed),
+		}})
 	case "chain_faucet":
 		faucet, err := parseRPCFaucetRequest(request.Params)
 		if err != nil {
@@ -673,35 +687,39 @@ func dataHex(value string) string {
 func evmTransaction(record types.TransactionRecord) map[string]any {
 	tx := record.Transaction
 	return map[string]any{
-		"hash":             tx.Hash(),
-		"blockHash":        record.BlockHash,
-		"blockNumber":      quantity(record.BlockHeight),
-		"transactionIndex": quantity(uint64(record.Index)),
-		"from":             strings.ToLower(tx.From),
-		"to":               nullableAddress(tx.To),
-		"nonce":            quantity(tx.Nonce),
-		"value":            quantity(tx.Value),
-		"gas":              quantity(tx.GasLimit),
-		"gasPrice":         quantity(tx.GasPrice),
-		"input":            "0x",
-		"type":             "0x0",
+		"hash":                 tx.Hash(),
+		"blockHash":            record.BlockHash,
+		"blockNumber":          quantity(record.BlockHeight),
+		"transactionIndex":     quantity(uint64(record.Index)),
+		"from":                 strings.ToLower(tx.From),
+		"to":                   nullableAddress(tx.To),
+		"nonce":                quantity(tx.Nonce),
+		"value":                quantity(tx.Value),
+		"gas":                  quantity(tx.GasLimit),
+		"gasPrice":             quantity(tx.GasPrice),
+		"maxFeePerGas":         quantity(tx.MaxFeePerGas),
+		"maxPriorityFeePerGas": quantity(tx.MaxPriorityFeePerGas),
+		"input":                "0x",
+		"type":                 "0x0",
 	}
 }
 
 func evmPendingTransaction(tx types.Transaction) map[string]any {
 	return map[string]any{
-		"hash":             tx.Hash(),
-		"blockHash":        nil,
-		"blockNumber":      nil,
-		"transactionIndex": nil,
-		"from":             strings.ToLower(tx.From),
-		"to":               nullableAddress(tx.To),
-		"nonce":            quantity(tx.Nonce),
-		"value":            quantity(tx.Value),
-		"gas":              quantity(tx.GasLimit),
-		"gasPrice":         quantity(tx.GasPrice),
-		"input":            "0x",
-		"type":             "0x0",
+		"hash":                 tx.Hash(),
+		"blockHash":            nil,
+		"blockNumber":          nil,
+		"transactionIndex":     nil,
+		"from":                 strings.ToLower(tx.From),
+		"to":                   nullableAddress(tx.To),
+		"nonce":                quantity(tx.Nonce),
+		"value":                quantity(tx.Value),
+		"gas":                  quantity(tx.GasLimit),
+		"gasPrice":             quantity(tx.GasPrice),
+		"maxFeePerGas":         quantity(tx.MaxFeePerGas),
+		"maxPriorityFeePerGas": quantity(tx.MaxPriorityFeePerGas),
+		"input":                "0x",
+		"type":                 "0x0",
 	}
 }
 
@@ -737,6 +755,7 @@ func evmReceipt(record types.TransactionRecord, block types.Block) map[string]an
 		"contractAddress":   nullableAddress(record.Receipt.ContractAddress),
 		"cumulativeGasUsed": quantity(record.Receipt.GasUsed),
 		"gasUsed":           quantity(record.Receipt.GasUsed),
+		"effectiveGasPrice": quantity(record.Receipt.EffectiveGasPrice),
 		"status":            quantity(status),
 		"logs":              evmTransactionLogs(block, record.Transaction.Hash()),
 	}
@@ -747,18 +766,20 @@ func evmBlock(block types.Block, fullTransactions bool) map[string]any {
 	for i, tx := range block.Transactions {
 		if fullTransactions {
 			transactions[i] = map[string]any{
-				"hash":             tx.Hash(),
-				"blockHash":        block.Hash(),
-				"blockNumber":      quantity(block.Header.Height),
-				"transactionIndex": quantity(uint64(i)),
-				"from":             strings.ToLower(tx.From),
-				"to":               nullableAddress(tx.To),
-				"nonce":            quantity(tx.Nonce),
-				"value":            quantity(tx.Value),
-				"gas":              quantity(tx.GasLimit),
-				"gasPrice":         quantity(tx.GasPrice),
-				"input":            "0x",
-				"type":             "0x0",
+				"hash":                 tx.Hash(),
+				"blockHash":            block.Hash(),
+				"blockNumber":          quantity(block.Header.Height),
+				"transactionIndex":     quantity(uint64(i)),
+				"from":                 strings.ToLower(tx.From),
+				"to":                   nullableAddress(tx.To),
+				"nonce":                quantity(tx.Nonce),
+				"value":                quantity(tx.Value),
+				"gas":                  quantity(tx.GasLimit),
+				"gasPrice":             quantity(tx.GasPrice),
+				"maxFeePerGas":         quantity(tx.MaxFeePerGas),
+				"maxPriorityFeePerGas": quantity(tx.MaxPriorityFeePerGas),
+				"input":                "0x",
+				"type":                 "0x0",
 			}
 		} else {
 			transactions[i] = tx.Hash()
@@ -772,6 +793,9 @@ func evmBlock(block types.Block, fullTransactions bool) map[string]any {
 		"transactionsRoot": block.Header.TxRoot,
 		"receiptsRoot":     block.Header.ReceiptRoot,
 		"stateRoot":        block.Header.StateRoot,
+		"gasLimit":         quantity(block.Header.GasLimit),
+		"gasUsed":          quantity(block.Header.GasUsed),
+		"baseFeePerGas":    quantity(block.Header.BaseFeePerGas),
 		"miner":            strings.ToLower(block.Header.Proposer),
 		"transactions":     transactions,
 	}

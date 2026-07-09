@@ -3,6 +3,7 @@ package node
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -25,27 +26,33 @@ type Config struct {
 	GenesisBalance map[string]uint64
 	FeeCollector   string
 	DataDir        string
+	BlockGasLimit  uint64
 }
 
 type Node struct {
-	mu           sync.Mutex
-	chainID      string
-	proposerKey  chaincrypto.PrivateKey
-	proposer     string
-	state        *state.Store
-	executor     *core.Executor
-	consensus    *consensus.POA
-	blocks       []types.Block
-	genesisState state.Snapshot
-	knownBlocks  map[string]types.Block
-	mempool      []types.Transaction
-	txIndex      map[string]types.TransactionRecord
-	dataDir      string
+	mu            sync.Mutex
+	chainID       string
+	proposerKey   chaincrypto.PrivateKey
+	proposer      string
+	state         *state.Store
+	executor      *core.Executor
+	consensus     *consensus.POA
+	blocks        []types.Block
+	genesisState  state.Snapshot
+	knownBlocks   map[string]types.Block
+	mempool       []types.Transaction
+	txIndex       map[string]types.TransactionRecord
+	dataDir       string
+	blockGasLimit uint64
 }
 
 const (
-	SafeBlockDepth      uint64 = 1
-	FinalizedBlockDepth uint64 = 2
+	SafeBlockDepth              uint64 = 1
+	FinalizedBlockDepth         uint64 = 2
+	DefaultBlockGasLimit        uint64 = 30_000_000
+	InitialBaseFeePerGas        uint64 = 1
+	DefaultMaxPriorityFeePerGas uint64 = 1
+	baseFeeChangeDenominator    uint64 = 8
 )
 
 type FinalityCheckpoint struct {
@@ -63,6 +70,15 @@ type MempoolSnapshot struct {
 	Pending      []types.Transaction `json:"pending"`
 	PendingCount int                 `json:"pending_count"`
 	QueuedCount  int                 `json:"queued_count"`
+}
+
+type FeeMarketSnapshot struct {
+	BaseFeePerGas        uint64 `json:"base_fee_per_gas"`
+	NextBaseFeePerGas    uint64 `json:"next_base_fee_per_gas"`
+	MaxPriorityFeePerGas uint64 `json:"max_priority_fee_per_gas"`
+	GasPrice             uint64 `json:"gas_price"`
+	BlockGasLimit        uint64 `json:"block_gas_limit"`
+	LastBlockGasUsed     uint64 `json:"last_block_gas_used"`
 }
 
 type diskSnapshot struct {
@@ -85,20 +101,25 @@ func New(config Config) (*Node, error) {
 	if len(validators) == 0 {
 		validators = []string{proposer}
 	}
+	blockGasLimit := config.BlockGasLimit
+	if blockGasLimit == 0 {
+		blockGasLimit = DefaultBlockGasLimit
+	}
 	feeCollector := config.FeeCollector
 	if feeCollector == "" {
 		feeCollector = proposer
 	}
 
 	n := &Node{
-		chainID:     config.ChainID,
-		proposerKey: config.ProposerKey,
-		proposer:    proposer,
-		executor:    core.NewExecutor(config.ChainID, feeCollector, contracts.NewRuntimeWithDefaults()),
-		consensus:   consensus.NewPOA(validators),
-		knownBlocks: make(map[string]types.Block),
-		txIndex:     make(map[string]types.TransactionRecord),
-		dataDir:     config.DataDir,
+		chainID:       config.ChainID,
+		proposerKey:   config.ProposerKey,
+		proposer:      proposer,
+		executor:      core.NewExecutor(config.ChainID, feeCollector, contracts.NewRuntimeWithDefaults()),
+		consensus:     consensus.NewPOA(validators),
+		knownBlocks:   make(map[string]types.Block),
+		txIndex:       make(map[string]types.TransactionRecord),
+		dataDir:       config.DataDir,
+		blockGasLimit: blockGasLimit,
 	}
 	genesisStore := newGenesisStore(config.GenesisBalance, validators)
 	genesisState := genesisStore.Snapshot()
@@ -138,6 +159,8 @@ func New(config Config) (*Node, error) {
 
 	store := genesisStore
 	genesis := types.GenesisBlock(config.ChainID, store.Root())
+	genesis.Header.GasLimit = blockGasLimit
+	genesis.Header.BaseFeePerGas = InitialBaseFeePerGas
 	n.genesisState = genesisState
 	n.state = store
 	n.refreshConsensusLocked()
@@ -194,7 +217,7 @@ func (n *Node) RequestFaucet(to string, amount uint64) (types.Transaction, error
 		Nonce:    account.Nonce,
 		Value:    amount,
 		GasLimit: 21_000,
-		GasPrice: 1,
+		GasPrice: n.suggestedGasPriceLocked(),
 	}
 	signature, err := chaincrypto.Sign(n.proposerKey, tx.SigningBytes())
 	if err != nil {
@@ -213,7 +236,8 @@ func (n *Node) submitTxLocked(tx types.Transaction) error {
 		return err
 	}
 	blockHeight := n.blocks[len(n.blocks)-1].Header.Height + 1
-	if _, err := n.executor.ExecuteAtHeight(working, tx, blockHeight); err != nil {
+	baseFee := n.nextBaseFeeLocked()
+	if _, err := n.executor.ExecuteWithContext(working, tx, core.ExecutionContext{BlockHeight: blockHeight, BaseFeePerGas: baseFee}); err != nil {
 		return err
 	}
 	n.mempool = append(n.mempool, tx)
@@ -228,24 +252,37 @@ func (n *Node) ProduceBlock() (types.Block, error) {
 	receipts := make([]types.Receipt, 0, len(n.mempool))
 	parent := n.blocks[len(n.blocks)-1]
 	blockHeight := parent.Header.Height + 1
+	baseFee := n.nextBaseFeeLocked()
+	var gasUsed uint64
 	for _, tx := range n.mempool {
-		receipt, err := n.executor.ExecuteAtHeight(working, tx, blockHeight)
+		receipt, err := n.executor.ExecuteWithContext(working, tx, core.ExecutionContext{BlockHeight: blockHeight, BaseFeePerGas: baseFee})
 		if err != nil {
 			return types.Block{}, err
 		}
+		nextGasUsed, err := checkedAdd(gasUsed, receipt.GasUsed)
+		if err != nil {
+			return types.Block{}, err
+		}
+		if nextGasUsed > n.blockGasLimit {
+			return types.Block{}, errors.New("block gas limit exceeded")
+		}
+		gasUsed = nextGasUsed
 		receipts = append(receipts, receipt)
 	}
 
 	block := types.Block{
 		Header: types.BlockHeader{
-			ChainID:     n.chainID,
-			Height:      blockHeight,
-			ParentHash:  parent.Hash(),
-			TimeUnix:    time.Now().Unix(),
-			Proposer:    n.proposer,
-			TxRoot:      types.TransactionRoot(n.mempool),
-			ReceiptRoot: types.ReceiptRoot(receipts),
-			StateRoot:   working.Root(),
+			ChainID:       n.chainID,
+			Height:        blockHeight,
+			ParentHash:    parent.Hash(),
+			TimeUnix:      time.Now().Unix(),
+			Proposer:      n.proposer,
+			GasLimit:      n.blockGasLimit,
+			GasUsed:       gasUsed,
+			BaseFeePerGas: baseFee,
+			TxRoot:        types.TransactionRoot(n.mempool),
+			ReceiptRoot:   types.ReceiptRoot(receipts),
+			StateRoot:     working.Root(),
 		},
 		Transactions: append([]types.Transaction(nil), n.mempool...),
 		Receipts:     receipts,
@@ -404,6 +441,20 @@ func (n *Node) TxPool() MempoolSnapshot {
 	}
 }
 
+func (n *Node) FeeMarket() FeeMarketSnapshot {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	head := n.blocks[len(n.blocks)-1]
+	return FeeMarketSnapshot{
+		BaseFeePerGas:        effectiveHeaderBaseFee(head),
+		NextBaseFeePerGas:    n.nextBaseFeeLocked(),
+		MaxPriorityFeePerGas: DefaultMaxPriorityFeePerGas,
+		GasPrice:             n.suggestedGasPriceLocked(),
+		BlockGasLimit:        n.blockGasLimit,
+		LastBlockGasUsed:     head.Header.GasUsed,
+	}
+}
+
 func (n *Node) ReadContract(from string, to string, method string, args map[string]string) (string, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -434,8 +485,9 @@ func (n *Node) blockAtDepthLocked(depth uint64) types.Block {
 func (n *Node) pendingStateLocked() (*state.Store, error) {
 	working := n.state.Clone()
 	blockHeight := n.blocks[len(n.blocks)-1].Header.Height + 1
+	baseFee := n.nextBaseFeeLocked()
 	for _, pending := range n.mempool {
-		if _, err := n.executor.ExecuteAtHeight(working, pending, blockHeight); err != nil {
+		if _, err := n.executor.ExecuteWithContext(working, pending, core.ExecutionContext{BlockHeight: blockHeight, BaseFeePerGas: baseFee}); err != nil {
 			return nil, err
 		}
 	}
@@ -494,12 +546,29 @@ func (n *Node) validateBlockOnStateLocked(parent types.Block, parentState *state
 	working := parentState.Clone()
 	executor := core.NewExecutor(n.chainID, block.Header.Proposer, contracts.NewRuntimeWithDefaults())
 	receipts := make([]types.Receipt, 0, len(block.Transactions))
+	if block.Header.GasLimit == 0 {
+		return nil, errors.New("block gas limit is required")
+	}
+	if block.Header.BaseFeePerGas != NextBaseFee(parent, n.blockGasLimit) {
+		return nil, errors.New("imported block base fee mismatch")
+	}
+	var gasUsed uint64
 	for _, tx := range block.Transactions {
-		receipt, err := executor.ExecuteAtHeight(working, tx, block.Header.Height)
+		receipt, err := executor.ExecuteWithContext(working, tx, core.ExecutionContext{BlockHeight: block.Header.Height, BaseFeePerGas: block.Header.BaseFeePerGas})
+		if err != nil {
+			return nil, err
+		}
+		gasUsed, err = checkedAdd(gasUsed, receipt.GasUsed)
 		if err != nil {
 			return nil, err
 		}
 		receipts = append(receipts, receipt)
+	}
+	if gasUsed != block.Header.GasUsed {
+		return nil, errors.New("imported block gas used mismatch")
+	}
+	if gasUsed > block.Header.GasLimit {
+		return nil, errors.New("imported block gas limit exceeded")
 	}
 	if types.ReceiptRoot(receipts) != block.Header.ReceiptRoot {
 		return nil, errors.New("imported block receipt root mismatch")
@@ -512,6 +581,71 @@ func (n *Node) validateBlockOnStateLocked(parent types.Block, parentState *state
 		return nil, err
 	}
 	return working, nil
+}
+
+func (n *Node) nextBaseFeeLocked() uint64 {
+	return NextBaseFee(n.blocks[len(n.blocks)-1], n.blockGasLimit)
+}
+
+func (n *Node) suggestedGasPriceLocked() uint64 {
+	gasPrice, err := checkedAdd(n.nextBaseFeeLocked(), DefaultMaxPriorityFeePerGas)
+	if err != nil {
+		return math.MaxUint64
+	}
+	return gasPrice
+}
+
+func NextBaseFee(parent types.Block, fallbackGasLimit uint64) uint64 {
+	parentBaseFee := effectiveHeaderBaseFee(parent)
+	parentGasLimit := parent.Header.GasLimit
+	if parentGasLimit == 0 {
+		parentGasLimit = fallbackGasLimit
+	}
+	if parentGasLimit == 0 {
+		parentGasLimit = DefaultBlockGasLimit
+	}
+	target := parentGasLimit / 2
+	if target == 0 {
+		target = 1
+	}
+	if parent.Header.GasUsed == target {
+		return parentBaseFee
+	}
+	if parent.Header.GasUsed > target {
+		delta := parent.Header.GasUsed - target
+		increase := parentBaseFee * delta / target / baseFeeChangeDenominator
+		if increase == 0 {
+			increase = 1
+		}
+		if math.MaxUint64-parentBaseFee < increase {
+			return math.MaxUint64
+		}
+		return parentBaseFee + increase
+	}
+	delta := target - parent.Header.GasUsed
+	decrease := parentBaseFee * delta / target / baseFeeChangeDenominator
+	if decrease >= parentBaseFee {
+		return InitialBaseFeePerGas
+	}
+	next := parentBaseFee - decrease
+	if next < InitialBaseFeePerGas {
+		return InitialBaseFeePerGas
+	}
+	return next
+}
+
+func effectiveHeaderBaseFee(block types.Block) uint64 {
+	if block.Header.BaseFeePerGas == 0 {
+		return InitialBaseFeePerGas
+	}
+	return block.Header.BaseFeePerGas
+}
+
+func checkedAdd(left uint64, right uint64) (uint64, error) {
+	if math.MaxUint64-left < right {
+		return 0, errors.New("gas overflow")
+	}
+	return left + right, nil
 }
 
 func (n *Node) refreshConsensusLocked() {

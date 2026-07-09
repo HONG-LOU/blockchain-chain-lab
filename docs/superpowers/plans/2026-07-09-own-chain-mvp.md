@@ -114,7 +114,7 @@ Expected: PASS.
 
 - [ ] **Step 1: Write failing executor tests**
 
-Cover transfer success, invalid signature, bad nonce, insufficient funds, gas fee charging, stake, unstake, proposal submission, voting, and proposal execution.
+Cover transfer success, invalid signature, bad nonce, insufficient funds, gas fee charging, EIP-1559-style base fee/tip accounting, stake, unstake, proposal submission, voting, and proposal execution.
 
 - [ ] **Step 2: Run failing tests**
 
@@ -124,7 +124,7 @@ Expected: FAIL because executor does not exist.
 
 - [ ] **Step 3: Implement executor**
 
-Validate signatures and nonces, charge gas fees, mutate balances, staking records, governance proposals, and governance parameters, and return receipts.
+Validate signatures and nonces, charge legacy or EIP-1559-style gas fees, burn base fees, reward priority fees, mutate balances, staking records, governance proposals, and governance parameters, and return receipts.
 
 - [ ] **Step 4: Run tests**
 

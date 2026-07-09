@@ -267,6 +267,44 @@ func TestSubmitTransferCommandSendsSignedTx(t *testing.T) {
 	}
 }
 
+func TestTransferCommandSupportsEIP1559FeeCaps(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := crypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	var out bytes.Buffer
+	if err := transferCommand([]string{
+		"--rpc", server.URL,
+		"--private-key", crypto.PrivateKeyToHex(key),
+		"--to", bob,
+		"--value", "100",
+		"--max-fee-per-gas", "5",
+		"--max-priority-fee-per-gas", "2",
+	}, &out); err != nil {
+		t.Fatal(err)
+	}
+	pool := n.TxPool()
+	if pool.PendingCount != 1 {
+		t.Fatalf("txpool = %+v", pool)
+	}
+	if pool.Pending[0].MaxFeePerGas != 5 || pool.Pending[0].MaxPriorityFeePerGas != 2 {
+		t.Fatalf("fee caps = max %d priority %d", pool.Pending[0].MaxFeePerGas, pool.Pending[0].MaxPriorityFeePerGas)
+	}
+}
+
 func TestTransferCommandUsesPendingNonceAndQueryMempool(t *testing.T) {
 	key, err := crypto.GenerateKey()
 	if err != nil {
@@ -1053,6 +1091,40 @@ func TestQueryFinalityCommand(t *testing.T) {
 	}
 	if finality.HeadHeight != 3 || finality.SafeHeight != 2 || finality.FinalizedHeight != 1 {
 		t.Fatalf("finality = %+v", finality)
+	}
+}
+
+func TestQueryFeesCommand(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := crypto.AddressFromPrivateKey(key)
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	var out bytes.Buffer
+	if err := feesCommand([]string{"--rpc", server.URL}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var fees struct {
+		BaseFeePerGas        string `json:"base_fee_per_gas"`
+		MaxPriorityFeePerGas string `json:"max_priority_fee_per_gas"`
+		GasPrice             string `json:"gas_price"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &fees); err != nil {
+		t.Fatal(err)
+	}
+	if fees.BaseFeePerGas != "0x1" || fees.MaxPriorityFeePerGas != "0x1" || fees.GasPrice != "0x2" {
+		t.Fatalf("fees = %+v", fees)
 	}
 }
 

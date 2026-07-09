@@ -20,6 +20,11 @@ type Executor struct {
 	runtime      *contracts.Runtime
 }
 
+type ExecutionContext struct {
+	BlockHeight   uint64
+	BaseFeePerGas uint64
+}
+
 func NewExecutor(chainID string, feeCollector string, runtime *contracts.Runtime) *Executor {
 	if runtime == nil {
 		runtime = contracts.NewRuntimeWithDefaults()
@@ -36,6 +41,10 @@ func (e *Executor) Execute(store *state.Store, tx types.Transaction) (types.Rece
 }
 
 func (e *Executor) ExecuteAtHeight(store *state.Store, tx types.Transaction, blockHeight uint64) (types.Receipt, error) {
+	return e.ExecuteWithContext(store, tx, ExecutionContext{BlockHeight: blockHeight})
+}
+
+func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, context ExecutionContext) (types.Receipt, error) {
 	if tx.ChainID != e.chainID {
 		return types.Receipt{}, fmt.Errorf("wrong chain id %q", tx.ChainID)
 	}
@@ -90,7 +99,7 @@ func (e *Executor) ExecuteAtHeight(store *state.Store, tx types.Transaction, blo
 		}
 		receipt.Events = append(receipt.Events, types.Event{Type: "unstake"})
 	case types.TxProposalSubmit:
-		proposal, err := parseProposalSubmitPayload(tx, blockHeight)
+		proposal, err := parseProposalSubmitPayload(tx, context.BlockHeight)
 		if err != nil {
 			return types.Receipt{}, err
 		}
@@ -118,7 +127,7 @@ func (e *Executor) ExecuteAtHeight(store *state.Store, tx types.Transaction, blo
 		if record.Status != types.ProposalStatusOpen {
 			return types.Receipt{}, errors.New("proposal is not open")
 		}
-		if record.VotingEndHeight != 0 && blockHeight >= record.VotingEndHeight {
+		if record.VotingEndHeight != 0 && context.BlockHeight >= record.VotingEndHeight {
 			return types.Receipt{}, errors.New("proposal voting period has ended")
 		}
 		power := working.StakeOf(tx.From)
@@ -136,7 +145,7 @@ func (e *Executor) ExecuteAtHeight(store *state.Store, tx types.Transaction, blo
 		if proposal.Status != types.ProposalStatusOpen {
 			return types.Receipt{}, errors.New("proposal is not open")
 		}
-		if blockHeight < proposal.VotingEndHeight {
+		if context.BlockHeight < proposal.VotingEndHeight {
 			return types.Receipt{}, errors.New("proposal voting period is still open")
 		}
 		eventType := "governance.proposal.rejected"
@@ -262,29 +271,84 @@ func (e *Executor) ExecuteAtHeight(store *state.Store, tx types.Transaction, blo
 	if tx.GasLimit < gasUsed {
 		return types.Receipt{}, errors.New("gas limit too low")
 	}
-	fee, err := checkedMul(gasUsed, tx.GasPrice)
+	fee, err := CalculateFee(tx, gasUsed, context.BaseFeePerGas)
 	if err != nil {
 		return types.Receipt{}, err
 	}
-	if err := e.chargeFee(working, tx.From, fee); err != nil {
+	if err := e.chargeFee(working, tx.From, fee.TotalFee, fee.PriorityFee); err != nil {
 		return types.Receipt{}, err
 	}
 	receipt.GasUsed = gasUsed
+	receipt.BaseFeePerGas = context.BaseFeePerGas
+	receipt.EffectiveGasPrice = fee.EffectiveGasPrice
+	receipt.BaseFeeBurned = fee.BaseFeeBurned
+	receipt.PriorityFeePaid = fee.PriorityFee
 	store.ReplaceWith(working)
 	return receipt, nil
 }
 
-func (e *Executor) chargeFee(store *state.Store, from string, fee uint64) error {
-	if fee == 0 {
+type FeeBreakdown struct {
+	EffectiveGasPrice uint64
+	BaseFeeBurned     uint64
+	PriorityFee       uint64
+	TotalFee          uint64
+}
+
+func CalculateFee(tx types.Transaction, gasUsed uint64, baseFeePerGas uint64) (FeeBreakdown, error) {
+	maxFeePerGas, maxPriorityFeePerGas := feeCaps(tx)
+	if maxFeePerGas < baseFeePerGas {
+		return FeeBreakdown{}, errors.New("max fee per gas is below block base fee")
+	}
+	if maxPriorityFeePerGas > maxFeePerGas {
+		return FeeBreakdown{}, errors.New("max priority fee per gas exceeds max fee per gas")
+	}
+	availablePriority := maxFeePerGas - baseFeePerGas
+	priorityFeePerGas := maxPriorityFeePerGas
+	if priorityFeePerGas > availablePriority {
+		priorityFeePerGas = availablePriority
+	}
+	effectiveGasPrice, err := checkedAdd(baseFeePerGas, priorityFeePerGas)
+	if err != nil {
+		return FeeBreakdown{}, err
+	}
+	totalFee, err := checkedMul(gasUsed, effectiveGasPrice)
+	if err != nil {
+		return FeeBreakdown{}, err
+	}
+	baseFeeBurned, err := checkedMul(gasUsed, baseFeePerGas)
+	if err != nil {
+		return FeeBreakdown{}, err
+	}
+	priorityFee, err := checkedMul(gasUsed, priorityFeePerGas)
+	if err != nil {
+		return FeeBreakdown{}, err
+	}
+	return FeeBreakdown{
+		EffectiveGasPrice: effectiveGasPrice,
+		BaseFeeBurned:     baseFeeBurned,
+		PriorityFee:       priorityFee,
+		TotalFee:          totalFee,
+	}, nil
+}
+
+func feeCaps(tx types.Transaction) (uint64, uint64) {
+	if tx.MaxFeePerGas == 0 && tx.MaxPriorityFeePerGas == 0 {
+		return tx.GasPrice, tx.GasPrice
+	}
+	return tx.MaxFeePerGas, tx.MaxPriorityFeePerGas
+}
+
+func (e *Executor) chargeFee(store *state.Store, from string, totalFee uint64, priorityFee uint64) error {
+	if totalFee == 0 {
 		return nil
 	}
-	if err := store.SubBalance(from, fee); err != nil {
+	if err := store.SubBalance(from, totalFee); err != nil {
 		return err
 	}
-	if e.feeCollector == "" {
+	if e.feeCollector == "" || priorityFee == 0 {
 		return nil
 	}
-	return store.AddBalance(e.feeCollector, fee)
+	return store.AddBalance(e.feeCollector, priorityFee)
 }
 
 func EstimateGas(txType types.TxType) (uint64, error) {

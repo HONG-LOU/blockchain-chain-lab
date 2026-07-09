@@ -4,6 +4,11 @@ import (
 	"chainlab/internal/hash"
 )
 
+const (
+	DefaultBlockGasLimit uint64 = 30_000_000
+	InitialBaseFeePerGas uint64 = 1
+)
+
 type TxType string
 
 const (
@@ -30,16 +35,18 @@ type Account struct {
 }
 
 type Transaction struct {
-	ChainID   string            `json:"chain_id"`
-	Type      TxType            `json:"type"`
-	From      string            `json:"from"`
-	To        string            `json:"to,omitempty"`
-	Nonce     uint64            `json:"nonce"`
-	Value     uint64            `json:"value,omitempty"`
-	GasLimit  uint64            `json:"gas_limit"`
-	GasPrice  uint64            `json:"gas_price"`
-	Payload   map[string]string `json:"payload,omitempty"`
-	Signature string            `json:"signature,omitempty"`
+	ChainID              string            `json:"chain_id"`
+	Type                 TxType            `json:"type"`
+	From                 string            `json:"from"`
+	To                   string            `json:"to,omitempty"`
+	Nonce                uint64            `json:"nonce"`
+	Value                uint64            `json:"value,omitempty"`
+	GasLimit             uint64            `json:"gas_limit"`
+	GasPrice             uint64            `json:"gas_price,omitempty"`
+	MaxFeePerGas         uint64            `json:"max_fee_per_gas,omitempty"`
+	MaxPriorityFeePerGas uint64            `json:"max_priority_fee_per_gas,omitempty"`
+	Payload              map[string]string `json:"payload,omitempty"`
+	Signature            string            `json:"signature,omitempty"`
 }
 
 func (tx Transaction) SigningBytes() []byte {
@@ -65,14 +72,18 @@ type Event struct {
 }
 
 type Receipt struct {
-	TxHash          string  `json:"tx_hash"`
-	Success         bool    `json:"success"`
-	Error           string  `json:"error,omitempty"`
-	GasUsed         uint64  `json:"gas_used"`
-	Events          []Event `json:"events,omitempty"`
-	CodeID          string  `json:"code_id,omitempty"`
-	ProposalID      string  `json:"proposal_id,omitempty"`
-	ContractAddress string  `json:"contract_address,omitempty"`
+	TxHash            string  `json:"tx_hash"`
+	Success           bool    `json:"success"`
+	Error             string  `json:"error,omitempty"`
+	GasUsed           uint64  `json:"gas_used"`
+	BaseFeePerGas     uint64  `json:"base_fee_per_gas,omitempty"`
+	EffectiveGasPrice uint64  `json:"effective_gas_price,omitempty"`
+	BaseFeeBurned     uint64  `json:"base_fee_burned,omitempty"`
+	PriorityFeePaid   uint64  `json:"priority_fee_paid,omitempty"`
+	Events            []Event `json:"events,omitempty"`
+	CodeID            string  `json:"code_id,omitempty"`
+	ProposalID        string  `json:"proposal_id,omitempty"`
+	ContractAddress   string  `json:"contract_address,omitempty"`
 }
 
 type ContractCode struct {
@@ -114,14 +125,17 @@ type Proposal struct {
 }
 
 type BlockHeader struct {
-	ChainID     string `json:"chain_id"`
-	Height      uint64 `json:"height"`
-	ParentHash  string `json:"parent_hash"`
-	TimeUnix    int64  `json:"time_unix"`
-	Proposer    string `json:"proposer"`
-	TxRoot      string `json:"tx_root"`
-	ReceiptRoot string `json:"receipt_root"`
-	StateRoot   string `json:"state_root"`
+	ChainID       string `json:"chain_id"`
+	Height        uint64 `json:"height"`
+	ParentHash    string `json:"parent_hash"`
+	TimeUnix      int64  `json:"time_unix"`
+	Proposer      string `json:"proposer"`
+	GasLimit      uint64 `json:"gas_limit,omitempty"`
+	GasUsed       uint64 `json:"gas_used,omitempty"`
+	BaseFeePerGas uint64 `json:"base_fee_per_gas,omitempty"`
+	TxRoot        string `json:"tx_root"`
+	ReceiptRoot   string `json:"receipt_root"`
+	StateRoot     string `json:"state_root"`
 }
 
 func (h BlockHeader) SigningBytes() []byte {
@@ -142,14 +156,16 @@ func (b Block) Hash() string {
 func GenesisBlock(chainID string, stateRoot string) Block {
 	return Block{
 		Header: BlockHeader{
-			ChainID:     chainID,
-			Height:      0,
-			ParentHash:  "",
-			TimeUnix:    0,
-			Proposer:    "genesis",
-			TxRoot:      TransactionRoot(nil),
-			ReceiptRoot: ReceiptRoot(nil),
-			StateRoot:   stateRoot,
+			ChainID:       chainID,
+			Height:        0,
+			ParentHash:    "",
+			TimeUnix:      0,
+			Proposer:      "genesis",
+			GasLimit:      DefaultBlockGasLimit,
+			BaseFeePerGas: InitialBaseFeePerGas,
+			TxRoot:        TransactionRoot(nil),
+			ReceiptRoot:   ReceiptRoot(nil),
+			StateRoot:     stateRoot,
 		},
 	}
 }

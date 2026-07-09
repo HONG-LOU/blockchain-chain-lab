@@ -75,6 +75,48 @@ func TestExecuteTransfer(t *testing.T) {
 	}
 }
 
+func TestEIP1559FeeMarketBurnsBaseFeeAndPaysPriorityFee(t *testing.T) {
+	store, executor, key, alice, bob := newExecutorFixture(t)
+	tx := signedTx(t, key, types.Transaction{
+		ChainID:              "chainlab-local",
+		Type:                 types.TxTransfer,
+		From:                 alice,
+		To:                   bob,
+		Nonce:                0,
+		Value:                100,
+		GasLimit:             21_000,
+		MaxFeePerGas:         5,
+		MaxPriorityFeePerGas: 2,
+	})
+
+	receipt, err := executor.ExecuteWithContext(store, tx, core.ExecutionContext{
+		BlockHeight:   1,
+		BaseFeePerGas: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if receipt.EffectiveGasPrice != 5 {
+		t.Fatalf("effective gas price = %d", receipt.EffectiveGasPrice)
+	}
+	if receipt.BaseFeeBurned != 63_000 {
+		t.Fatalf("base fee burned = %d", receipt.BaseFeeBurned)
+	}
+	if receipt.PriorityFeePaid != 42_000 {
+		t.Fatalf("priority fee paid = %d", receipt.PriorityFeePaid)
+	}
+	if got := store.GetAccount(alice).Balance; got != 894_900 {
+		t.Fatalf("alice balance = %d", got)
+	}
+	if got := store.GetAccount(bob).Balance; got != 100 {
+		t.Fatalf("bob balance = %d", got)
+	}
+	if got := store.GetAccount("0xfee0000000000000000000000000000000000000").Balance; got != 42_000 {
+		t.Fatalf("fee collector balance = %d", got)
+	}
+}
+
 func TestRejectsBadSignatureAndBadNonce(t *testing.T) {
 	store, executor, key, alice, bob := newExecutorFixture(t)
 	tx := signedTx(t, key, types.Transaction{

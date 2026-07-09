@@ -40,7 +40,7 @@ Phase 1 creates a runnable local blockchain with these capabilities:
 - ChainLab-native raw transaction encoding for offline signing and later broadcast.
 - Transaction types for transfer, contract deployment, contract calls, staking, unstaking, proposal submission, proposal execution, and governance voting.
 - Validator lifecycle starts with staked validator join transactions, explicit validator leave transactions, and validator slashing transactions. The active validator set is committed into state roots.
-- Gas accounting with gas limit, gas price, and deterministic fee charging.
+- Gas accounting with gas limit, legacy gas price, EIP-1559-style max fee / priority fee caps, deterministic fee charging, base fee burn, and priority fee rewards.
 - Block production with deterministic transaction, receipt, and state roots.
 - Local proof-of-authority validation with a validator set.
 - Local safe/finalized checkpoints derived from conservative block depths. This models modern read semantics but is not a replacement for BFT finality.
@@ -214,6 +214,7 @@ Phase 2 progress:
 - The default contract runtime includes a constrained wazero-backed `wasm.echo.v1` contract. The module can copy transaction args from the host, write contract storage, emit events, and set read return data through ChainLab-specific host functions. This proves the WASM VM boundary.
 - Chain state supports uploaded WASM modules through `wasm.upload`; uploaded bytecode is validated, stored in snapshots, included in state roots, and deployable by the returned deterministic code id. CLI `tx wasm-upload` can submit a `.wasm` file, `0x` bytecode, or the built-in `--example echo` module for local E2E testing.
 - WASM upload gas now scales with bytecode size. WASM deploy and write-call execution meters deterministic ChainLab host ABI usage for instantiation, argument copies, storage reads/writes, return data, and emitted event bytes. CPU instruction/fuel metering remains a future runtime-level improvement.
+- Blocks now carry `base_fee_per_gas`, `gas_limit`, and `gas_used`; transactions can use legacy `gas_price` or EIP-1559-style `max_fee_per_gas` / `max_priority_fee_per_gas`; receipts record effective gas price, burned base fee, and proposer priority fee. RPC exposes `eth_gasPrice`, `eth_maxPriorityFeePerGas`, `chain_feeMarket`, and EVM block fee fields, while CLI exposes `query fees` and capped transfer flags. This models the fee market without claiming full Ethereum typed raw transaction compatibility.
 - Genesis files include a `validators` array, and `chainlab node --private-key` can start a different local validator from the same genesis file.
 - PoA now enforces deterministic proposer rotation and treats repeated imports of already-known canonical blocks as idempotent peer sync events.
 - Staked accounts can submit `validator.join`; accepted joins update the active validator set for subsequent block scheduling, are included in state roots, persist in snapshots, and can be queried over REST, JSON-RPC, and CLI.

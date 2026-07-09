@@ -14,6 +14,7 @@ It currently implements:
 - native smart-contract runtime with `counter.v1` and `token.v1`
 - sandboxed WASM contract runtime with built-in `wasm.echo.v1` and chain-state uploaded modules through `wasm.upload`
 - deterministic WASM resource metering for uploaded bytecode size and ChainLab host ABI storage/event/arg/return usage
+- EIP-1559-style local fee market with block base fee, gas used/limit, base fee burn, priority fee rewards, and legacy `gas_price` compatibility
 - HTTP REST endpoints and a small JSON-RPC-style endpoint
 - persistent node snapshots with committed blocks, state, and transaction index
 - local fork-choice that stores known branches and reorgs to a longer validated branch
@@ -96,6 +97,15 @@ Submit a signed transfer through a running node:
 go run ./cmd/chainlab tx transfer --rpc http://127.0.0.1:8547 --private-key <hex-private-key> --to <address> --value 100
 ```
 
+Query fee market recommendations or submit an EIP-1559-style capped transfer:
+
+```powershell
+go run ./cmd/chainlab query fees --rpc http://127.0.0.1:8547
+go run ./cmd/chainlab tx transfer --rpc http://127.0.0.1:8547 --private-key <hex-private-key> --to <address> --value 100 --max-fee-per-gas 5 --max-priority-fee-per-gas 2
+```
+
+The block header records `base_fee_per_gas`, `gas_limit`, and `gas_used`. Receipts record `effective_gas_price`, burned base fee, and paid priority fee. ChainLab still uses its native signed transaction JSON; this is not full Ethereum EIP-2718 / type-2 raw transaction compatibility.
+
 Build a signed raw ChainLab transaction without broadcasting, then submit it later:
 
 ```powershell
@@ -174,6 +184,7 @@ Query chain state:
 ```powershell
 go run ./cmd/chainlab query head --rpc http://127.0.0.1:8547
 go run ./cmd/chainlab query finality --rpc http://127.0.0.1:8547
+go run ./cmd/chainlab query fees --rpc http://127.0.0.1:8547
 go run ./cmd/chainlab query mempool --rpc http://127.0.0.1:8547
 go run ./cmd/chainlab query account --rpc http://127.0.0.1:8547 --address <address>
 go run ./cmd/chainlab query tx --rpc http://127.0.0.1:8547 --hash <tx-hash>
@@ -207,8 +218,8 @@ go run ./cmd/chainlab query estimate-gas --rpc http://127.0.0.1:8547 --type call
 - `POST /chain/produce`
 - `POST /peer/tx`
 - `POST /peer/block`
-- `POST /rpc` with methods `chain_head`, `chain_finality`, `chain_getAccount`, `chain_validators`, `chain_proposal`, `chain_param`, `chain_sendTx`, and `chain_faucet`
-- `POST /rpc` with EVM-style methods `eth_chainId`, `eth_blockNumber`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`, `eth_getLogs`, `eth_call`, `eth_estimateGas`, and `eth_sendRawTransaction`. Block range tags support `earliest`, `latest`, `safe`, `finalized`, and hex quantities. `eth_getTransactionCount` also supports `pending` for mempool-aware nonce calculation.
+- `POST /rpc` with methods `chain_head`, `chain_finality`, `chain_feeMarket`, `chain_getAccount`, `chain_validators`, `chain_proposal`, `chain_param`, `chain_sendTx`, and `chain_faucet`
+- `POST /rpc` with EVM-style methods `eth_chainId`, `eth_blockNumber`, `eth_gasPrice`, `eth_maxPriorityFeePerGas`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`, `eth_getLogs`, `eth_call`, `eth_estimateGas`, and `eth_sendRawTransaction`. Block range tags support `earliest`, `latest`, `safe`, `finalized`, and hex quantities. `eth_getTransactionCount` also supports `pending` for mempool-aware nonce calculation.
 - `POST /rpc` with txpool-style methods `txpool_status` and `txpool_content`
 
 ## Roadmap

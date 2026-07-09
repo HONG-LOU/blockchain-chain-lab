@@ -14,7 +14,7 @@ As of 2026-07-09, the practical way to build a serious chain is not to copy one 
 
 1. Keep ChainLab as a learning and prototype chain. The goal is to understand the state transition function, blocks, receipts, roots, mempool, signatures, RPC, contract VM boundary, and local validator operations.
 2. Add advanced concepts in small verified slices: uploaded WASM, deterministic resource metering, ABI encoding, richer event indexing, BFT finality simulation, and EVM-style raw transactions.
-   - Current ChainLab progress includes uploaded WASM code, deterministic WASM host-resource gas, validator set changes, and an explicit governance proposal lifecycle for parameter changes.
+   - Current ChainLab progress includes uploaded WASM code, deterministic WASM host-resource gas, an EIP-1559-style local fee market, validator set changes, and an explicit governance proposal lifecycle for parameter changes.
 3. Once the product target is clear, choose a production base instead of shipping the custom dev chain as a mainnet:
    - OP Stack or another Ethereum rollup stack if liquidity, Solidity, and wallet compatibility matter most.
    - Cosmos SDK if the chain needs sovereign governance, IBC, and custom modules.
@@ -38,7 +38,7 @@ As of 2026-07-09, the practical way to build a serious chain is not to copy one 
 - Commit contract code, validator sets, and governance state into state roots; never rely on node-local registries for consensus behavior.
 - Keep VM host functions minimal: no filesystem, network, clock, randomness, or global mutable process state.
 - Charge deterministic fees for every consensus-relevant resource: bytecode size, storage growth, CPU steps, memory, logs, and state reads/writes.
-- Keep metering honest about scope: ChainLab currently charges uploaded WASM bytecode size and host ABI storage/event/arg/return resources; CPU instruction/fuel metering remains a separate VM-level milestone.
+- Keep fee and metering honest about scope: ChainLab now has a local EIP-1559-style base fee, base fee burn, priority fee rewards, uploaded WASM bytecode fees, and host ABI storage/event/arg/return resource gas; CPU instruction/fuel metering and Ethereum type-2 raw transaction compatibility remain separate milestones.
 - Prefer boring cryptography and audited libraries; do not invent signature schemes, hash functions, bridges, or consensus protocols for production.
 - Treat bridges and upgrade keys as the highest-risk parts of the system.
 - Build every feature with replay tests, persistence tests, CLI/RPC tests, and at least one real-node end-to-end path.

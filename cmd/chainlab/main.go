@@ -327,7 +327,7 @@ func txCommand(args []string, out io.Writer) {
 
 func queryCommand(args []string, out io.Writer) {
 	if len(args) < 1 {
-		log.Fatal("usage: chainlab query <account|tx|head|finality|mempool|logs|validators|proposal|param|call|estimate-gas>")
+		log.Fatal("usage: chainlab query <account|tx|head|finality|fees|mempool|logs|validators|proposal|param|call|estimate-gas>")
 	}
 	var err error
 	switch args[0] {
@@ -339,6 +339,8 @@ func queryCommand(args []string, out io.Writer) {
 		err = headCommand(args[1:], out)
 	case "finality":
 		err = finalityCommand(args[1:], out)
+	case "fees":
+		err = feesCommand(args[1:], out)
 	case "mempool":
 		err = mempoolCommand(args[1:], out)
 	case "logs":
@@ -381,11 +383,13 @@ func transferCommand(args []string, out io.Writer) error {
 	value := flags.Uint64("value", 0, "transfer amount")
 	gasLimit := flags.Uint64("gas-limit", 21_000, "gas limit")
 	gasPrice := flags.Uint64("gas-price", 1, "gas price")
+	maxFeePerGas := flags.Uint64("max-fee-per-gas", 0, "EIP-1559-style max fee per gas")
+	maxPriorityFeePerGas := flags.Uint64("max-priority-fee-per-gas", 0, "EIP-1559-style max priority fee per gas")
 	rawOnly := flags.Bool("raw-only", false, "print signed raw transaction without submitting")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	tx, err := buildSignedTransfer(*rpcURL, *privateKeyHex, *to, *value, *gasLimit, *gasPrice)
+	tx, err := buildSignedTransferWithFeeCaps(*rpcURL, *privateKeyHex, *to, *value, *gasLimit, *gasPrice, *maxFeePerGas, *maxPriorityFeePerGas)
 	if err != nil {
 		return err
 	}
@@ -769,16 +773,24 @@ func contractCallCommand(args []string, out io.Writer) error {
 }
 
 func buildSignedTransfer(rpcURL string, privateKeyHex string, to string, value uint64, gasLimit uint64, gasPrice uint64) (types.Transaction, error) {
+	return buildSignedTransferWithFeeCaps(rpcURL, privateKeyHex, to, value, gasLimit, gasPrice, 0, 0)
+}
+
+func buildSignedTransferWithFeeCaps(rpcURL string, privateKeyHex string, to string, value uint64, gasLimit uint64, gasPrice uint64, maxFeePerGas uint64, maxPriorityFeePerGas uint64) (types.Transaction, error) {
 	if privateKeyHex == "" {
 		return types.Transaction{}, fmt.Errorf("private key is required")
 	}
 	if to == "" {
 		return types.Transaction{}, fmt.Errorf("recipient is required")
 	}
-	return buildSignedTransaction(rpcURL, privateKeyHex, types.TxTransfer, to, value, gasLimit, gasPrice, nil)
+	return buildSignedTransactionWithFeeCaps(rpcURL, privateKeyHex, types.TxTransfer, to, value, gasLimit, gasPrice, maxFeePerGas, maxPriorityFeePerGas, nil)
 }
 
 func buildSignedTransaction(rpcURL string, privateKeyHex string, txType types.TxType, to string, value uint64, gasLimit uint64, gasPrice uint64, payload map[string]string) (types.Transaction, error) {
+	return buildSignedTransactionWithFeeCaps(rpcURL, privateKeyHex, txType, to, value, gasLimit, gasPrice, 0, 0, payload)
+}
+
+func buildSignedTransactionWithFeeCaps(rpcURL string, privateKeyHex string, txType types.TxType, to string, value uint64, gasLimit uint64, gasPrice uint64, maxFeePerGas uint64, maxPriorityFeePerGas uint64, payload map[string]string) (types.Transaction, error) {
 	if privateKeyHex == "" {
 		return types.Transaction{}, fmt.Errorf("private key is required")
 	}
@@ -801,15 +813,17 @@ func buildSignedTransaction(rpcURL string, privateKeyHex string, txType types.Tx
 		return types.Transaction{}, err
 	}
 	tx := types.Transaction{
-		ChainID:  chainID,
-		Type:     txType,
-		From:     from,
-		To:       to,
-		Nonce:    nonce,
-		Value:    value,
-		GasLimit: gasLimit,
-		GasPrice: gasPrice,
-		Payload:  payload,
+		ChainID:              chainID,
+		Type:                 txType,
+		From:                 from,
+		To:                   to,
+		Nonce:                nonce,
+		Value:                value,
+		GasLimit:             gasLimit,
+		GasPrice:             gasPrice,
+		MaxFeePerGas:         maxFeePerGas,
+		MaxPriorityFeePerGas: maxPriorityFeePerGas,
+		Payload:              payload,
 	}
 	signature, err := crypto.Sign(key, tx.SigningBytes())
 	if err != nil {
@@ -934,6 +948,19 @@ func finalityCommand(args []string, out io.Writer) error {
 		return err
 	}
 	return writeTo(out, finality)
+}
+
+func feesCommand(args []string, out io.Writer) error {
+	flags := flag.NewFlagSet("query fees", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	var fees map[string]string
+	if err := rpcCall(*rpcURL, "chain_feeMarket", []any{}, &fees); err != nil {
+		return err
+	}
+	return writeTo(out, fees)
 }
 
 func mempoolCommand(args []string, out io.Writer) error {

@@ -186,6 +186,66 @@ func TestEVMCompatibleJSONRPCSubset(t *testing.T) {
 	}
 }
 
+func TestRPCExposesFeeMarketFields(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		BlockGasLimit:  42_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	for nonce, to := range []string{bob, carol} {
+		tx := signedRPCTransaction(t, key, types.Transaction{
+			ChainID:  "chainlab-local",
+			Type:     types.TxTransfer,
+			From:     alice,
+			To:       to,
+			Nonce:    uint64(nonce),
+			Value:    1,
+			GasLimit: 21_000,
+			GasPrice: 2,
+		})
+		if err := n.SubmitTx(tx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+
+	assertRPCResult(t, server.URL, "eth_gasPrice", []any{}, "0x3")
+	assertRPCResult(t, server.URL, "eth_maxPriorityFeePerGas", []any{}, "0x1")
+	feeMarket := callRPC(t, server.URL, "chain_feeMarket", []any{})
+	feeMap, ok := feeMarket.(map[string]any)
+	if !ok || feeMap["base_fee_per_gas"] != "0x2" || feeMap["gas_price"] != "0x3" {
+		t.Fatalf("fee market = %#v", feeMarket)
+	}
+
+	blockResult := callRPC(t, server.URL, "eth_getBlockByNumber", []any{"latest", false})
+	blockMap, ok := blockResult.(map[string]any)
+	if !ok {
+		t.Fatalf("block result type = %T", blockResult)
+	}
+	if blockMap["baseFeePerGas"] != "0x2" || blockMap["gasLimit"] != "0xa410" || blockMap["gasUsed"] != "0x0" {
+		t.Fatalf("fee block fields = %#v", blockMap)
+	}
+}
+
 func TestRPCExposesValidatorSet(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {

@@ -63,6 +63,74 @@ func TestNodeSubmitsTxAndProducesBlock(t *testing.T) {
 	}
 }
 
+func TestNodeFeeMarketAdjustsBaseFeeAndRecordsGasUsed(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
+
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		BlockGasLimit:  42_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first := signedNodeTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     alice,
+		To:       bob,
+		Nonce:    0,
+		Value:    1,
+		GasLimit: 21_000,
+		GasPrice: 2,
+	})
+	second := signedNodeTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     alice,
+		To:       carol,
+		Nonce:    1,
+		Value:    1,
+		GasLimit: 21_000,
+		GasPrice: 2,
+	})
+	if err := n.SubmitTx(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.SubmitTx(second); err != nil {
+		t.Fatal(err)
+	}
+	fullBlock, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fullBlock.Header.BaseFeePerGas != 1 {
+		t.Fatalf("full block base fee = %d", fullBlock.Header.BaseFeePerGas)
+	}
+	if fullBlock.Header.GasLimit != 42_000 || fullBlock.Header.GasUsed != 42_000 {
+		t.Fatalf("full block gas = used %d limit %d", fullBlock.Header.GasUsed, fullBlock.Header.GasLimit)
+	}
+
+	emptyBlock, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if emptyBlock.Header.BaseFeePerGas != 2 {
+		t.Fatalf("empty block base fee = %d", emptyBlock.Header.BaseFeePerGas)
+	}
+	if emptyBlock.Header.GasUsed != 0 || emptyBlock.Header.GasLimit != 42_000 {
+		t.Fatalf("empty block gas = used %d limit %d", emptyBlock.Header.GasUsed, emptyBlock.Header.GasLimit)
+	}
+}
+
 func TestNodePersistsChainStateAndTransactionIndex(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {
