@@ -2981,6 +2981,87 @@ func TestEthGetCodeAndStorageAt(t *testing.T) {
 	}
 }
 
+func TestRPCAndExplorerExposeDelegatedEOA(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	owner := chaincrypto.AddressFromPrivateKey(ownerKey)
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	tx := signedRPCTransaction(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxSetCode,
+		From:     alice,
+		Nonce:    0,
+		GasLimit: 45_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"code_id": contracts.AccountCodeID,
+			"owner":   owner,
+		},
+	})
+	raw, err := json.Marshal(tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post(server.URL+"/tx", "application/json", bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("set-code status = %d", resp.StatusCode)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+
+	accountResp, err := http.Get(server.URL + "/account/" + alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer accountResp.Body.Close()
+	var account types.Account
+	if err := json.NewDecoder(accountResp.Body).Decode(&account); err != nil {
+		t.Fatal(err)
+	}
+	if account.DelegatedCodeID != contracts.AccountCodeID {
+		t.Fatalf("account delegation = %+v", account)
+	}
+
+	if got := callRPC(t, server.URL, "eth_getCode", []any{alice, "latest"}); got != hexData(contracts.AccountCodeID) {
+		t.Fatalf("delegated eth_getCode = %v", got)
+	}
+
+	explorerResp, err := http.Get(server.URL + "/explorer/account/" + alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer explorerResp.Body.Close()
+	body, err := io.ReadAll(explorerResp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "Delegated Code") || !strings.Contains(string(body), contracts.AccountCodeID) {
+		t.Fatalf("explorer account page missing delegation: %s", string(body))
+	}
+}
+
 func TestRPCBroadcastsTransactionsToPeers(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {

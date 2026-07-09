@@ -747,6 +747,7 @@ var explorerAccountTemplate = template.Must(template.New("explorer-account").Par
       <div class="field"><div class="label">Stake</div><div>{{.Stake}}</div></div>
       <div class="field"><div class="label">Validator</div><div>{{.IsValidator}}</div></div>
       {{if .Account.CodeID}}<div class="field"><div class="label">Code ID</div><div>{{.Account.CodeID}}</div></div>{{end}}
+      {{if .Account.DelegatedCodeID}}<div class="field"><div class="label">Delegated Code</div><div>{{.Account.DelegatedCodeID}}</div></div>{{end}}
     </section>
 
     {{if .Account.Storage}}

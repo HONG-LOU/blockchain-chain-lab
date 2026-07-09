@@ -846,7 +846,12 @@ func (s *Server) handleSingleJSONRPC(w http.ResponseWriter, request rpcRequest) 
 			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: codeIDHex(n.Account(address).CodeID)})
+		account := n.Account(address)
+		codeID := account.CodeID
+		if codeID == "" {
+			codeID = account.DelegatedCodeID
+		}
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: codeIDHex(codeID)})
 	case "eth_getStorageAt":
 		params, err := rpcParams(request.Params)
 		if err != nil || len(params) < 2 {
