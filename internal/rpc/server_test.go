@@ -1,15 +1,22 @@
 package rpc_test
 
 import (
+	"bufio"
 	"bytes"
+	"crypto/rand"
+	"crypto/sha1"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"chainlab/internal/consensus"
 	"chainlab/internal/contracts"
@@ -287,6 +294,70 @@ func TestJSONRPCExposesClientAndNetworkProbeMethods(t *testing.T) {
 	}
 	if got := callRPC(t, server.URL, "eth_hashrate", []any{}); got != "0x0" {
 		t.Fatalf("eth_hashrate = %#v", got)
+	}
+}
+
+func TestWebSocketEthSubscribeNewHeadsPublishesProducedBlocks(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	conn, reader := openWebSocket(t, server.URL, "/rpc/ws")
+	defer conn.Close()
+	writeWebSocketText(t, conn, `{"jsonrpc":"2.0","id":1,"method":"eth_subscribe","params":["newHeads"]}`)
+	subscribeRaw := readWebSocketText(t, conn, reader)
+	var subscribeResp struct {
+		ID     int    `json:"id"`
+		Result string `json:"result"`
+		Error  string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(subscribeRaw), &subscribeResp); err != nil {
+		t.Fatal(err)
+	}
+	if subscribeResp.ID != 1 || subscribeResp.Error != "" || subscribeResp.Result == "" {
+		t.Fatalf("subscribe response = %#v raw=%s", subscribeResp, subscribeRaw)
+	}
+
+	resp, err := http.Post(server.URL+"/chain/produce", "application/json", bytes.NewReader([]byte("{}")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("produce status = %d", resp.StatusCode)
+	}
+
+	notificationRaw := readWebSocketText(t, conn, reader)
+	var notification struct {
+		Method string `json:"method"`
+		Params struct {
+			Subscription string         `json:"subscription"`
+			Result       map[string]any `json:"result"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal([]byte(notificationRaw), &notification); err != nil {
+		t.Fatal(err)
+	}
+	if notification.Method != "eth_subscription" || notification.Params.Subscription != subscribeResp.Result {
+		t.Fatalf("notification envelope = %#v raw=%s", notification, notificationRaw)
+	}
+	if notification.Params.Result["number"] != "0x1" || notification.Params.Result["miner"] != strings.ToLower(alice) {
+		t.Fatalf("newHeads payload = %#v", notification.Params.Result)
+	}
+	if hash, ok := notification.Params.Result["hash"].(string); !ok || hash == "" || hash == "0x" {
+		t.Fatalf("newHeads hash = %#v", notification.Params.Result["hash"])
 	}
 }
 
@@ -2785,4 +2856,138 @@ func callRPC(t *testing.T, url string, method string, params []any) any {
 		t.Fatalf("%s error = %s", method, rpcResp.Error)
 	}
 	return rpcResp.Result
+}
+
+func openWebSocket(t *testing.T, serverURL string, path string) (net.Conn, *bufio.Reader) {
+	t.Helper()
+	parsed, err := url.Parse(serverURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := net.Dial("tcp", parsed.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := websocketClientKey(t)
+	request, err := http.NewRequest(http.MethodGet, "http://"+parsed.Host+path, nil)
+	if err != nil {
+		conn.Close()
+		t.Fatal(err)
+	}
+	request.Host = parsed.Host
+	request.Header.Set("Connection", "Upgrade")
+	request.Header.Set("Upgrade", "websocket")
+	request.Header.Set("Sec-WebSocket-Version", "13")
+	request.Header.Set("Sec-WebSocket-Key", key)
+	if err := request.Write(conn); err != nil {
+		conn.Close()
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(conn)
+	response, err := http.ReadResponse(reader, request)
+	if err != nil {
+		conn.Close()
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusSwitchingProtocols {
+		conn.Close()
+		t.Fatalf("websocket status = %d", response.StatusCode)
+	}
+	if got := response.Header.Get("Sec-WebSocket-Accept"); got != websocketAccept(key) {
+		conn.Close()
+		t.Fatalf("websocket accept = %q", got)
+	}
+	return conn, reader
+}
+
+func websocketClientKey(t *testing.T) string {
+	t.Helper()
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		t.Fatal(err)
+	}
+	return base64.StdEncoding.EncodeToString(nonce[:])
+}
+
+func websocketAccept(key string) string {
+	sum := sha1.Sum([]byte(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+	return base64.StdEncoding.EncodeToString(sum[:])
+}
+
+func writeWebSocketText(t *testing.T, conn net.Conn, payload string) {
+	t.Helper()
+	data := []byte(payload)
+	header := []byte{0x81}
+	switch {
+	case len(data) <= 125:
+		header = append(header, byte(0x80|len(data)))
+	case len(data) <= 65535:
+		header = append(header, 0x80|126, byte(len(data)>>8), byte(len(data)))
+	default:
+		t.Fatalf("test websocket payload too large: %d", len(data))
+	}
+	var mask [4]byte
+	if _, err := rand.Read(mask[:]); err != nil {
+		t.Fatal(err)
+	}
+	masked := make([]byte, len(data))
+	for i, b := range data {
+		masked[i] = b ^ mask[i%4]
+	}
+	frame := append(header, mask[:]...)
+	frame = append(frame, masked...)
+	if _, err := conn.Write(frame); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readWebSocketText(t *testing.T, conn net.Conn, reader *bufio.Reader) string {
+	t.Helper()
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	first, err := reader.ReadByte()
+	if err != nil {
+		t.Fatal(err)
+	}
+	opcode := first & 0x0f
+	if opcode == 0x8 {
+		t.Fatal("websocket closed before text frame")
+	}
+	if opcode != 0x1 {
+		t.Fatalf("websocket opcode = %#x", opcode)
+	}
+	second, err := reader.ReadByte()
+	if err != nil {
+		t.Fatal(err)
+	}
+	masked := second&0x80 != 0
+	length := uint64(second & 0x7f)
+	switch length {
+	case 126:
+		extended := make([]byte, 2)
+		if _, err := io.ReadFull(reader, extended); err != nil {
+			t.Fatal(err)
+		}
+		length = uint64(extended[0])<<8 | uint64(extended[1])
+	case 127:
+		t.Fatal("test websocket reader does not support 64-bit lengths")
+	}
+	var mask [4]byte
+	if masked {
+		if _, err := io.ReadFull(reader, mask[:]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	payload := make([]byte, length)
+	if _, err := io.ReadFull(reader, payload); err != nil {
+		t.Fatal(err)
+	}
+	if masked {
+		for i := range payload {
+			payload[i] ^= mask[i%4]
+		}
+	}
+	return string(payload)
 }

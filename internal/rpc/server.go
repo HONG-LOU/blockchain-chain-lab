@@ -1,15 +1,21 @@
 package rpc
 
 import (
+	"bufio"
 	"bytes"
+	"crypto/sha1"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"chainlab/internal/core"
@@ -24,19 +30,23 @@ func NewServer(n *node.Node) http.Handler {
 
 func NewServerWithPeers(n *node.Node, peers []string) http.Handler {
 	server := &Server{
-		node:    n,
-		peers:   append([]string(nil), peers...),
-		client:  &http.Client{Timeout: 5 * time.Second},
-		filters: newLogFilterStore(),
+		node:       n,
+		peers:      append([]string(nil), peers...),
+		client:     &http.Client{Timeout: 5 * time.Second},
+		filters:    newLogFilterStore(),
+		wsNewHeads: make(map[string]chan types.Block),
 	}
 	return server.routes()
 }
 
 type Server struct {
-	node    *node.Node
-	peers   []string
-	client  *http.Client
-	filters *logFilterStore
+	node       *node.Node
+	peers      []string
+	client     *http.Client
+	filters    *logFilterStore
+	wsMu       sync.Mutex
+	nextWSID   uint64
+	wsNewHeads map[string]chan types.Block
 }
 
 func (s *Server) routes() http.Handler {
@@ -77,6 +87,7 @@ func (s *Server) routes() http.Handler {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
+		s.notifyNewHead(block)
 		peerErrors := s.broadcastBlock(block)
 		if len(peerErrors) > 0 {
 			writeJSON(w, http.StatusOK, map[string]any{"block": block, "peer_errors": peerErrors})
@@ -180,6 +191,9 @@ func (s *Server) routes() http.Handler {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
+		if head := s.node.Head(); head.Hash() == block.Hash() {
+			s.notifyNewHead(block)
+		}
 		writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted", "hash": block.Hash()})
 	})
 	mux.HandleFunc("POST /peer/finality-vote", func(w http.ResponseWriter, r *http.Request) {
@@ -195,6 +209,7 @@ func (s *Server) routes() http.Handler {
 		writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted", "validator": vote.Validator})
 	})
 	mux.HandleFunc("POST /rpc", s.handleJSONRPC)
+	mux.HandleFunc("GET /rpc/ws", s.handleWebSocketJSONRPC)
 	return mux
 }
 
@@ -300,6 +315,222 @@ type rpcResponse struct {
 	ID     any    `json:"id,omitempty"`
 	Result any    `json:"result,omitempty"`
 	Error  string `json:"error,omitempty"`
+}
+
+const websocketGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+func (s *Server) handleWebSocketJSONRPC(w http.ResponseWriter, r *http.Request) {
+	key := strings.TrimSpace(r.Header.Get("Sec-WebSocket-Key"))
+	if !websocketUpgradeRequested(r) || key == "" || r.Header.Get("Sec-WebSocket-Version") != "13" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "websocket upgrade is required"})
+		return
+	}
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "websocket hijack is not supported"})
+		return
+	}
+	conn, rw, err := hijacker.Hijack()
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	if err := writeWebSocketHandshake(rw, key); err != nil {
+		return
+	}
+	localSubscriptions := make(map[string]struct{})
+	defer func() {
+		for id := range localSubscriptions {
+			s.unregisterNewHeadSubscription(id)
+		}
+	}()
+	var writeMu sync.Mutex
+	for {
+		payload, err := readWebSocketTextFrame(rw.Reader)
+		if err != nil {
+			return
+		}
+		var request rpcRequest
+		if err := json.Unmarshal([]byte(payload), &request); err != nil {
+			writeWebSocketRPCResponse(conn, &writeMu, rpcResponse{Error: "invalid json"})
+			continue
+		}
+		switch request.Method {
+		case "eth_subscribe":
+			params, err := rpcParams(request.Params)
+			if err != nil || len(params) < 1 {
+				writeWebSocketRPCResponse(conn, &writeMu, rpcResponse{ID: request.ID, Error: "subscription type is required"})
+				continue
+			}
+			subscriptionType, ok := params[0].(string)
+			if !ok || subscriptionType != "newHeads" {
+				writeWebSocketRPCResponse(conn, &writeMu, rpcResponse{ID: request.ID, Error: "unsupported subscription"})
+				continue
+			}
+			id, events := s.registerNewHeadSubscription()
+			localSubscriptions[id] = struct{}{}
+			go s.writeNewHeadNotifications(conn, &writeMu, id, events)
+			writeWebSocketRPCResponse(conn, &writeMu, rpcResponse{ID: request.ID, Result: id})
+		case "eth_unsubscribe":
+			params, err := rpcParams(request.Params)
+			if err != nil || len(params) < 1 {
+				writeWebSocketRPCResponse(conn, &writeMu, rpcResponse{ID: request.ID, Error: "subscription id is required"})
+				continue
+			}
+			id, ok := params[0].(string)
+			if !ok {
+				writeWebSocketRPCResponse(conn, &writeMu, rpcResponse{ID: request.ID, Error: "subscription id must be a string"})
+				continue
+			}
+			_, local := localSubscriptions[id]
+			if local {
+				delete(localSubscriptions, id)
+			}
+			writeWebSocketRPCResponse(conn, &writeMu, rpcResponse{ID: request.ID, Result: local && s.unregisterNewHeadSubscription(id)})
+		default:
+			writeWebSocketRPCResponse(conn, &writeMu, rpcResponse{ID: request.ID, Error: "unknown method"})
+		}
+	}
+}
+
+func websocketUpgradeRequested(r *http.Request) bool {
+	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket") && strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
+}
+
+func writeWebSocketHandshake(writer *bufio.ReadWriter, key string) error {
+	accept := websocketAcceptKey(key)
+	_, err := fmt.Fprintf(writer, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n", accept)
+	if err != nil {
+		return err
+	}
+	return writer.Flush()
+}
+
+func websocketAcceptKey(key string) string {
+	sum := sha1.Sum([]byte(key + websocketGUID))
+	return base64.StdEncoding.EncodeToString(sum[:])
+}
+
+func readWebSocketTextFrame(reader *bufio.Reader) (string, error) {
+	first, err := reader.ReadByte()
+	if err != nil {
+		return "", err
+	}
+	opcode := first & 0x0f
+	if opcode == 0x8 {
+		return "", io.EOF
+	}
+	if opcode != 0x1 {
+		return "", fmt.Errorf("unsupported websocket opcode %d", opcode)
+	}
+	second, err := reader.ReadByte()
+	if err != nil {
+		return "", err
+	}
+	masked := second&0x80 != 0
+	if !masked {
+		return "", errors.New("client websocket frames must be masked")
+	}
+	length := uint64(second & 0x7f)
+	switch length {
+	case 126:
+		extended := make([]byte, 2)
+		if _, err := io.ReadFull(reader, extended); err != nil {
+			return "", err
+		}
+		length = uint64(extended[0])<<8 | uint64(extended[1])
+	case 127:
+		return "", errors.New("websocket payload is too large")
+	}
+	var mask [4]byte
+	if _, err := io.ReadFull(reader, mask[:]); err != nil {
+		return "", err
+	}
+	payload := make([]byte, length)
+	if _, err := io.ReadFull(reader, payload); err != nil {
+		return "", err
+	}
+	for i := range payload {
+		payload[i] ^= mask[i%4]
+	}
+	return string(payload), nil
+}
+
+func writeWebSocketRPCResponse(conn net.Conn, writeMu *sync.Mutex, response rpcResponse) {
+	writeWebSocketJSON(conn, writeMu, response)
+}
+
+func writeWebSocketJSON(conn net.Conn, writeMu *sync.Mutex, value any) {
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return
+	}
+	writeMu.Lock()
+	defer writeMu.Unlock()
+	_ = writeWebSocketTextFrame(conn, payload)
+}
+
+func writeWebSocketTextFrame(conn net.Conn, payload []byte) error {
+	header := []byte{0x81}
+	switch {
+	case len(payload) <= 125:
+		header = append(header, byte(len(payload)))
+	case len(payload) <= 65535:
+		header = append(header, 126, byte(len(payload)>>8), byte(len(payload)))
+	default:
+		return errors.New("websocket payload is too large")
+	}
+	if _, err := conn.Write(header); err != nil {
+		return err
+	}
+	_, err := conn.Write(payload)
+	return err
+}
+
+func (s *Server) registerNewHeadSubscription() (string, <-chan types.Block) {
+	s.wsMu.Lock()
+	defer s.wsMu.Unlock()
+	s.nextWSID++
+	id := quantity(s.nextWSID)
+	events := make(chan types.Block, 8)
+	s.wsNewHeads[id] = events
+	return id, events
+}
+
+func (s *Server) unregisterNewHeadSubscription(id string) bool {
+	s.wsMu.Lock()
+	defer s.wsMu.Unlock()
+	events, ok := s.wsNewHeads[id]
+	if !ok {
+		return false
+	}
+	delete(s.wsNewHeads, id)
+	close(events)
+	return true
+}
+
+func (s *Server) notifyNewHead(block types.Block) {
+	s.wsMu.Lock()
+	defer s.wsMu.Unlock()
+	for _, events := range s.wsNewHeads {
+		select {
+		case events <- block:
+		default:
+		}
+	}
+}
+
+func (s *Server) writeNewHeadNotifications(conn net.Conn, writeMu *sync.Mutex, id string, events <-chan types.Block) {
+	for block := range events {
+		writeWebSocketJSON(conn, writeMu, map[string]any{
+			"jsonrpc": "2.0",
+			"method":  "eth_subscription",
+			"params": map[string]any{
+				"subscription": id,
+				"result":       evmBlockHeader(block),
+			},
+		})
+	}
 }
 
 func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
@@ -1770,6 +2001,26 @@ func chainLabTraceEvents(events []types.Event) []map[string]any {
 	return output
 }
 
+func evmBlockHeader(block types.Block) map[string]any {
+	response := map[string]any{
+		"number":           quantity(block.Header.Height),
+		"hash":             block.Hash(),
+		"parentHash":       block.Header.ParentHash,
+		"timestamp":        quantity(uint64(block.Header.TimeUnix)),
+		"transactionsRoot": block.Header.TxRoot,
+		"receiptsRoot":     block.Header.ReceiptRoot,
+		"stateRoot":        block.Header.StateRoot,
+		"gasLimit":         quantity(block.Header.GasLimit),
+		"gasUsed":          quantity(block.Header.GasUsed),
+		"baseFeePerGas":    quantity(block.Header.BaseFeePerGas),
+		"miner":            strings.ToLower(block.Header.Proposer),
+	}
+	if block.FinalityCertificate != nil {
+		response["finalityCertificate"] = evmFinalityCertificate(*block.FinalityCertificate)
+	}
+	return response
+}
+
 func evmBlock(block types.Block, fullTransactions bool) map[string]any {
 	transactions := make([]any, len(block.Transactions))
 	for i, tx := range block.Transactions {
@@ -1799,23 +2050,8 @@ func evmBlock(block types.Block, fullTransactions bool) map[string]any {
 			transactions[i] = tx.Hash()
 		}
 	}
-	response := map[string]any{
-		"number":           quantity(block.Header.Height),
-		"hash":             block.Hash(),
-		"parentHash":       block.Header.ParentHash,
-		"timestamp":        quantity(uint64(block.Header.TimeUnix)),
-		"transactionsRoot": block.Header.TxRoot,
-		"receiptsRoot":     block.Header.ReceiptRoot,
-		"stateRoot":        block.Header.StateRoot,
-		"gasLimit":         quantity(block.Header.GasLimit),
-		"gasUsed":          quantity(block.Header.GasUsed),
-		"baseFeePerGas":    quantity(block.Header.BaseFeePerGas),
-		"miner":            strings.ToLower(block.Header.Proposer),
-		"transactions":     transactions,
-	}
-	if block.FinalityCertificate != nil {
-		response["finalityCertificate"] = evmFinalityCertificate(*block.FinalityCertificate)
-	}
+	response := evmBlockHeader(block)
+	response["transactions"] = transactions
 	return response
 }
 
