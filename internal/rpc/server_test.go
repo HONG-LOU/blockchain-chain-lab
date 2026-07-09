@@ -1977,6 +1977,72 @@ func TestEthBlockFilterTracksNewBlockHashes(t *testing.T) {
 	}
 }
 
+func TestEthPendingTransactionFilterTracksNewHashes(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	existing := signedTransfer(t, key, alice, bob, 0, 100)
+	if err := n.SubmitTx(existing); err != nil {
+		t.Fatal(err)
+	}
+
+	filterID, ok := callRPC(t, server.URL, "eth_newPendingTransactionFilter", []any{}).(string)
+	if !ok || !strings.HasPrefix(filterID, "0x") {
+		t.Fatalf("filter id = %#v", filterID)
+	}
+	if changes := callRPC(t, server.URL, "eth_getFilterChanges", []any{filterID}); len(changes.([]any)) != 0 {
+		t.Fatalf("initial pending filter changes = %#v", changes)
+	}
+
+	firstNew := signedTransfer(t, key, alice, bob, 1, 101)
+	if err := n.SubmitTx(firstNew); err != nil {
+		t.Fatal(err)
+	}
+	changes := callRPC(t, server.URL, "eth_getFilterChanges", []any{filterID})
+	hashes, ok := changes.([]any)
+	if !ok || len(hashes) != 1 || hashes[0] != firstNew.Hash() {
+		t.Fatalf("first pending filter changes = %#v", changes)
+	}
+	if empty := callRPC(t, server.URL, "eth_getFilterChanges", []any{filterID}); len(empty.([]any)) != 0 {
+		t.Fatalf("second pending filter changes = %#v", empty)
+	}
+
+	secondNew := signedTransfer(t, key, alice, bob, 2, 102)
+	thirdNew := signedTransfer(t, key, alice, bob, 3, 103)
+	if err := n.SubmitTx(secondNew); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.SubmitTx(thirdNew); err != nil {
+		t.Fatal(err)
+	}
+	changes = callRPC(t, server.URL, "eth_getFilterChanges", []any{filterID})
+	hashes, ok = changes.([]any)
+	if !ok || len(hashes) != 2 || hashes[0] != secondNew.Hash() || hashes[1] != thirdNew.Hash() {
+		t.Fatalf("later pending filter changes = %#v", changes)
+	}
+
+	if uninstalled := callRPC(t, server.URL, "eth_uninstallFilter", []any{filterID}); uninstalled != true {
+		t.Fatalf("uninstall pending filter = %#v", uninstalled)
+	}
+	if uninstalled := callRPC(t, server.URL, "eth_uninstallFilter", []any{filterID}); uninstalled != false {
+		t.Fatalf("second pending uninstall = %#v", uninstalled)
+	}
+}
+
 func TestEthCallAndEstimateGas(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {

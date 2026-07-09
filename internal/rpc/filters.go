@@ -7,10 +7,11 @@ import (
 )
 
 type logFilterStore struct {
-	mu           sync.Mutex
-	next         uint64
-	filters      map[string]storedLogFilter
-	blockFilters map[string]uint64
+	mu             sync.Mutex
+	next           uint64
+	filters        map[string]storedLogFilter
+	blockFilters   map[string]uint64
+	pendingFilters map[string]map[string]struct{}
 }
 
 type storedLogFilter struct {
@@ -20,8 +21,9 @@ type storedLogFilter struct {
 
 func newLogFilterStore() *logFilterStore {
 	return &logFilterStore{
-		filters:      make(map[string]storedLogFilter),
-		blockFilters: make(map[string]uint64),
+		filters:        make(map[string]storedLogFilter),
+		blockFilters:   make(map[string]uint64),
+		pendingFilters: make(map[string]map[string]struct{}),
 	}
 }
 
@@ -45,6 +47,21 @@ func (s *Server) registerBlockFilter(nextBlock uint64) string {
 	return id
 }
 
+func (s *Server) registerPendingTransactionFilter() string {
+	seen := make(map[string]struct{})
+	for _, tx := range s.node.TxPool().Pending {
+		seen[strings.ToLower(tx.Hash())] = struct{}{}
+	}
+
+	s.filters.mu.Lock()
+	defer s.filters.mu.Unlock()
+
+	s.filters.next++
+	id := quantity(s.filters.next)
+	s.filters.pendingFilters[id] = seen
+	return id
+}
+
 func (s *Server) logFilterLogs(id string) ([]map[string]any, bool) {
 	latest := s.node.Finality().HeadHeight
 	s.filters.mu.Lock()
@@ -60,7 +77,10 @@ func (s *Server) filterChanges(id string) (any, bool) {
 	if logs, ok := s.logFilterChanges(id); ok {
 		return logs, true
 	}
-	return s.blockFilterChanges(id)
+	if blocks, ok := s.blockFilterChanges(id); ok {
+		return blocks, true
+	}
+	return s.pendingTransactionFilterChanges(id)
 }
 
 func (s *Server) logFilterChanges(id string) ([]map[string]any, bool) {
@@ -112,17 +132,42 @@ func (s *Server) blockFilterChanges(id string) ([]string, bool) {
 	return hashes, true
 }
 
+func (s *Server) pendingTransactionFilterChanges(id string) ([]string, bool) {
+	pool := s.node.TxPool()
+	s.filters.mu.Lock()
+	seen, ok := s.filters.pendingFilters[id]
+	if !ok {
+		s.filters.mu.Unlock()
+		return nil, false
+	}
+	hashes := make([]string, 0)
+	for _, tx := range pool.Pending {
+		hash := tx.Hash()
+		key := strings.ToLower(hash)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		hashes = append(hashes, hash)
+	}
+	s.filters.pendingFilters[id] = seen
+	s.filters.mu.Unlock()
+	return hashes, true
+}
+
 func (s *Server) uninstallFilter(id string) bool {
 	s.filters.mu.Lock()
 	defer s.filters.mu.Unlock()
 
 	_, logOK := s.filters.filters[id]
 	_, blockOK := s.filters.blockFilters[id]
-	if !logOK && !blockOK {
+	_, pendingOK := s.filters.pendingFilters[id]
+	if !logOK && !blockOK && !pendingOK {
 		return false
 	}
 	delete(s.filters.filters, id)
 	delete(s.filters.blockFilters, id)
+	delete(s.filters.pendingFilters, id)
 	return true
 }
 

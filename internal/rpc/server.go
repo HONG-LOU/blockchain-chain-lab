@@ -683,6 +683,8 @@ func (s *Server) handleSingleJSONRPC(w http.ResponseWriter, request rpcRequest) 
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: s.registerLogFilter(filter, nextBlock)})
 	case "eth_newBlockFilter":
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: s.registerBlockFilter(n.Finality().HeadHeight + 1)})
+	case "eth_newPendingTransactionFilter":
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: s.registerPendingTransactionFilter()})
 	case "eth_getFilterLogs":
 		params, err := rpcParams(request.Params)
 		if err != nil {
