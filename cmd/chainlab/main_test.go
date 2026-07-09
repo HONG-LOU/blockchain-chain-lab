@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"chainlab/internal/consensus"
 	"chainlab/internal/contracts"
 	"chainlab/internal/core"
 	"chainlab/internal/crypto"
@@ -1364,6 +1365,65 @@ func TestQueryFinalityCommand(t *testing.T) {
 	}
 	if finality.HeadHeight != 3 || finality.SafeHeight != 2 || finality.FinalizedHeight != 1 {
 		t.Fatalf("finality = %+v", finality)
+	}
+}
+
+func TestChainFinalityVoteCommandSignsAndSubmitsVote(t *testing.T) {
+	keyA, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyB, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyC, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validatorA := crypto.AddressFromPrivateKey(keyA)
+	validatorB := crypto.AddressFromPrivateKey(keyB)
+	validatorC := crypto.AddressFromPrivateKey(keyC)
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    keyA,
+		GenesisBalance: map[string]uint64{validatorA: 1_000_000},
+		Validators:     []string{validatorA, validatorB, validatorC},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	var finality node.FinalityCheckpoint
+	for _, key := range []crypto.PrivateKey{keyA, keyB, keyC} {
+		var out bytes.Buffer
+		if err := finalityVoteCommand([]string{
+			"--rpc", server.URL,
+			"--private-key", crypto.PrivateKeyToHex(key),
+			"--height", "1",
+		}, &out); err != nil {
+			t.Fatal(err)
+		}
+		var result struct {
+			Vote     types.FinalitySignature `json:"vote"`
+			Finality node.FinalityCheckpoint `json:"finality"`
+		}
+		if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		if !consensus.VerifyFinalityVote(block, result.Vote) {
+			t.Fatalf("command vote does not verify: %+v", result.Vote)
+		}
+		finality = result.Finality
+	}
+	if finality.CertifiedHeight != block.Header.Height || finality.FinalizedSource != "bft_certificate" {
+		t.Fatalf("finality vote result = %+v", finality)
 	}
 }
 

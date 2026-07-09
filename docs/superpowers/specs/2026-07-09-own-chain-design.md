@@ -43,7 +43,7 @@ Phase 1 creates a runnable local blockchain with these capabilities:
 - Gas accounting with gas limit, legacy gas price, EIP-1559-style max fee / priority fee caps, deterministic fee charging, base fee burn, priority fee rewards, and native paymaster-sponsored fee payment.
 - Block production with deterministic transaction, receipt, and state roots.
 - Local proof-of-authority validation with a validator set.
-- Local safe/finalized checkpoints derived from conservative block depths. This models modern read semantics but is not a replacement for BFT finality.
+- Local safe/finalized checkpoints derived from BFT-style validator commit certificates when quorum exists, with conservative block-depth fallback when no certificate exists. This models modern read semantics without claiming full Tendermint/HotStuff networking.
 - Mempool that validates signatures, nonces, balances, and gas before inclusion.
 - Pending nonce calculation and txpool inspection for uncommitted transactions.
 - Native deterministic contract runtime with built-in example contracts.
@@ -208,7 +208,7 @@ Phase 2 progress:
 - CLI wallet-style commands can fetch nonce over RPC, sign and submit transfers, native contract deploys, native contract write calls, produce blocks, and query head/account/transaction records.
 - RPC and CLI expose mempool state through `GET /txpool`, `txpool_status`, `txpool_content`, and `query mempool`; `eth_getTransactionCount(..., "pending")` replays pending transactions on a cloned state so wallet-style commands can submit multiple uncommitted transactions with sequential nonces.
 - Raw transaction submission is available through `eth_sendRawTransaction`, `POST /tx/raw`, CLI `tx transfer --raw-only`, and CLI `tx raw-submit`. The current raw format is ChainLab's signed transaction JSON encoded as `0x` hex; full Ethereum RLP/EIP-1559 raw transaction compatibility remains future work.
-- Nodes expose deterministic `safe` and `finalized` checkpoints through `GET /chain/finality`, JSON-RPC `chain_finality`, CLI `query finality`, and EVM-style `safe` / `finalized` block tags. The current local policy marks `safe` as head minus one block and `finalized` as head minus two blocks, clamped to genesis.
+- Nodes expose deterministic `safe` and `finalized` checkpoints through `GET /chain/finality`, JSON-RPC `chain_finality`, CLI `query finality`, and EVM-style `safe` / `finalized` block tags. A block with a valid `finality_certificate` from more than two thirds of the active validators becomes both safe and finalized with source `bft_certificate`; otherwise the node falls back to head-minus-one safe and head-minus-two finalized checkpoints, clamped to genesis.
 - Devnet faucet support is available through `POST /faucet`, JSON-RPC `chain_faucet`, and CLI `faucet request`. It signs a normal proposer-funded transfer into the mempool and relies on block production for settlement; it is a development utility, not a production issuance or airdrop mechanism.
 - A local block explorer is available at `GET /explorer`; it server-renders head/finality checkpoints, recent blocks, head-block transactions, pending mempool transactions, and validators from node state without adding a separate frontend build.
 - The explorer supports drill-down pages for `GET /explorer/block/{height}`, `GET /explorer/tx/{hash}`, and `GET /explorer/account/{address}`, with overview links for block, transaction, sender, recipient, proposer, and validator navigation.

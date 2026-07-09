@@ -173,11 +173,38 @@ func (h BlockHeader) SigningBytes() []byte {
 	return hash.MustCanonicalBytes(h)
 }
 
+type FinalitySignature struct {
+	Validator string `json:"validator"`
+	Signature string `json:"signature"`
+}
+
+type FinalityCertificate struct {
+	ChainID    string              `json:"chain_id"`
+	Height     uint64              `json:"height"`
+	BlockHash  string              `json:"block_hash"`
+	Signatures []FinalitySignature `json:"signatures"`
+}
+
+type finalityVotePayload struct {
+	ChainID   string `json:"chain_id"`
+	Height    uint64 `json:"height"`
+	BlockHash string `json:"block_hash"`
+}
+
+func FinalityVoteSigningBytes(chainID string, height uint64, blockHash string) []byte {
+	return hash.MustCanonicalBytes(finalityVotePayload{
+		ChainID:   chainID,
+		Height:    height,
+		BlockHash: blockHash,
+	})
+}
+
 type Block struct {
-	Header       BlockHeader   `json:"header"`
-	Transactions []Transaction `json:"transactions,omitempty"`
-	Receipts     []Receipt     `json:"receipts,omitempty"`
-	Signature    string        `json:"signature,omitempty"`
+	Header              BlockHeader          `json:"header"`
+	Transactions        []Transaction        `json:"transactions,omitempty"`
+	Receipts            []Receipt            `json:"receipts,omitempty"`
+	Signature           string               `json:"signature,omitempty"`
+	FinalityCertificate *FinalityCertificate `json:"finality_certificate,omitempty"`
 }
 
 func (b Block) Hash() string {

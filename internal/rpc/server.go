@@ -528,6 +528,17 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: n.Head()})
 	case "chain_finality":
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: n.Finality()})
+	case "chain_sendFinalityVote":
+		vote, err := parseRPCFinalityVoteParam(request.Params)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
+			return
+		}
+		if err := n.SubmitFinalityVote(vote); err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: n.Finality()})
 	case "chain_feeMarket":
 		feeMarket := n.FeeMarket()
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: map[string]string{
@@ -627,6 +638,21 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeJSON(w, http.StatusNotFound, rpcResponse{ID: request.ID, Error: "unknown method"})
 	}
+}
+
+func parseRPCFinalityVoteParam(raw json.RawMessage) (types.FinalitySignature, error) {
+	if len(raw) == 0 {
+		return types.FinalitySignature{}, fmt.Errorf("finality vote is required")
+	}
+	var params []types.FinalitySignature
+	if err := json.Unmarshal(raw, &params); err == nil && len(params) > 0 {
+		return params[0], nil
+	}
+	var vote types.FinalitySignature
+	if err := json.Unmarshal(raw, &vote); err != nil {
+		return types.FinalitySignature{}, fmt.Errorf("invalid finality vote")
+	}
+	return vote, nil
 }
 
 func parseRPCTransactionParam(raw json.RawMessage) (types.Transaction, error) {
@@ -977,7 +1003,7 @@ func evmBlock(block types.Block, fullTransactions bool) map[string]any {
 			transactions[i] = tx.Hash()
 		}
 	}
-	return map[string]any{
+	response := map[string]any{
 		"number":           quantity(block.Header.Height),
 		"hash":             block.Hash(),
 		"parentHash":       block.Header.ParentHash,
@@ -990,6 +1016,20 @@ func evmBlock(block types.Block, fullTransactions bool) map[string]any {
 		"baseFeePerGas":    quantity(block.Header.BaseFeePerGas),
 		"miner":            strings.ToLower(block.Header.Proposer),
 		"transactions":     transactions,
+	}
+	if block.FinalityCertificate != nil {
+		response["finalityCertificate"] = evmFinalityCertificate(*block.FinalityCertificate)
+	}
+	return response
+}
+
+func evmFinalityCertificate(certificate types.FinalityCertificate) map[string]any {
+	return map[string]any{
+		"chainId":     certificate.ChainID,
+		"height":      quantity(certificate.Height),
+		"blockHash":   certificate.BlockHash,
+		"signerCount": quantity(uint64(len(certificate.Signatures))),
+		"signatures":  certificate.Signatures,
 	}
 }
 

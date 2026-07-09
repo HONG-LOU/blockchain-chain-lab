@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"testing"
 
+	"chainlab/internal/consensus"
 	"chainlab/internal/contracts"
 	"chainlab/internal/core"
 	chaincrypto "chainlab/internal/crypto"
@@ -1297,6 +1298,91 @@ func TestNodeFinalityUsesConservativeBlockDepths(t *testing.T) {
 	}
 	if finality.SafeDepth != 1 || finality.FinalizedDepth != 2 {
 		t.Fatalf("depths = safe %d finalized %d", finality.SafeDepth, finality.FinalizedDepth)
+	}
+}
+
+func TestNodeFinalityUsesBFTCertificateWhenQuorumVotesCommitBlock(t *testing.T) {
+	keyA, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyB, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyC, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validatorA := chaincrypto.AddressFromPrivateKey(keyA)
+	validatorB := chaincrypto.AddressFromPrivateKey(keyB)
+	validatorC := chaincrypto.AddressFromPrivateKey(keyC)
+	validators := []string{validatorA, validatorB, validatorC}
+	dataDir := t.TempDir()
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    keyA,
+		GenesisBalance: map[string]uint64{validatorA: 1_000_000},
+		Validators:     validators,
+		DataDir:        dataDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	block, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := n.Finality()
+	if before.CertifiedHeight != 0 || before.FinalizedSource != "depth_fallback" {
+		t.Fatalf("finality before votes = %+v", before)
+	}
+
+	for _, key := range []chaincrypto.PrivateKey{keyA, keyB, keyC} {
+		vote, err := consensus.SignFinalityVote(key, block)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := n.SubmitFinalityVote(vote); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	certifiedBlock, ok := n.Block(block.Header.Height)
+	if !ok {
+		t.Fatal("certified block should exist")
+	}
+	if certifiedBlock.FinalityCertificate == nil {
+		t.Fatal("block should have a finality certificate after quorum votes")
+	}
+	if len(certifiedBlock.FinalityCertificate.Signatures) != 3 {
+		t.Fatalf("certificate signatures = %+v", certifiedBlock.FinalityCertificate.Signatures)
+	}
+	finality := n.Finality()
+	if finality.SafeHeight != block.Header.Height || finality.FinalizedHeight != block.Header.Height {
+		t.Fatalf("certified finality = %+v", finality)
+	}
+	if finality.SafeSource != "bft_certificate" || finality.FinalizedSource != "bft_certificate" {
+		t.Fatalf("finality sources = %+v", finality)
+	}
+	if finality.CertifiedHash != block.Hash() || finality.CertifiedSigners != 3 || finality.CertifiedQuorum != 3 {
+		t.Fatalf("certificate summary = %+v", finality)
+	}
+
+	reloaded, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    keyA,
+		GenesisBalance: map[string]uint64{validatorA: 1_000_000},
+		Validators:     validators,
+		DataDir:        dataDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reloadedFinality := reloaded.Finality()
+	if reloadedFinality.FinalizedHeight != block.Header.Height || reloadedFinality.FinalizedSource != "bft_certificate" {
+		t.Fatalf("reloaded finality = %+v", reloadedFinality)
 	}
 }
 

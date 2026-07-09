@@ -39,6 +39,37 @@ func SignBlock(key chaincrypto.PrivateKey, block *types.Block) error {
 	return nil
 }
 
+func SignFinalityVote(key chaincrypto.PrivateKey, block types.Block) (types.FinalitySignature, error) {
+	validator := chaincrypto.AddressFromPrivateKey(key)
+	signature, err := chaincrypto.Sign(key, finalityVoteSigningBytes(block))
+	if err != nil {
+		return types.FinalitySignature{}, err
+	}
+	return types.FinalitySignature{
+		Validator: validator,
+		Signature: signature,
+	}, nil
+}
+
+func VerifyFinalityVote(block types.Block, vote types.FinalitySignature) bool {
+	validator := strings.ToLower(strings.TrimSpace(vote.Validator))
+	if validator == "" {
+		return false
+	}
+	return chaincrypto.Verify(validator, finalityVoteSigningBytes(block), vote.Signature)
+}
+
+func FinalityQuorumSize(validatorCount int) int {
+	if validatorCount <= 0 {
+		return 0
+	}
+	return validatorCount*2/3 + 1
+}
+
+func (p *POA) FinalityQuorum() int {
+	return FinalityQuorumSize(len(p.validators))
+}
+
 func (p *POA) ValidateBlock(parent types.Block, block types.Block) error {
 	proposer := strings.ToLower(block.Header.Proposer)
 	if _, ok := p.validatorSet[proposer]; !ok {
@@ -69,7 +100,50 @@ func (p *POA) ValidateBlock(parent types.Block, block types.Block) error {
 	if !chaincrypto.Verify(block.Header.Proposer, block.Header.SigningBytes(), block.Signature) {
 		return errors.New("invalid block signature")
 	}
+	if block.FinalityCertificate != nil {
+		if err := p.validateFinalityCertificate(block); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func (p *POA) validateFinalityCertificate(block types.Block) error {
+	certificate := block.FinalityCertificate
+	if certificate.ChainID != block.Header.ChainID {
+		return errors.New("finality certificate chain id mismatch")
+	}
+	if certificate.Height != block.Header.Height {
+		return errors.New("finality certificate height mismatch")
+	}
+	if certificate.BlockHash != block.Hash() {
+		return errors.New("finality certificate block hash mismatch")
+	}
+	seen := make(map[string]struct{}, len(certificate.Signatures))
+	for _, signature := range certificate.Signatures {
+		validator := strings.ToLower(strings.TrimSpace(signature.Validator))
+		if validator == "" {
+			return errors.New("finality signature validator is required")
+		}
+		if _, ok := p.validatorSet[validator]; !ok {
+			return errors.New("finality signature from non-validator")
+		}
+		if _, ok := seen[validator]; ok {
+			return errors.New("duplicate finality signature")
+		}
+		if !VerifyFinalityVote(block, types.FinalitySignature{Validator: validator, Signature: signature.Signature}) {
+			return errors.New("invalid finality signature")
+		}
+		seen[validator] = struct{}{}
+	}
+	if len(seen)*3 <= len(p.validators)*2 {
+		return errors.New("finality certificate below quorum")
+	}
+	return nil
+}
+
+func finalityVoteSigningBytes(block types.Block) []byte {
+	return types.FinalityVoteSigningBytes(block.Header.ChainID, block.Header.Height, block.Hash())
 }
 
 func (p *POA) expectedProposer(height uint64) (string, bool) {

@@ -40,6 +40,7 @@ type Node struct {
 	blocks        []types.Block
 	genesisState  state.Snapshot
 	knownBlocks   map[string]types.Block
+	finalityVotes map[string]map[string]types.FinalitySignature
 	mempool       []types.Transaction
 	txIndex       map[string]types.TransactionRecord
 	dataDir       string
@@ -56,14 +57,20 @@ const (
 )
 
 type FinalityCheckpoint struct {
-	HeadHeight      uint64 `json:"head_height"`
-	HeadHash        string `json:"head_hash"`
-	SafeHeight      uint64 `json:"safe_height"`
-	SafeHash        string `json:"safe_hash"`
-	SafeDepth       uint64 `json:"safe_depth"`
-	FinalizedHeight uint64 `json:"finalized_height"`
-	FinalizedHash   string `json:"finalized_hash"`
-	FinalizedDepth  uint64 `json:"finalized_depth"`
+	HeadHeight       uint64 `json:"head_height"`
+	HeadHash         string `json:"head_hash"`
+	SafeHeight       uint64 `json:"safe_height"`
+	SafeHash         string `json:"safe_hash"`
+	SafeDepth        uint64 `json:"safe_depth"`
+	SafeSource       string `json:"safe_source"`
+	FinalizedHeight  uint64 `json:"finalized_height"`
+	FinalizedHash    string `json:"finalized_hash"`
+	FinalizedDepth   uint64 `json:"finalized_depth"`
+	FinalizedSource  string `json:"finalized_source"`
+	CertifiedHeight  uint64 `json:"certified_height,omitempty"`
+	CertifiedHash    string `json:"certified_hash,omitempty"`
+	CertifiedSigners int    `json:"certified_signers,omitempty"`
+	CertifiedQuorum  int    `json:"certified_quorum,omitempty"`
 }
 
 type MempoolSnapshot struct {
@@ -117,6 +124,7 @@ func New(config Config) (*Node, error) {
 		executor:      core.NewExecutor(config.ChainID, feeCollector, contracts.NewRuntimeWithDefaults()),
 		consensus:     consensus.NewPOA(validators),
 		knownBlocks:   make(map[string]types.Block),
+		finalityVotes: make(map[string]map[string]types.FinalitySignature),
 		txIndex:       make(map[string]types.TransactionRecord),
 		dataDir:       config.DataDir,
 		blockGasLimit: blockGasLimit,
@@ -359,11 +367,81 @@ func (n *Node) Block(height uint64) (types.Block, bool) {
 	return n.blocks[height], true
 }
 
+func (n *Node) SubmitFinalityVote(vote types.FinalitySignature) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	vote.Validator = strings.ToLower(strings.TrimSpace(vote.Validator))
+	if vote.Validator == "" {
+		return errors.New("finality vote validator is required")
+	}
+	block, validators, err := n.matchFinalityVoteLocked(vote)
+	if err != nil {
+		return err
+	}
+	blockHash := block.Hash()
+	if n.finalityVotes == nil {
+		n.finalityVotes = make(map[string]map[string]types.FinalitySignature)
+	}
+	votes := n.finalityVotes[blockHash]
+	if votes == nil {
+		votes = make(map[string]types.FinalitySignature)
+		if block.FinalityCertificate != nil {
+			for _, signature := range block.FinalityCertificate.Signatures {
+				validator := strings.ToLower(strings.TrimSpace(signature.Validator))
+				if validator != "" {
+					votes[validator] = types.FinalitySignature{Validator: validator, Signature: signature.Signature}
+				}
+			}
+		}
+		n.finalityVotes[blockHash] = votes
+	}
+	votes[vote.Validator] = vote
+	if len(votes) < consensus.FinalityQuorumSize(len(validators)) {
+		return nil
+	}
+	certified := block
+	certified.FinalityCertificate = &types.FinalityCertificate{
+		ChainID:    block.Header.ChainID,
+		Height:     block.Header.Height,
+		BlockHash:  blockHash,
+		Signatures: sortedFinalitySignatures(votes),
+	}
+	parent := n.blocks[certified.Header.Height-1]
+	engine := consensus.NewPOA(validators)
+	if err := engine.ValidateBlock(parent, certified); err != nil {
+		return err
+	}
+	n.blocks[certified.Header.Height] = certified
+	n.knownBlocks[blockHash] = certified
+	return n.persistLocked()
+}
+
 func (n *Node) Finality() FinalityCheckpoint {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
 	head := n.blocks[len(n.blocks)-1]
+	if certified, ok := n.highestCertifiedBlockLocked(); ok {
+		depth := head.Header.Height - certified.Header.Height
+		quorum := consensus.FinalityQuorumSize(len(n.validatorsForBlockOrCurrentLocked(certified)))
+		return FinalityCheckpoint{
+			HeadHeight:       head.Header.Height,
+			HeadHash:         head.Hash(),
+			SafeHeight:       certified.Header.Height,
+			SafeHash:         certified.Hash(),
+			SafeDepth:        depth,
+			SafeSource:       "bft_certificate",
+			FinalizedHeight:  certified.Header.Height,
+			FinalizedHash:    certified.Hash(),
+			FinalizedDepth:   depth,
+			FinalizedSource:  "bft_certificate",
+			CertifiedHeight:  certified.Header.Height,
+			CertifiedHash:    certified.Hash(),
+			CertifiedSigners: len(certified.FinalityCertificate.Signatures),
+			CertifiedQuorum:  quorum,
+		}
+	}
 	safe := n.blockAtDepthLocked(SafeBlockDepth)
 	finalized := n.blockAtDepthLocked(FinalizedBlockDepth)
 	return FinalityCheckpoint{
@@ -372,9 +450,11 @@ func (n *Node) Finality() FinalityCheckpoint {
 		SafeHeight:      safe.Header.Height,
 		SafeHash:        safe.Hash(),
 		SafeDepth:       SafeBlockDepth,
+		SafeSource:      "depth_fallback",
 		FinalizedHeight: finalized.Header.Height,
 		FinalizedHash:   finalized.Hash(),
 		FinalizedDepth:  FinalizedBlockDepth,
+		FinalizedSource: "depth_fallback",
 	}
 }
 
@@ -480,6 +560,78 @@ func (n *Node) blockAtDepthLocked(depth uint64) types.Block {
 		return n.blocks[0]
 	}
 	return n.blocks[headHeight-depth]
+}
+
+func (n *Node) highestCertifiedBlockLocked() (types.Block, bool) {
+	for i := len(n.blocks) - 1; i >= 1; i-- {
+		block := n.blocks[i]
+		if block.FinalityCertificate != nil {
+			return block, true
+		}
+	}
+	return types.Block{}, false
+}
+
+func (n *Node) matchFinalityVoteLocked(vote types.FinalitySignature) (types.Block, []string, error) {
+	for i := len(n.blocks) - 1; i >= 1; i-- {
+		block := n.blocks[i]
+		if !consensus.VerifyFinalityVote(block, vote) {
+			continue
+		}
+		validators, err := n.validatorsForBlockLocked(block)
+		if err != nil {
+			return types.Block{}, nil, err
+		}
+		if !validatorSetContains(validators, vote.Validator) {
+			return types.Block{}, nil, errors.New("finality vote signer is not a validator for block")
+		}
+		return block, validators, nil
+	}
+	return types.Block{}, nil, errors.New("finality vote does not match a canonical block")
+}
+
+func (n *Node) validatorsForBlockOrCurrentLocked(block types.Block) []string {
+	validators, err := n.validatorsForBlockLocked(block)
+	if err != nil || len(validators) == 0 {
+		return n.state.Validators()
+	}
+	return validators
+}
+
+func (n *Node) validatorsForBlockLocked(block types.Block) ([]string, error) {
+	if block.Header.Height == 0 {
+		return n.state.Validators(), nil
+	}
+	parentState, err := n.replayStateLocked(block.Header.ParentHash)
+	if err != nil {
+		return nil, err
+	}
+	return parentState.Validators(), nil
+}
+
+func validatorSetContains(validators []string, validator string) bool {
+	validator = strings.ToLower(strings.TrimSpace(validator))
+	for _, candidate := range validators {
+		if strings.ToLower(strings.TrimSpace(candidate)) == validator {
+			return true
+		}
+	}
+	return false
+}
+
+func sortedFinalitySignatures(votes map[string]types.FinalitySignature) []types.FinalitySignature {
+	validators := make([]string, 0, len(votes))
+	for validator := range votes {
+		validators = append(validators, validator)
+	}
+	sort.Strings(validators)
+	signatures := make([]types.FinalitySignature, 0, len(validators))
+	for _, validator := range validators {
+		vote := votes[validator]
+		vote.Validator = validator
+		signatures = append(signatures, vote)
+	}
+	return signatures
 }
 
 func (n *Node) pendingStateLocked() (*state.Store, error) {

@@ -115,6 +115,85 @@ func TestValidateBlockRejectsBadRootsAndParent(t *testing.T) {
 	}
 }
 
+func TestValidateFinalityCertificateRequiresTwoThirdsValidatorCommits(t *testing.T) {
+	keyA, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyB, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyC, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validatorA := chaincrypto.AddressFromPrivateKey(keyA)
+	validatorB := chaincrypto.AddressFromPrivateKey(keyB)
+	validatorC := chaincrypto.AddressFromPrivateKey(keyC)
+	engine := consensus.NewPOA([]string{validatorA, validatorB, validatorC})
+	genesis := types.GenesisBlock("chainlab-local", "0xstate")
+	block := signedTestBlock(t, keyA, genesis, validatorA, 1)
+
+	voteA, err := consensus.SignFinalityVote(keyA, block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	voteB, err := consensus.SignFinalityVote(keyB, block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	voteC, err := consensus.SignFinalityVote(keyC, block)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	block.FinalityCertificate = &types.FinalityCertificate{
+		ChainID:    block.Header.ChainID,
+		Height:     block.Header.Height,
+		BlockHash:  block.Hash(),
+		Signatures: []types.FinalitySignature{voteA, voteB, voteC},
+	}
+	if err := engine.ValidateBlock(genesis, block); err != nil {
+		t.Fatal(err)
+	}
+
+	insufficient := block
+	insufficient.FinalityCertificate = &types.FinalityCertificate{
+		ChainID:    block.Header.ChainID,
+		Height:     block.Header.Height,
+		BlockHash:  block.Hash(),
+		Signatures: []types.FinalitySignature{voteA, voteB},
+	}
+	if err := engine.ValidateBlock(genesis, insufficient); err == nil {
+		t.Fatal("certificate below two-thirds quorum should fail")
+	}
+
+	duplicate := block
+	duplicate.FinalityCertificate = &types.FinalityCertificate{
+		ChainID:    block.Header.ChainID,
+		Height:     block.Header.Height,
+		BlockHash:  block.Hash(),
+		Signatures: []types.FinalitySignature{voteA, voteA, voteC},
+	}
+	if err := engine.ValidateBlock(genesis, duplicate); err == nil {
+		t.Fatal("duplicate validator commits should fail")
+	}
+
+	tampered := block
+	tamperedVote := voteC
+	tamperedVote.Signature = voteA.Signature
+	tampered.FinalityCertificate = &types.FinalityCertificate{
+		ChainID:    block.Header.ChainID,
+		Height:     block.Header.Height,
+		BlockHash:  block.Hash(),
+		Signatures: []types.FinalitySignature{voteA, voteB, tamperedVote},
+	}
+	if err := engine.ValidateBlock(genesis, tampered); err == nil {
+		t.Fatal("invalid finality signature should fail")
+	}
+}
+
 func signedTestBlock(t *testing.T, key chaincrypto.PrivateKey, parent types.Block, proposer string, height uint64) types.Block {
 	t.Helper()
 	block := types.Block{

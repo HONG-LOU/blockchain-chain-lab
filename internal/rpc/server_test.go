@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"chainlab/internal/consensus"
 	"chainlab/internal/contracts"
 	"chainlab/internal/core"
 	chaincrypto "chainlab/internal/crypto"
@@ -810,6 +811,69 @@ func TestRPCExposesSafeAndFinalizedHeads(t *testing.T) {
 	}
 	if safeMap["number"] != "0x3" || safeMap["hash"] != blocks[2].Hash() {
 		t.Fatalf("safe block = %#v", safeMap)
+	}
+}
+
+func TestRPCSendFinalityVoteCertifiesBlock(t *testing.T) {
+	keyA, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyB, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyC, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validatorA := chaincrypto.AddressFromPrivateKey(keyA)
+	validatorB := chaincrypto.AddressFromPrivateKey(keyB)
+	validatorC := chaincrypto.AddressFromPrivateKey(keyC)
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    keyA,
+		GenesisBalance: map[string]uint64{validatorA: 1_000_000},
+		Validators:     []string{validatorA, validatorB, validatorC},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	var finality map[string]any
+	for _, key := range []chaincrypto.PrivateKey{keyA, keyB, keyC} {
+		vote, err := consensus.SignFinalityVote(key, block)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result := callRPC(t, server.URL, "chain_sendFinalityVote", []any{vote})
+		var ok bool
+		finality, ok = result.(map[string]any)
+		if !ok {
+			t.Fatalf("finality vote result type = %T", result)
+		}
+	}
+	if finality["finalized_source"] != "bft_certificate" || finality["certified_height"] != float64(1) || finality["certified_signers"] != float64(3) {
+		t.Fatalf("finality after votes = %#v", finality)
+	}
+
+	blockResult := callRPC(t, server.URL, "eth_getBlockByNumber", []any{"finalized", false})
+	blockMap, ok := blockResult.(map[string]any)
+	if !ok {
+		t.Fatalf("finalized block type = %T", blockResult)
+	}
+	certificate, ok := blockMap["finalityCertificate"].(map[string]any)
+	if !ok {
+		t.Fatalf("finality certificate = %#v", blockMap["finalityCertificate"])
+	}
+	if certificate["blockHash"] != block.Hash() || certificate["signerCount"] != "0x3" {
+		t.Fatalf("evm block certificate = %#v", certificate)
 	}
 }
 

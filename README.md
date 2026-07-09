@@ -9,7 +9,7 @@ It currently implements:
 - transfers, staking, unstaking, and a governance proposal lifecycle for parameter changes
 - local proof-of-authority block production with deterministic multi-validator proposer rotation
 - dynamic validator joins, leaves, and slashing through `validator.join` / `validator.leave` / `validator.slash` transactions, with validator set committed into state roots and snapshots
-- deterministic local `safe` and `finalized` chain checkpoints using conservative block-depth rules
+- BFT-style finality certificates from validator commit signatures, with conservative block-depth fallback when no certificate exists
 - transaction, receipt, and state roots
 - native smart-contract runtime with `counter.v1` and `token.v1`
 - sandboxed WASM contract runtime with built-in `wasm.echo.v1` and chain-state uploaded modules through `wasm.upload`
@@ -218,6 +218,14 @@ Produce a block:
 go run ./cmd/chainlab chain produce --rpc http://127.0.0.1:8547
 ```
 
+Submit a validator finality vote for a produced block:
+
+```powershell
+go run ./cmd/chainlab chain finality-vote --rpc http://127.0.0.1:8547 --private-key <validator-private-key> --height <block-height>
+```
+
+When more than two thirds of the active validators sign the same block hash, ChainLab attaches a `finality_certificate` to that block and `query finality` reports `safe_source` / `finalized_source` as `bft_certificate`. Without a quorum certificate it falls back to local depth rules.
+
 Query chain state:
 
 ```powershell
@@ -257,7 +265,7 @@ go run ./cmd/chainlab query estimate-gas --rpc http://127.0.0.1:8547 --type call
 - `POST /chain/produce`
 - `POST /peer/tx`
 - `POST /peer/block`
-- `POST /rpc` with methods `chain_head`, `chain_finality`, `chain_feeMarket`, `chain_getAccount`, `chain_validators`, `chain_proposal`, `chain_param`, `chain_sendTx`, `chain_sendUserOperation`, and `chain_faucet`
+- `POST /rpc` with methods `chain_head`, `chain_finality`, `chain_sendFinalityVote`, `chain_feeMarket`, `chain_getAccount`, `chain_validators`, `chain_proposal`, `chain_param`, `chain_sendTx`, `chain_sendUserOperation`, and `chain_faucet`
 - `POST /rpc` with EVM-style methods `eth_chainId`, `eth_blockNumber`, `eth_gasPrice`, `eth_maxPriorityFeePerGas`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`, `eth_getLogs`, `eth_newFilter`, `eth_getFilterLogs`, `eth_getFilterChanges`, `eth_uninstallFilter`, `eth_call`, `eth_estimateGas`, and `eth_sendRawTransaction`. Block range tags support `earliest`, `latest`, `safe`, `finalized`, and hex quantities. `eth_getTransactionCount` also supports `pending` for mempool-aware nonce calculation.
 - `POST /rpc` with txpool-style methods `txpool_status` and `txpool_content`
 
@@ -265,7 +273,7 @@ go run ./cmd/chainlab query estimate-gas --rpc http://127.0.0.1:8547 --type call
 
 Next useful milestones:
 
-- real BFT finality and richer fork-choice safety rules
+- networked BFT vote gossip, timeout/round handling, and richer fork-choice safety rules
 - broader WASM ABI with CPU instruction/fuel metering
 - richer account abstraction, including policy-based paymasters, social recovery/session-key smart accounts, and ERC-4337/EIP-7702 compatibility experiments
 - richer contract explorer views with decoded native contract state, event pages, and longer-lived external indexer support

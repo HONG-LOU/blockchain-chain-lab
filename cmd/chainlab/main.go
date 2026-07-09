@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"chainlab/examples"
+	"chainlab/internal/consensus"
 	"chainlab/internal/contracts"
 	"chainlab/internal/core"
 	"chainlab/internal/crypto"
@@ -369,12 +370,18 @@ func queryCommand(args []string, out io.Writer) {
 
 func chainCommand(args []string, out io.Writer) {
 	if len(args) < 1 {
-		log.Fatal("usage: chainlab chain <produce>")
+		log.Fatal("usage: chainlab chain <produce|finality-vote>")
 	}
-	if args[0] != "produce" {
+	var err error
+	switch args[0] {
+	case "produce":
+		err = produceCommand(args[1:], out)
+	case "finality-vote":
+		err = finalityVoteCommand(args[1:], out)
+	default:
 		log.Fatalf("unknown chain command %q", args[0])
 	}
-	if err := produceCommand(args[1:], out); err != nil {
+	if err != nil {
 		log.Fatal(err)
 	}
 }
@@ -1392,6 +1399,56 @@ func produceCommand(args []string, out io.Writer) error {
 		return err
 	}
 	return writeTo(out, block)
+}
+
+func finalityVoteCommand(args []string, out io.Writer) error {
+	flags := flag.NewFlagSet("chain finality-vote", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
+	privateKeyHex := flags.String("private-key", "", "validator private key")
+	height := flags.Uint64("height", 0, "block height to certify")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*privateKeyHex) == "" {
+		return fmt.Errorf("private key is required")
+	}
+	if *height == 0 {
+		return fmt.Errorf("height is required")
+	}
+	key, err := crypto.PrivateKeyFromHex(*privateKeyHex)
+	if err != nil {
+		return err
+	}
+	block, err := fetchBlockByHeight(*rpcURL, *height)
+	if err != nil {
+		return err
+	}
+	vote, err := consensus.SignFinalityVote(key, block)
+	if err != nil {
+		return err
+	}
+	var finality node.FinalityCheckpoint
+	if err := rpcCall(*rpcURL, "chain_sendFinalityVote", []any{vote}, &finality); err != nil {
+		return err
+	}
+	return writeTo(out, map[string]any{"vote": vote, "finality": finality})
+}
+
+func fetchBlockByHeight(rpcURL string, height uint64) (types.Block, error) {
+	resp, err := http.Get(fmt.Sprintf("%s/chain/block/%d", trimSlash(rpcURL), height))
+	if err != nil {
+		return types.Block{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		return types.Block{}, fmt.Errorf("block query failed: status %d: %s", resp.StatusCode, string(body))
+	}
+	var block types.Block
+	if err := json.NewDecoder(resp.Body).Decode(&block); err != nil {
+		return types.Block{}, err
+	}
+	return block, nil
 }
 
 type rpcResponseEnvelope struct {
