@@ -19,6 +19,7 @@ It currently implements:
 - pending nonce calculation and txpool inspection for uncommitted transactions
 - ChainLab-native raw transaction envelope for offline signing and later broadcast
 - devnet faucet that creates a normal proposer-signed transfer into the mempool
+- local block explorer page for head, finality, recent blocks, validators, and mempool
 - EVM-style contract event logs projected from native receipts, with block range, address, and topic filtering
 - local multi-node devnet sync over HTTP peers: transaction relay, block import, and produced-block broadcast
 - CLI commands for keys, genesis, nodes, signed transfers, block production, queries, and demos
@@ -53,6 +54,8 @@ Start a local node:
 ```powershell
 go run ./cmd/chainlab node --genesis config/genesis.json --listen :8547
 ```
+
+Open the local explorer at `http://127.0.0.1:8547/explorer`.
 
 Start a persistent local node:
 
@@ -147,6 +150,7 @@ go run ./cmd/chainlab query estimate-gas --rpc http://127.0.0.1:8547 --type call
 ## HTTP API
 
 - `GET /health`
+- `GET /explorer`
 - `GET /chain/head`
 - `GET /chain/finality`
 - `GET /chain/block/{height}`
@@ -170,5 +174,5 @@ Next useful milestones:
 
 - stronger fork-choice rules and real BFT finality
 - WASM contract runtime
-- block explorer UI
+- richer explorer detail pages for accounts, blocks, transactions, and contracts
 - production-framework migration decision: OP Stack, Cosmos SDK, Avalanche L1, or another appchain stack

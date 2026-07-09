@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -534,6 +535,71 @@ func TestRPCFaucetRequestsFundRecipientThroughMempool(t *testing.T) {
 	}
 	if got := n.Account(recipient).Balance; got != 75 {
 		t.Fatalf("recipient balance = %d", got)
+	}
+}
+
+func TestExplorerRendersChainOverview(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	committed := signedTransfer(t, key, alice, bob, 0, 100)
+	if err := n.SubmitTx(committed); err != nil {
+		t.Fatal(err)
+	}
+	block, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := n.RequestFaucet("0xcccccccccccccccccccccccccccccccccccccccc", 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/explorer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("explorer status = %d", resp.StatusCode)
+	}
+	if contentType := resp.Header.Get("Content-Type"); !strings.Contains(contentType, "text/html") {
+		t.Fatalf("content type = %q", contentType)
+	}
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(raw)
+	for _, expected := range []string{
+		"ChainLab Explorer",
+		"chainlab-local",
+		"Head Height",
+		"1",
+		block.Hash(),
+		committed.Hash(),
+		pending.Hash(),
+		alice,
+		"Pending Transactions",
+		"Finalized Height",
+		"Validators",
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("explorer body missing %q:\n%s", expected, body)
+		}
 	}
 }
 
