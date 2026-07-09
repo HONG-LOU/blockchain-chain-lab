@@ -1755,6 +1755,216 @@ func TestNodePendingAccountIncludesMempoolTransactions(t *testing.T) {
 	}
 }
 
+func TestNodeReplacesPendingTransactionWithHigherFeeSameNonce(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
+	dave := "0xdddddddddddddddddddddddddddddddddddddddd"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	original := signedNodeTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     alice,
+		To:       bob,
+		Nonce:    0,
+		Value:    10,
+		GasLimit: 21_000,
+		GasPrice: 10,
+	})
+	next := signedNodeTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     alice,
+		To:       dave,
+		Nonce:    1,
+		Value:    5,
+		GasLimit: 21_000,
+		GasPrice: 10,
+	})
+	replacement := signedNodeTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     alice,
+		To:       carol,
+		Nonce:    0,
+		Value:    20,
+		GasLimit: 21_000,
+		GasPrice: 11,
+	})
+
+	if err := n.SubmitTx(original); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.SubmitTx(next); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.SubmitTx(replacement); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := n.Mempool()
+	if len(pool) != 2 {
+		t.Fatalf("mempool = %#v", pool)
+	}
+	if pool[0].Hash() != replacement.Hash() || pool[1].Hash() != next.Hash() {
+		t.Fatalf("mempool order = %#v", pool)
+	}
+	pending, err := n.PendingAccount(alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Nonce != 2 {
+		t.Fatalf("pending nonce = %d", pending.Nonce)
+	}
+
+	block, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(block.Transactions) != 2 || block.Transactions[0].Hash() != replacement.Hash() || block.Transactions[1].Hash() != next.Hash() {
+		t.Fatalf("block transactions = %#v", block.Transactions)
+	}
+	if got := n.Account(bob).Balance; got != 0 {
+		t.Fatalf("bob balance = %d", got)
+	}
+	if got := n.Account(carol).Balance; got != 20 {
+		t.Fatalf("carol balance = %d", got)
+	}
+	if got := n.Account(dave).Balance; got != 5 {
+		t.Fatalf("dave balance = %d", got)
+	}
+}
+
+func TestNodeRejectsUnderpricedPendingReplacement(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	original := signedNodeTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     alice,
+		To:       bob,
+		Nonce:    0,
+		Value:    10,
+		GasLimit: 21_000,
+		GasPrice: 10,
+	})
+	underpriced := signedNodeTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     alice,
+		To:       carol,
+		Nonce:    0,
+		Value:    20,
+		GasLimit: 21_000,
+		GasPrice: 10,
+	})
+
+	if err := n.SubmitTx(original); err != nil {
+		t.Fatal(err)
+	}
+	err = n.SubmitTx(underpriced)
+	if err == nil || !strings.Contains(err.Error(), "replacement transaction underpriced") {
+		t.Fatalf("underpriced replacement error = %v", err)
+	}
+	pool := n.Mempool()
+	if len(pool) != 1 || pool[0].Hash() != original.Hash() {
+		t.Fatalf("mempool = %#v", pool)
+	}
+}
+
+func TestNodeEIP1559ReplacementRequiresBothFeeCapsBumped(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	original := signedNodeTx(t, key, types.Transaction{
+		ChainID:              "chainlab-local",
+		Type:                 types.TxTransfer,
+		From:                 alice,
+		To:                   bob,
+		Nonce:                0,
+		Value:                10,
+		GasLimit:             21_000,
+		MaxFeePerGas:         20,
+		MaxPriorityFeePerGas: 10,
+	})
+	lowTip := signedNodeTx(t, key, types.Transaction{
+		ChainID:              "chainlab-local",
+		Type:                 types.TxTransfer,
+		From:                 alice,
+		To:                   carol,
+		Nonce:                0,
+		Value:                20,
+		GasLimit:             21_000,
+		MaxFeePerGas:         22,
+		MaxPriorityFeePerGas: 10,
+	})
+	bumped := signedNodeTx(t, key, types.Transaction{
+		ChainID:              "chainlab-local",
+		Type:                 types.TxTransfer,
+		From:                 alice,
+		To:                   carol,
+		Nonce:                0,
+		Value:                20,
+		GasLimit:             21_000,
+		MaxFeePerGas:         22,
+		MaxPriorityFeePerGas: 11,
+	})
+
+	if err := n.SubmitTx(original); err != nil {
+		t.Fatal(err)
+	}
+	err = n.SubmitTx(lowTip)
+	if err == nil || !strings.Contains(err.Error(), "replacement transaction underpriced") {
+		t.Fatalf("low tip replacement error = %v", err)
+	}
+	if err := n.SubmitTx(bumped); err != nil {
+		t.Fatal(err)
+	}
+	pool := n.Mempool()
+	if len(pool) != 1 || pool[0].Hash() != bumped.Hash() {
+		t.Fatalf("mempool = %#v", pool)
+	}
+}
+
 func TestNodeFaucetRequestsSignedTransferThroughMempool(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {

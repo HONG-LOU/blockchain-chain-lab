@@ -65,7 +65,10 @@ const (
 	InitialBaseFeePerGas        uint64 = 1
 	DefaultMaxPriorityFeePerGas uint64 = 1
 	baseFeeChangeDenominator    uint64 = 8
+	txpoolReplacementPriceBump  uint64 = 10
 )
+
+var errReplacementTransactionUnderpriced = errors.New("replacement transaction underpriced")
 
 type FinalityCheckpoint struct {
 	HeadHeight       uint64 `json:"head_height"`
@@ -267,6 +270,18 @@ func (n *Node) RequestFaucet(to string, amount uint64) (types.Transaction, error
 }
 
 func (n *Node) submitTxLocked(tx types.Transaction) error {
+	replacementIndex := n.mempoolReplacementIndex(tx)
+	if replacementIndex >= 0 {
+		if err := canReplacePendingTransaction(n.mempool[replacementIndex], tx); err != nil {
+			return err
+		}
+		if err := n.validateMempoolWithReplacementLocked(replacementIndex, tx); err != nil {
+			return err
+		}
+		n.mempool[replacementIndex] = tx
+		return nil
+	}
+
 	working, err := n.pendingStateLocked()
 	if err != nil {
 		return err
@@ -892,6 +907,39 @@ func (n *Node) pendingStateLocked() (*state.Store, error) {
 	return working, nil
 }
 
+func (n *Node) mempoolReplacementIndex(tx types.Transaction) int {
+	from := normalizedAddress(tx.From)
+	if from == "" {
+		return -1
+	}
+	for i, pending := range n.mempool {
+		if normalizedAddress(pending.From) == from && pending.Nonce == tx.Nonce {
+			return i
+		}
+	}
+	return -1
+}
+
+func (n *Node) validateMempoolWithReplacementLocked(index int, replacement types.Transaction) error {
+	working := n.state.Clone()
+	blockHeight := n.blocks[len(n.blocks)-1].Header.Height + 1
+	baseFee := n.nextBaseFeeLocked()
+	for i, pending := range n.mempool {
+		candidate := pending
+		if i == index {
+			candidate = replacement
+		}
+		if _, err := n.executor.ExecuteWithContext(working, candidate, core.ExecutionContext{BlockHeight: blockHeight, BaseFeePerGas: baseFee}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func normalizedAddress(address string) string {
+	return strings.ToLower(strings.TrimSpace(address))
+}
+
 func (n *Node) replayStateLocked(blockHash string) (*state.Store, error) {
 	_, working, err := n.replayKnownChainLocked(blockHash)
 	return working, err
@@ -1044,6 +1092,58 @@ func checkedAdd(left uint64, right uint64) (uint64, error) {
 		return 0, errors.New("gas overflow")
 	}
 	return left + right, nil
+}
+
+func canReplacePendingTransaction(oldTx types.Transaction, newTx types.Transaction) error {
+	oldMaxFee, oldPriorityFee := replacementFeeCaps(oldTx)
+	newMaxFee, newPriorityFee := replacementFeeCaps(newTx)
+	if !feeBumpedByPercent(oldMaxFee, newMaxFee, txpoolReplacementPriceBump) ||
+		!feeBumpedByPercent(oldPriorityFee, newPriorityFee, txpoolReplacementPriceBump) {
+		return errReplacementTransactionUnderpriced
+	}
+	return nil
+}
+
+func replacementFeeCaps(tx types.Transaction) (uint64, uint64) {
+	if tx.MaxFeePerGas > 0 || tx.MaxPriorityFeePerGas > 0 {
+		return tx.MaxFeePerGas, tx.MaxPriorityFeePerGas
+	}
+	return tx.GasPrice, tx.GasPrice
+}
+
+func feeBumpedByPercent(oldFee uint64, newFee uint64, percent uint64) bool {
+	required, ok := bumpedFeeThreshold(oldFee, percent)
+	return ok && newFee >= required
+}
+
+func bumpedFeeThreshold(oldFee uint64, percent uint64) (uint64, bool) {
+	if oldFee == 0 {
+		return 0, true
+	}
+	whole := oldFee / 100
+	remainder := oldFee % 100
+	if percent != 0 && whole > math.MaxUint64/percent {
+		return 0, false
+	}
+	bump := whole * percent
+	if percent != 0 && remainder > math.MaxUint64/percent {
+		return 0, false
+	}
+	remainderProduct := remainder * percent
+	if math.MaxUint64-bump < remainderProduct/100 {
+		return 0, false
+	}
+	bump += remainderProduct / 100
+	if remainderProduct%100 != 0 {
+		bump++
+	}
+	if bump == 0 {
+		bump = 1
+	}
+	if math.MaxUint64-oldFee < bump {
+		return 0, false
+	}
+	return oldFee + bump, true
 }
 
 func (n *Node) refreshConsensusLocked() {

@@ -1567,6 +1567,103 @@ func TestRPCTransactionLookupIncludesPendingTransactions(t *testing.T) {
 	}
 }
 
+func TestRPCSendReplacementTransactionUpdatesTxPool(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	original := signedTransfer(t, key, alice, bob, 0, 100)
+	original.GasPrice = 10
+	original = signedRPCTransaction(t, key, original)
+	replacement := signedTransfer(t, key, alice, carol, 0, 200)
+	replacement.GasPrice = 11
+	replacement = signedRPCTransaction(t, key, replacement)
+
+	body, err := json.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post(server.URL+"/tx", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("original status = %d", resp.StatusCode)
+	}
+	filterID := callRPC(t, server.URL, "eth_newPendingTransactionFilter", []any{})
+
+	body, err = json.Marshal(replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err = http.Post(server.URL+"/tx", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("replacement status = %d", resp.StatusCode)
+	}
+	var accepted struct {
+		Hash string `json:"hash"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&accepted); err != nil {
+		t.Fatal(err)
+	}
+	if accepted.Hash != replacement.Hash() {
+		t.Fatalf("replacement hash = %s, want %s", accepted.Hash, replacement.Hash())
+	}
+
+	content := callRPC(t, server.URL, "txpool_content", []any{})
+	contentMap, ok := content.(map[string]any)
+	if !ok {
+		t.Fatalf("txpool_content = %#v", content)
+	}
+	pending, ok := contentMap["pending"].(map[string]any)
+	if !ok {
+		t.Fatalf("pending txpool content = %#v", contentMap["pending"])
+	}
+	byNonce, ok := pending[strings.ToLower(alice)].(map[string]any)
+	if !ok {
+		t.Fatalf("sender txpool content = %#v", pending)
+	}
+	txMap, ok := byNonce["0x0"].(map[string]any)
+	if !ok {
+		t.Fatalf("nonce txpool content = %#v", byNonce)
+	}
+	if txMap["hash"] != replacement.Hash() || txMap["to"] != carol || txMap["value"] != "0xc8" {
+		t.Fatalf("replacement txpool entry = %#v", txMap)
+	}
+	if oldPending := callRPC(t, server.URL, "eth_getTransactionByHash", []any{original.Hash()}); oldPending != nil {
+		t.Fatalf("old pending lookup = %#v", oldPending)
+	}
+	newPending := callRPC(t, server.URL, "eth_getTransactionByHash", []any{replacement.Hash()})
+	newPendingMap, ok := newPending.(map[string]any)
+	if !ok || newPendingMap["hash"] != replacement.Hash() || newPendingMap["blockHash"] != nil {
+		t.Fatalf("new pending lookup = %#v", newPending)
+	}
+	changes := callRPC(t, server.URL, "eth_getFilterChanges", []any{filterID})
+	hashes, ok := changes.([]any)
+	if !ok || len(hashes) != 1 || hashes[0] != replacement.Hash() {
+		t.Fatalf("pending filter changes = %#v", changes)
+	}
+}
+
 func TestRPCGetBlockReceiptsReturnsReceiptsForBlock(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {
