@@ -147,14 +147,36 @@ func evmLogs(n *node.Node, filter logFilter) []map[string]any {
 		return []map[string]any{}
 	}
 	logs := make([]map[string]any, 0)
-	for height := filter.fromBlock; height <= filter.toBlock; height++ {
-		block, ok := n.Block(height)
-		if !ok {
-			break
+	records := n.Events(node.EventFilter{
+		FromBlock:  filter.fromBlock,
+		ToBlock:    filter.toBlock,
+		HasToBlock: true,
+	})
+	for _, record := range records {
+		if record.Address == "" {
+			continue
 		}
-		logs = append(logs, evmBlockLogs(block, filter)...)
+		topics := []string{record.Topic0}
+		log := evmEventLog(record, topics)
+		if logMatchesFilter(log, topics, filter) {
+			logs = append(logs, log)
+		}
 	}
 	return logs
+}
+
+func evmEventLog(record types.EventRecord, topics []string) map[string]any {
+	return map[string]any{
+		"removed":          false,
+		"logIndex":         quantity(record.LogIndex),
+		"transactionIndex": quantity(uint64(record.TransactionIndex)),
+		"transactionHash":  record.TransactionHash,
+		"blockHash":        record.BlockHash,
+		"blockNumber":      quantity(record.BlockHeight),
+		"address":          strings.ToLower(record.Address),
+		"data":             eventData(record.Event),
+		"topics":           topics,
+	}
 }
 
 func evmBlockLogs(block types.Block, filter logFilter) []map[string]any {

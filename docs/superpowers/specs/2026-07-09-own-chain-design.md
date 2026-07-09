@@ -197,13 +197,14 @@ Phase 2 progress:
 
 - Node snapshots can be persisted under `--data-dir` and reloaded on restart.
 - Committed transactions are indexed by hash with receipt, block hash, height, and index.
+- Receipt events are indexed from the canonical chain with block hash, height, transaction index, event index, EVM-style log index, address, topic0, and attributes. The node rebuilds this event index from persisted blocks on restart and after longer-branch reorg replay.
 - REST adds `GET /tx/{hash}`.
 - JSON-RPC adds an EVM-compatible read subset: `eth_chainId`, `eth_blockNumber`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`, `eth_getLogs`, `eth_newFilter`, `eth_getFilterLogs`, `eth_getFilterChanges`, `eth_uninstallFilter`, `eth_call`, and `eth_estimateGas`.
-- Contract receipt events are projected into EVM-style logs with block range, contract address, and topic filtering. `topic[0]` is the Keccak hash of the native event type string, not a full Solidity ABI signature.
-- RPC keeps an in-memory EVM-style log filter registry for polling incremental event changes. Filters are node-local and restart-volatile, matching the development-chain scope; durable external indexing remains a later milestone.
+- Contract receipt events are projected from the node event index into EVM-style logs with block range, contract address, and topic filtering. `topic[0]` is the Keccak hash of the native event type string, not a full Solidity ABI signature.
+- RPC keeps an in-memory EVM-style log filter registry for polling incremental event changes. Filters are node-local and restart-volatile, matching the development-chain scope; a separate external indexer remains a later milestone.
 - `eth_call` supports native contract read methods such as `counter.get`, `token.balanceOf`, `token.symbol`, and `token.owner`; `eth_estimateGas` returns the deterministic gas schedule for supported transaction types.
 - Local devnet peers can relay submitted transactions, produce a block through `POST /chain/produce`, broadcast produced blocks, relay finality votes, and import peer blocks after replaying transactions and checking receipt root, state root, PoA signature, height, and parent hash.
-- Nodes now retain known imported branches and use a simple longest-branch fork-choice for the local devnet: equal-height side branches are stored without replacing the canonical head, and a longer validated branch triggers a canonical reorg by replaying from the persisted genesis state and rebuilding state plus transaction index. This is still not BFT finality.
+- Nodes now retain known imported branches and use a simple longest-branch fork-choice for the local devnet: equal-height side branches are stored without replacing the canonical head, and a longer validated branch triggers a canonical reorg by replaying from the persisted genesis state and rebuilding state plus transaction and event indexes. This is still not BFT finality.
 - CLI nodes accept repeated `--peer` URLs for HTTP peer sync.
 - CLI wallet-style commands can fetch nonce over RPC, sign and submit transfers, native contract deploys, native contract write calls, produce blocks, and query head/account/transaction records.
 - RPC and CLI expose mempool state through `GET /txpool`, `txpool_status`, `txpool_content`, and `query mempool`; `eth_getTransactionCount(..., "pending")` replays pending transactions on a cloned state so wallet-style commands can submit multiple uncommitted transactions with sequential nonces.

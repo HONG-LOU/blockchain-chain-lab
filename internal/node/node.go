@@ -17,6 +17,7 @@ import (
 	"chainlab/internal/contracts"
 	"chainlab/internal/core"
 	chaincrypto "chainlab/internal/crypto"
+	"chainlab/internal/hash"
 	"chainlab/internal/state"
 	"chainlab/internal/types"
 )
@@ -47,6 +48,7 @@ type Node struct {
 	finalityEvidence  map[string]types.FinalityEquivocationEvidence
 	mempool           []types.Transaction
 	txIndex           map[string]types.TransactionRecord
+	eventIndex        []types.EventRecord
 	dataDir           string
 	blockGasLimit     uint64
 }
@@ -95,6 +97,16 @@ type FeeMarketSnapshot struct {
 	GasPrice             uint64 `json:"gas_price"`
 	BlockGasLimit        uint64 `json:"block_gas_limit"`
 	LastBlockGasUsed     uint64 `json:"last_block_gas_used"`
+}
+
+type EventFilter struct {
+	FromBlock  uint64
+	ToBlock    uint64
+	HasToBlock bool
+	Address    string
+	Topic0     string
+	Limit      int
+	Descending bool
 }
 
 type diskSnapshot struct {
@@ -499,6 +511,51 @@ func (n *Node) Transaction(hash string) (types.TransactionRecord, bool) {
 	defer n.mu.Unlock()
 	record, ok := n.txIndex[hash]
 	return record, ok
+}
+
+func (n *Node) Events(filter EventFilter) []types.EventRecord {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	toBlock := filter.ToBlock
+	if !filter.HasToBlock && filter.ToBlock == 0 {
+		toBlock = n.blocks[len(n.blocks)-1].Header.Height
+	}
+	if toBlock < filter.FromBlock {
+		return []types.EventRecord{}
+	}
+	address := strings.ToLower(filter.Address)
+	topic0 := strings.ToLower(filter.Topic0)
+	events := make([]types.EventRecord, 0)
+	add := func(record types.EventRecord) bool {
+		if !eventMatchesFilter(record, filter.FromBlock, toBlock, address, topic0) {
+			return false
+		}
+		events = append(events, cloneEventRecord(record))
+		return filter.Limit > 0 && len(events) == filter.Limit
+	}
+	if filter.Descending {
+		for i := len(n.eventIndex) - 1; i >= 0; {
+			height := n.eventIndex[i].BlockHeight
+			start := i
+			for start >= 0 && n.eventIndex[start].BlockHeight == height {
+				start--
+			}
+			for j := start + 1; j <= i; j++ {
+				if add(n.eventIndex[j]) {
+					return events
+				}
+			}
+			i = start
+		}
+		return events
+	}
+	for _, record := range n.eventIndex {
+		if add(record) {
+			return events
+		}
+	}
+	return events
 }
 
 func (n *Node) ChainID() string {
@@ -982,6 +1039,7 @@ func (n *Node) refreshConsensusLocked() {
 
 func (n *Node) rebuildTxIndex() {
 	n.txIndex = make(map[string]types.TransactionRecord)
+	n.eventIndex = nil
 	for _, block := range n.blocks {
 		n.indexBlock(block)
 	}
@@ -989,6 +1047,7 @@ func (n *Node) rebuildTxIndex() {
 
 func (n *Node) indexBlock(block types.Block) {
 	blockHash := block.Hash()
+	blockLogIndex := uint64(0)
 	for i, tx := range block.Transactions {
 		receipt := types.Receipt{TxHash: tx.Hash()}
 		if i < len(block.Receipts) {
@@ -1001,7 +1060,70 @@ func (n *Node) indexBlock(block types.Block) {
 			BlockHash:   blockHash,
 			Index:       i,
 		}
+		address := strings.ToLower(eventAddress(tx, receipt))
+		for eventIndex, event := range receipt.Events {
+			record := types.EventRecord{
+				Event:            cloneEvent(event),
+				Address:          address,
+				Topic0:           eventTopic0(event),
+				BlockHeight:      block.Header.Height,
+				BlockHash:        blockHash,
+				TransactionHash:  tx.Hash(),
+				TransactionIndex: i,
+				EventIndex:       eventIndex,
+			}
+			if address != "" {
+				record.LogIndex = blockLogIndex
+				blockLogIndex++
+			}
+			n.eventIndex = append(n.eventIndex, record)
+		}
 	}
+}
+
+func eventMatchesFilter(record types.EventRecord, fromBlock uint64, toBlock uint64, address string, topic0 string) bool {
+	if record.BlockHeight < fromBlock || record.BlockHeight > toBlock {
+		return false
+	}
+	if address != "" && record.Address != address {
+		return false
+	}
+	return topic0 == "" || strings.ToLower(record.Topic0) == topic0
+}
+
+func eventAddress(tx types.Transaction, receipt types.Receipt) string {
+	if receipt.ContractAddress != "" {
+		return receipt.ContractAddress
+	}
+	if tx.Type == types.TxCall {
+		return tx.To
+	}
+	return ""
+}
+
+func eventTopic0(event types.Event) string {
+	return hash.KeccakHex([]byte(event.Type))
+}
+
+func cloneEventRecord(record types.EventRecord) types.EventRecord {
+	record.Event = cloneEvent(record.Event)
+	return record
+}
+
+func cloneEvent(event types.Event) types.Event {
+	if event.Attributes == nil {
+		return event
+	}
+	event.Attributes = cloneStringMap(event.Attributes)
+	return event
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	cloned := make(map[string]string, len(values))
+	for key, value := range values {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func (n *Node) removeMempoolTransactions(txs []types.Transaction) {

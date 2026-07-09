@@ -229,57 +229,34 @@ func (s *Server) explorerEvents(limit int) []explorerEvent {
 	}
 	head := s.node.Head()
 	events := make([]explorerEvent, 0, limit)
-	for height := head.Header.Height; ; height-- {
-		block, ok := s.node.Block(height)
-		if !ok {
-			break
-		}
-		events = append(events, newExplorerEvents(block, limit-len(events))...)
-		if height == 0 || len(events) == limit {
-			break
-		}
+	records := s.node.Events(node.EventFilter{
+		FromBlock:  0,
+		ToBlock:    head.Header.Height,
+		HasToBlock: true,
+		Limit:      limit,
+		Descending: true,
+	})
+	for _, record := range records {
+		events = append(events, newExplorerEvent(record))
 	}
 	return events
 }
 
-func newExplorerEvents(block types.Block, remaining int) []explorerEvent {
-	if remaining <= 0 {
-		return nil
+func newExplorerEvent(record types.EventRecord) explorerEvent {
+	return explorerEvent{
+		Type:             record.Event.Type,
+		Topic:            record.Topic0,
+		Address:          record.Address,
+		AddressURL:       explorerAccountURL(record.Address),
+		BlockHeight:      record.BlockHeight,
+		BlockHash:        record.BlockHash,
+		BlockURL:         explorerBlockURL(record.BlockHeight),
+		TransactionHash:  record.TransactionHash,
+		TransactionURL:   explorerTransactionURL(record.TransactionHash),
+		TransactionIndex: record.TransactionIndex,
+		EventIndex:       record.EventIndex,
+		Attributes:       record.Event.Attributes,
 	}
-	blockHash := block.Hash()
-	events := make([]explorerEvent, 0, remaining)
-	for txIndex, tx := range block.Transactions {
-		if txIndex >= len(block.Receipts) {
-			continue
-		}
-		receipt := block.Receipts[txIndex]
-		address := strings.ToLower(logAddress(tx, receipt))
-		for eventIndex, event := range receipt.Events {
-			topics := eventTopics(event)
-			topic := ""
-			if len(topics) > 0 {
-				topic = topics[0]
-			}
-			events = append(events, explorerEvent{
-				Type:             event.Type,
-				Topic:            topic,
-				Address:          address,
-				AddressURL:       explorerAccountURL(address),
-				BlockHeight:      block.Header.Height,
-				BlockHash:        blockHash,
-				BlockURL:         explorerBlockURL(block.Header.Height),
-				TransactionHash:  tx.Hash(),
-				TransactionURL:   explorerTransactionURL(tx.Hash()),
-				TransactionIndex: txIndex,
-				EventIndex:       eventIndex,
-				Attributes:       event.Attributes,
-			})
-			if len(events) == remaining {
-				return events
-			}
-		}
-	}
-	return events
 }
 
 func newExplorerBlock(block types.Block) explorerBlock {

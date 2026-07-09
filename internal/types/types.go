@@ -132,6 +132,18 @@ type TransactionRecord struct {
 	Index       int         `json:"index"`
 }
 
+type EventRecord struct {
+	Event            Event  `json:"event"`
+	Address          string `json:"address,omitempty"`
+	Topic0           string `json:"topic0"`
+	BlockHeight      uint64 `json:"block_height"`
+	BlockHash        string `json:"block_hash"`
+	TransactionHash  string `json:"transaction_hash"`
+	TransactionIndex int    `json:"transaction_index"`
+	EventIndex       int    `json:"event_index"`
+	LogIndex         uint64 `json:"log_index"`
+}
+
 type ProposalStatus string
 
 const (

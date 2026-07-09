@@ -21,15 +21,15 @@ It currently implements:
 - ChainLab-native smart contract accounts through `account.v1`: a contract account holds the balance and nonce while its stored owner signs with the transaction `signer`
 - ChainLab-native multisig smart accounts through `multisig.v1`: a contract account enforces an owner threshold with multiple transaction authorizations
 - HTTP REST endpoints and a small JSON-RPC-style endpoint
-- persistent node snapshots with committed blocks, state, and transaction index
+- persistent node snapshots with committed blocks, state, transaction index, and a canonical event index rebuilt on restart or reorg
 - local fork-choice that stores known branches and reorgs to a longer validated branch
 - EVM-compatible JSON-RPC read subset: `eth_chainId`, `eth_blockNumber`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`, `eth_getLogs`, `eth_call`, `eth_estimateGas`
 - EVM-style `safe` and `finalized` block tags for block and log reads
 - pending nonce calculation and txpool inspection for uncommitted transactions
 - ChainLab-native raw transaction envelope for offline signing and later broadcast
 - devnet faucet that creates a normal proposer-signed transfer into the mempool
-- local block explorer pages for head, finality, recent blocks, transactions, accounts, validators, mempool, and recent contract events
-- EVM-style contract event logs projected from native receipts, with block range, address, and topic filtering
+- local block explorer pages for head, finality, recent blocks, transactions, accounts, validators, mempool, and indexed recent contract events
+- EVM-style contract event logs served from the node event index, with block range, address, and topic filtering
 - EVM-style log filter polling with `eth_newFilter`, `eth_getFilterLogs`, `eth_getFilterChanges`, and `eth_uninstallFilter`
 - local multi-node devnet sync over HTTP peers: transaction relay, block import, produced-block broadcast, and finality vote relay
 - CLI commands for keys, genesis, nodes, signed transfers, block production, queries, and demos

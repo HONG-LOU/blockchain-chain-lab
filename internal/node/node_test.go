@@ -9,6 +9,7 @@ import (
 	"chainlab/internal/contracts"
 	"chainlab/internal/core"
 	chaincrypto "chainlab/internal/crypto"
+	"chainlab/internal/hash"
 	"chainlab/internal/node"
 	"chainlab/internal/types"
 )
@@ -501,6 +502,107 @@ func TestNodePersistsChainStateAndTransactionIndex(t *testing.T) {
 	}
 	if !record.Receipt.Success {
 		t.Fatalf("receipt should succeed: %+v", record.Receipt)
+	}
+}
+
+func TestNodeRebuildsEventIndexFromPersistedBlocks(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	dataDir := t.TempDir()
+
+	first, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		DataDir:        dataDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deploy := signedNodeTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxDeploy,
+		From:     alice,
+		Nonce:    0,
+		GasLimit: 80_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"code_id": "counter.v1",
+			"initial": "1",
+		},
+	})
+	if err := first.SubmitTx(deploy); err != nil {
+		t.Fatal(err)
+	}
+	deployBlock, err := first.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	contract := deployBlock.Receipts[0].ContractAddress
+
+	call := signedNodeTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxCall,
+		From:     alice,
+		To:       contract,
+		Nonce:    1,
+		GasLimit: 80_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"method": "increment",
+			"amount": "2",
+		},
+	})
+	if err := first.SubmitTx(call); err != nil {
+		t.Fatal(err)
+	}
+	callBlock, err := first.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		DataDir:        dataDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	topic := hash.KeccakHex([]byte("counter.incremented"))
+	events := reloaded.Events(node.EventFilter{
+		FromBlock: 1,
+		ToBlock:   callBlock.Header.Height,
+		Address:   contract,
+		Topic0:    topic,
+	})
+	if len(events) != 1 {
+		t.Fatalf("events = %+v", events)
+	}
+	event := events[0]
+	if event.Event.Type != "counter.incremented" {
+		t.Fatalf("event type = %q", event.Event.Type)
+	}
+	if event.Address != strings.ToLower(contract) {
+		t.Fatalf("event address = %q", event.Address)
+	}
+	if event.Topic0 != topic {
+		t.Fatalf("event topic0 = %q", event.Topic0)
+	}
+	if event.BlockHeight != callBlock.Header.Height || event.BlockHash != callBlock.Hash() {
+		t.Fatalf("event block = %+v, want height %d hash %s", event, callBlock.Header.Height, callBlock.Hash())
+	}
+	if event.TransactionHash != call.Hash() || event.TransactionIndex != 0 || event.EventIndex != 0 || event.LogIndex != 0 {
+		t.Fatalf("event location = %+v", event)
+	}
+	if event.Event.Attributes["count"] != "3" {
+		t.Fatalf("event attributes = %+v", event.Event.Attributes)
 	}
 }
 
