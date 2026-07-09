@@ -124,6 +124,7 @@ Exposes HTTP endpoints:
 - `GET /account/{address}`
 - `POST /tx`
 - `POST /rpc` for JSON-RPC-style calls
+- EVM-style read calls include account, block, transaction, receipt, and log queries.
 
 ### `cmd/chainlab`
 
@@ -182,7 +183,8 @@ Phase 2 progress:
 - Node snapshots can be persisted under `--data-dir` and reloaded on restart.
 - Committed transactions are indexed by hash with receipt, block hash, height, and index.
 - REST adds `GET /tx/{hash}`.
-- JSON-RPC adds an EVM-compatible read subset: `eth_chainId`, `eth_blockNumber`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, and `eth_getBlockByNumber`.
+- JSON-RPC adds an EVM-compatible read subset: `eth_chainId`, `eth_blockNumber`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`, and `eth_getLogs`.
+- Contract receipt events are projected into EVM-style logs with block range, contract address, and topic filtering. `topic[0]` is the Keccak hash of the native event type string, not a full Solidity ABI signature.
 - Local devnet peers can relay submitted transactions, produce a block through `POST /chain/produce`, broadcast produced blocks, and import peer blocks after replaying transactions and checking receipt root, state root, PoA signature, height, and parent hash.
 - CLI nodes accept repeated `--peer` URLs for HTTP peer sync.
 - CLI wallet-style commands can fetch nonce over RPC, sign and submit transfers, produce blocks, and query head/account/transaction records.

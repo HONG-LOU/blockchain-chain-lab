@@ -242,7 +242,8 @@ func handleJSONRPC(w http.ResponseWriter, r *http.Request, n *node.Node) {
 			writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: nil})
 			return
 		}
-		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: evmReceipt(record)})
+		block, _ := n.Block(record.BlockHeight)
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: evmReceipt(record, block)})
 	case "eth_getBlockByNumber":
 		params, err := rpcParams(request.Params)
 		if err != nil || len(params) < 1 {
@@ -266,6 +267,19 @@ func handleJSONRPC(w http.ResponseWriter, r *http.Request, n *node.Node) {
 			}
 		}
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: evmBlock(block, fullTx)})
+	case "eth_getLogs":
+		params, err := rpcParams(request.Params)
+		if err != nil || len(params) < 1 {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "filter is required"})
+			return
+		}
+		filter, err := parseLogFilter(params[0], n.Head().Header.Height)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
+			return
+		}
+		logs := evmLogs(n, filter)
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: logs})
 	case "chain_head":
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: n.Head()})
 	case "chain_getAccount":
@@ -362,7 +376,7 @@ func evmTransaction(record types.TransactionRecord) map[string]any {
 	}
 }
 
-func evmReceipt(record types.TransactionRecord) map[string]any {
+func evmReceipt(record types.TransactionRecord, block types.Block) map[string]any {
 	status := uint64(0)
 	if record.Receipt.Success {
 		status = 1
@@ -378,7 +392,7 @@ func evmReceipt(record types.TransactionRecord) map[string]any {
 		"cumulativeGasUsed": quantity(record.Receipt.GasUsed),
 		"gasUsed":           quantity(record.Receipt.GasUsed),
 		"status":            quantity(status),
-		"logs":              record.Receipt.Events,
+		"logs":              evmTransactionLogs(block, record.Transaction.Hash()),
 	}
 }
 

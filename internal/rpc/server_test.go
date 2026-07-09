@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	chaincrypto "chainlab/internal/crypto"
+	"chainlab/internal/hash"
 	"chainlab/internal/node"
 	chainrpc "chainlab/internal/rpc"
 	"chainlab/internal/types"
@@ -179,6 +181,131 @@ func TestEVMCompatibleJSONRPCSubset(t *testing.T) {
 	}
 }
 
+func TestEthGetLogsFiltersContractEvents(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	deploy := signedRPCTransaction(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxDeploy,
+		From:     alice,
+		Nonce:    0,
+		GasLimit: 80_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"code_id": "counter.v1",
+			"initial": "0",
+		},
+	})
+	if err := n.SubmitTx(deploy); err != nil {
+		t.Fatal(err)
+	}
+	deployBlock, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	counter := deployBlock.Receipts[0].ContractAddress
+
+	call := signedRPCTransaction(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxCall,
+		From:     alice,
+		To:       counter,
+		Nonce:    1,
+		GasLimit: 50_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"method": "increment",
+			"amount": "2",
+		},
+	})
+	if err := n.SubmitTx(call); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+
+	topic := hash.KeccakHex([]byte("counter.incremented"))
+	result := callRPC(t, server.URL, "eth_getLogs", []any{map[string]any{
+		"fromBlock": "0x1",
+		"toBlock":   "latest",
+		"address":   counter,
+		"topics":    []any{topic},
+	}})
+	logs, ok := result.([]any)
+	if !ok {
+		t.Fatalf("logs result type = %T", result)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("log count = %d", len(logs))
+	}
+	logMap, ok := logs[0].(map[string]any)
+	if !ok {
+		t.Fatalf("log type = %T", logs[0])
+	}
+	if logMap["address"] != counter {
+		t.Fatalf("log address = %v", logMap["address"])
+	}
+	if logMap["blockNumber"] != "0x2" {
+		t.Fatalf("log block number = %v", logMap["blockNumber"])
+	}
+	if logMap["transactionHash"] != call.Hash() {
+		t.Fatalf("log tx hash = %v", logMap["transactionHash"])
+	}
+	if logMap["transactionIndex"] != "0x0" || logMap["logIndex"] != "0x0" {
+		t.Fatalf("log indexes = tx %v log %v", logMap["transactionIndex"], logMap["logIndex"])
+	}
+	topics, ok := logMap["topics"].([]any)
+	if !ok || len(topics) != 1 || topics[0] != topic {
+		t.Fatalf("log topics = %#v", logMap["topics"])
+	}
+	data, ok := logMap["data"].(string)
+	if !ok || !strings.HasPrefix(data, "0x") || len(data) <= 2 {
+		t.Fatalf("log data = %#v", logMap["data"])
+	}
+
+	receiptResult := callRPC(t, server.URL, "eth_getTransactionReceipt", []any{call.Hash()})
+	receipt, ok := receiptResult.(map[string]any)
+	if !ok {
+		t.Fatalf("receipt type = %T", receiptResult)
+	}
+	receiptLogs, ok := receipt["logs"].([]any)
+	if !ok || len(receiptLogs) != 1 {
+		t.Fatalf("receipt logs = %#v", receipt["logs"])
+	}
+	receiptLog, ok := receiptLogs[0].(map[string]any)
+	if !ok {
+		t.Fatalf("receipt log type = %T", receiptLogs[0])
+	}
+	if receiptLog["address"] != counter || receiptLog["transactionHash"] != call.Hash() || receiptLog["blockNumber"] != "0x2" {
+		t.Fatalf("receipt log = %#v", receiptLog)
+	}
+
+	empty := callRPC(t, server.URL, "eth_getLogs", []any{map[string]any{
+		"fromBlock": "0x1",
+		"toBlock":   "latest",
+		"address":   "0xcccccccccccccccccccccccccccccccccccccccc",
+		"topics":    []any{topic},
+	}})
+	if logs, ok := empty.([]any); !ok || len(logs) != 0 {
+		t.Fatalf("filtered logs = %#v", empty)
+	}
+}
+
 func TestRPCBroadcastsTransactionsToPeers(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {
@@ -293,6 +420,16 @@ func signedTransfer(t *testing.T, key chaincrypto.PrivateKey, from string, to st
 		GasLimit: 21_000,
 		GasPrice: 1,
 	}
+	sig, err := chaincrypto.Sign(key, tx.SigningBytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx.Signature = sig
+	return tx
+}
+
+func signedRPCTransaction(t *testing.T, key chaincrypto.PrivateKey, tx types.Transaction) types.Transaction {
+	t.Helper()
 	sig, err := chaincrypto.Sign(key, tx.SigningBytes())
 	if err != nil {
 		t.Fatal(err)

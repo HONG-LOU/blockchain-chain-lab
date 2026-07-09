@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"chainlab/internal/crypto"
+	"chainlab/internal/hash"
 	"chainlab/internal/node"
 	chainrpc "chainlab/internal/rpc"
 	"chainlab/internal/types"
@@ -306,6 +307,87 @@ func TestQueryAccountAndProduceCommands(t *testing.T) {
 	}
 }
 
+func TestQueryLogsCommand(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := crypto.AddressFromPrivateKey(key)
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	deploy := signedCLITx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxDeploy,
+		From:     alice,
+		Nonce:    0,
+		GasLimit: 80_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"code_id": "counter.v1",
+			"initial": "0",
+		},
+	})
+	if err := n.SubmitTx(deploy); err != nil {
+		t.Fatal(err)
+	}
+	deployBlock, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	counter := deployBlock.Receipts[0].ContractAddress
+
+	call := signedCLITx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxCall,
+		From:     alice,
+		To:       counter,
+		Nonce:    1,
+		GasLimit: 50_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"method": "increment",
+			"amount": "4",
+		},
+	})
+	if err := n.SubmitTx(call); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	topic := hash.KeccakHex([]byte("counter.incremented"))
+	if err := logsCommand([]string{
+		"--rpc", server.URL,
+		"--from-block", "0x1",
+		"--to-block", "latest",
+		"--address", counter,
+		"--topic", topic,
+	}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var logs []map[string]any
+	if err := json.Unmarshal(out.Bytes(), &logs); err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("log count = %d", len(logs))
+	}
+	if logs[0]["address"] != counter || logs[0]["transactionHash"] != call.Hash() {
+		t.Fatalf("log = %#v", logs[0])
+	}
+}
+
 func TestRPCJSONCall(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request map[string]any
@@ -327,4 +409,14 @@ func TestRPCJSONCall(t *testing.T) {
 	if result != "0x2" {
 		t.Fatalf("result = %q", result)
 	}
+}
+
+func signedCLITx(t *testing.T, key crypto.PrivateKey, tx types.Transaction) types.Transaction {
+	t.Helper()
+	signature, err := crypto.Sign(key, tx.SigningBytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx.Signature = signature
+	return tx
 }

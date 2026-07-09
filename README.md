@@ -12,7 +12,8 @@ It currently implements:
 - native smart-contract runtime with `counter.v1` and `token.v1`
 - HTTP REST endpoints and a small JSON-RPC-style endpoint
 - persistent node snapshots with committed blocks, state, and transaction index
-- EVM-compatible JSON-RPC read subset: `eth_chainId`, `eth_blockNumber`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`
+- EVM-compatible JSON-RPC read subset: `eth_chainId`, `eth_blockNumber`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`, `eth_getLogs`
+- EVM-style contract event logs projected from native receipts, with block range, address, and topic filtering
 - local multi-node devnet sync over HTTP peers: transaction relay, block import, and produced-block broadcast
 - CLI commands for keys, genesis, nodes, signed transfers, block production, queries, and demos
 
@@ -95,6 +96,7 @@ Query chain state:
 go run ./cmd/chainlab query head --rpc http://127.0.0.1:8547
 go run ./cmd/chainlab query account --rpc http://127.0.0.1:8547 --address <address>
 go run ./cmd/chainlab query tx --rpc http://127.0.0.1:8547 --hash <tx-hash>
+go run ./cmd/chainlab query logs --rpc http://127.0.0.1:8547 --from-block 0x1 --to-block latest --address <contract-address> --topic <topic0>
 ```
 
 ## HTTP API
@@ -109,7 +111,7 @@ go run ./cmd/chainlab query tx --rpc http://127.0.0.1:8547 --hash <tx-hash>
 - `POST /peer/tx`
 - `POST /peer/block`
 - `POST /rpc` with methods `chain_head`, `chain_getAccount`, and `chain_sendTx`
-- `POST /rpc` with EVM-style methods `eth_chainId`, `eth_blockNumber`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, and `eth_getBlockByNumber`
+- `POST /rpc` with EVM-style methods `eth_chainId`, `eth_blockNumber`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`, and `eth_getLogs`
 
 ## Roadmap
 

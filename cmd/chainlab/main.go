@@ -37,6 +37,24 @@ func (p *peerListFlag) Values() []string {
 	return append([]string(nil), (*p)...)
 }
 
+type stringListFlag []string
+
+func (s *stringListFlag) Set(value string) error {
+	if value == "" {
+		return fmt.Errorf("value cannot be empty")
+	}
+	*s = append(*s, value)
+	return nil
+}
+
+func (s *stringListFlag) String() string {
+	return fmt.Sprint([]string(*s))
+}
+
+func (s *stringListFlag) Values() []string {
+	return append([]string(nil), (*s)...)
+}
+
 type GenesisFile struct {
 	ChainID    string            `json:"chain_id"`
 	Proposer   string            `json:"proposer"`
@@ -208,7 +226,7 @@ func txCommand(args []string, out io.Writer) {
 
 func queryCommand(args []string, out io.Writer) {
 	if len(args) < 1 {
-		log.Fatal("usage: chainlab query <account|tx|head>")
+		log.Fatal("usage: chainlab query <account|tx|head|logs>")
 	}
 	var err error
 	switch args[0] {
@@ -218,6 +236,8 @@ func queryCommand(args []string, out io.Writer) {
 		err = txQueryCommand(args[1:], out)
 	case "head":
 		err = headCommand(args[1:], out)
+	case "logs":
+		err = logsCommand(args[1:], out)
 	default:
 		log.Fatalf("unknown query command %q", args[0])
 	}
@@ -396,6 +416,34 @@ func headCommand(args []string, out io.Writer) error {
 		return err
 	}
 	return writeTo(out, block)
+}
+
+func logsCommand(args []string, out io.Writer) error {
+	flags := flag.NewFlagSet("query logs", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
+	fromBlock := flags.String("from-block", "earliest", "start block: earliest, latest, or hex quantity")
+	toBlock := flags.String("to-block", "latest", "end block: earliest, latest, or hex quantity")
+	address := flags.String("address", "", "contract address filter")
+	var topics stringListFlag
+	flags.Var(&topics, "topic", "topic filter; can be repeated")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	filter := map[string]any{
+		"fromBlock": *fromBlock,
+		"toBlock":   *toBlock,
+	}
+	if *address != "" {
+		filter["address"] = *address
+	}
+	if values := topics.Values(); len(values) > 0 {
+		filter["topics"] = values
+	}
+	var logs []map[string]any
+	if err := rpcCall(*rpcURL, "eth_getLogs", []any{filter}, &logs); err != nil {
+		return err
+	}
+	return writeTo(out, logs)
 }
 
 func produceCommand(args []string, out io.Writer) error {
