@@ -481,6 +481,21 @@ func handleJSONRPC(w http.ResponseWriter, r *http.Request, n *node.Node) {
 			return
 		}
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: map[string]string{"hash": tx.Hash()}})
+	case "chain_sendUserOperation":
+		tx, err := parseRPCTransactionParam(request.Params)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
+			return
+		}
+		if strings.TrimSpace(tx.Paymaster) == "" {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "paymaster is required"})
+			return
+		}
+		if err := n.SubmitTx(tx); err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: map[string]string{"hash": tx.Hash()}})
 	case "txpool_status":
 		pool := n.TxPool()
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: map[string]string{
@@ -543,6 +558,24 @@ func handleJSONRPC(w http.ResponseWriter, r *http.Request, n *node.Node) {
 	default:
 		writeJSON(w, http.StatusNotFound, rpcResponse{ID: request.ID, Error: "unknown method"})
 	}
+}
+
+func parseRPCTransactionParam(raw json.RawMessage) (types.Transaction, error) {
+	if len(raw) == 0 {
+		return types.Transaction{}, fmt.Errorf("transaction is required")
+	}
+	var params []types.Transaction
+	if err := json.Unmarshal(raw, &params); err == nil && len(params) > 0 {
+		return params[0], nil
+	}
+	var tx types.Transaction
+	if err := json.Unmarshal(raw, &tx); err != nil {
+		return types.Transaction{}, fmt.Errorf("invalid transaction")
+	}
+	if tx.ChainID == "" {
+		return types.Transaction{}, fmt.Errorf("transaction is required")
+	}
+	return tx, nil
 }
 
 func parseRPCFaucetRequest(raw json.RawMessage) (faucetRequest, error) {
@@ -699,6 +732,7 @@ func evmTransaction(record types.TransactionRecord) map[string]any {
 		"gasPrice":             quantity(tx.GasPrice),
 		"maxFeePerGas":         quantity(tx.MaxFeePerGas),
 		"maxPriorityFeePerGas": quantity(tx.MaxPriorityFeePerGas),
+		"paymaster":            nullableAddress(tx.Paymaster),
 		"input":                "0x",
 		"type":                 "0x0",
 	}
@@ -718,6 +752,7 @@ func evmPendingTransaction(tx types.Transaction) map[string]any {
 		"gasPrice":             quantity(tx.GasPrice),
 		"maxFeePerGas":         quantity(tx.MaxFeePerGas),
 		"maxPriorityFeePerGas": quantity(tx.MaxPriorityFeePerGas),
+		"paymaster":            nullableAddress(tx.Paymaster),
 		"input":                "0x",
 		"type":                 "0x0",
 	}
@@ -756,6 +791,7 @@ func evmReceipt(record types.TransactionRecord, block types.Block) map[string]an
 		"cumulativeGasUsed": quantity(record.Receipt.GasUsed),
 		"gasUsed":           quantity(record.Receipt.GasUsed),
 		"effectiveGasPrice": quantity(record.Receipt.EffectiveGasPrice),
+		"feePayer":          nullableAddress(record.Receipt.FeePayer),
 		"status":            quantity(status),
 		"logs":              evmTransactionLogs(block, record.Transaction.Hash()),
 	}
@@ -778,6 +814,7 @@ func evmBlock(block types.Block, fullTransactions bool) map[string]any {
 				"gasPrice":             quantity(tx.GasPrice),
 				"maxFeePerGas":         quantity(tx.MaxFeePerGas),
 				"maxPriorityFeePerGas": quantity(tx.MaxPriorityFeePerGas),
+				"paymaster":            nullableAddress(tx.Paymaster),
 				"input":                "0x",
 				"type":                 "0x0",
 			}

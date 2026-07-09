@@ -305,6 +305,66 @@ func TestTransferCommandSupportsEIP1559FeeCaps(t *testing.T) {
 	}
 }
 
+func TestTransferCommandSupportsPaymasterSponsoredFees(t *testing.T) {
+	userKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	paymasterKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	user := crypto.AddressFromPrivateKey(userKey)
+	paymaster := crypto.AddressFromPrivateKey(paymasterKey)
+	receiver := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	n, err := node.New(node.Config{
+		ChainID:     "chainlab-local",
+		ProposerKey: paymasterKey,
+		GenesisBalance: map[string]uint64{
+			user:      100,
+			paymaster: 100_000,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	var out bytes.Buffer
+	if err := transferCommand([]string{
+		"--rpc", server.URL,
+		"--private-key", crypto.PrivateKeyToHex(userKey),
+		"--to", receiver,
+		"--value", "100",
+		"--gas-price", "2",
+		"--paymaster-private-key", crypto.PrivateKeyToHex(paymasterKey),
+	}, &out); err != nil {
+		t.Fatal(err)
+	}
+	pool := n.TxPool()
+	if pool.PendingCount != 1 {
+		t.Fatalf("txpool = %+v", pool)
+	}
+	tx := pool.Pending[0]
+	if tx.Paymaster != paymaster || tx.PaymasterSignature == "" {
+		t.Fatalf("sponsored tx = %+v", tx)
+	}
+	if !crypto.Verify(paymaster, tx.PaymasterSigningBytes(), tx.PaymasterSignature) {
+		t.Fatal("paymaster signature should verify")
+	}
+	block, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if block.Receipts[0].FeePayer != paymaster {
+		t.Fatalf("receipt = %+v", block.Receipts[0])
+	}
+	if got := n.Account(user).Balance; got != 0 {
+		t.Fatalf("user balance = %d", got)
+	}
+}
+
 func TestTransferCommandUsesPendingNonceAndQueryMempool(t *testing.T) {
 	key, err := crypto.GenerateKey()
 	if err != nil {

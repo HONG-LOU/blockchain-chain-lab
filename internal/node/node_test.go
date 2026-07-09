@@ -131,6 +131,68 @@ func TestNodeFeeMarketAdjustsBaseFeeAndRecordsGasUsed(t *testing.T) {
 	}
 }
 
+func TestNodeSponsoredTransferUsesPaymasterInBlock(t *testing.T) {
+	userKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	paymasterKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	user := chaincrypto.AddressFromPrivateKey(userKey)
+	paymaster := chaincrypto.AddressFromPrivateKey(paymasterKey)
+	receiver := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	feeCollector := "0xfee0000000000000000000000000000000000000"
+	n, err := node.New(node.Config{
+		ChainID:     "chainlab-local",
+		ProposerKey: paymasterKey,
+		GenesisBalance: map[string]uint64{
+			user:      100,
+			paymaster: 100_000,
+		},
+		FeeCollector: feeCollector,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tx := sponsoredNodeTx(t, userKey, paymasterKey, types.Transaction{
+		ChainID:   "chainlab-local",
+		Type:      types.TxTransfer,
+		From:      user,
+		To:        receiver,
+		Nonce:     0,
+		Value:     100,
+		GasLimit:  21_000,
+		GasPrice:  2,
+		Paymaster: paymaster,
+	})
+	if err := n.SubmitTx(tx); err != nil {
+		t.Fatal(err)
+	}
+	block, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if block.Receipts[0].FeePayer != paymaster {
+		t.Fatalf("receipt fee payer = %+v", block.Receipts[0])
+	}
+	if got := n.Account(user).Balance; got != 0 {
+		t.Fatalf("user balance = %d", got)
+	}
+	if got := n.Account(receiver).Balance; got != 100 {
+		t.Fatalf("receiver balance = %d", got)
+	}
+	if got := n.Account(paymaster).Balance; got != 58_000 {
+		t.Fatalf("paymaster balance = %d", got)
+	}
+	if got := n.Account(feeCollector).Balance; got != 21_000 {
+		t.Fatalf("fee collector balance = %d", got)
+	}
+}
+
 func TestNodePersistsChainStateAndTransactionIndex(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {
@@ -1099,6 +1161,17 @@ func signedNodeTx(t *testing.T, key chaincrypto.PrivateKey, tx types.Transaction
 		t.Fatal(err)
 	}
 	tx.Signature = sig
+	return tx
+}
+
+func sponsoredNodeTx(t *testing.T, userKey chaincrypto.PrivateKey, paymasterKey chaincrypto.PrivateKey, tx types.Transaction) types.Transaction {
+	t.Helper()
+	tx = signedNodeTx(t, userKey, tx)
+	signature, err := chaincrypto.Sign(paymasterKey, tx.PaymasterSigningBytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx.PaymasterSignature = signature
 	return tx
 }
 

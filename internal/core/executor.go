@@ -51,6 +51,9 @@ func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, 
 	if !chaincrypto.Verify(tx.From, tx.SigningBytes(), tx.Signature) {
 		return types.Receipt{}, errors.New("invalid transaction signature")
 	}
+	if err := validatePaymasterAuthorization(tx); err != nil {
+		return types.Receipt{}, err
+	}
 	account := store.GetAccount(tx.From)
 	if account.Nonce != tx.Nonce {
 		return types.Receipt{}, fmt.Errorf("bad nonce: got %d want %d", tx.Nonce, account.Nonce)
@@ -275,7 +278,16 @@ func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, 
 	if err != nil {
 		return types.Receipt{}, err
 	}
-	if err := e.chargeFee(working, tx.From, fee.TotalFee, fee.PriorityFee); err != nil {
+	feePayer := tx.From
+	if strings.TrimSpace(tx.Paymaster) != "" {
+		feePayer = tx.Paymaster
+		receipt.FeePayer = tx.Paymaster
+		receipt.Events = append(receipt.Events, types.Event{Type: "paymaster.sponsored", Attributes: map[string]string{
+			"user":      strings.ToLower(tx.From),
+			"paymaster": strings.ToLower(tx.Paymaster),
+		}})
+	}
+	if err := e.chargeFee(working, feePayer, fee.TotalFee, fee.PriorityFee); err != nil {
 		return types.Receipt{}, err
 	}
 	receipt.GasUsed = gasUsed
@@ -285,6 +297,19 @@ func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, 
 	receipt.PriorityFeePaid = fee.PriorityFee
 	store.ReplaceWith(working)
 	return receipt, nil
+}
+
+func validatePaymasterAuthorization(tx types.Transaction) error {
+	if strings.TrimSpace(tx.Paymaster) == "" {
+		return nil
+	}
+	if strings.TrimSpace(tx.PaymasterSignature) == "" {
+		return errors.New("paymaster signature is required")
+	}
+	if !chaincrypto.Verify(tx.Paymaster, tx.PaymasterSigningBytes(), tx.PaymasterSignature) {
+		return errors.New("invalid paymaster signature")
+	}
+	return nil
 }
 
 type FeeBreakdown struct {

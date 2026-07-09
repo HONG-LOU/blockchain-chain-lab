@@ -11,14 +11,16 @@ import (
 )
 
 type Summary struct {
-	Height                  uint64
-	TransferReceiverBalance uint64
-	CounterValue            string
-	TokenReceiverBalance    string
-	WASMValue               string
-	Stake                   uint64
-	YesVotes                uint64
-	GovernanceParam         string
+	Height                   uint64
+	TransferReceiverBalance  uint64
+	SponsoredReceiverBalance uint64
+	SponsoredUserBalance     uint64
+	CounterValue             string
+	TokenReceiverBalance     string
+	WASMValue                string
+	Stake                    uint64
+	YesVotes                 uint64
+	GovernanceParam          string
 }
 
 func RunDemo() (Summary, error) {
@@ -27,11 +29,17 @@ func RunDemo() (Summary, error) {
 		return Summary{}, err
 	}
 	alice := crypto.AddressFromPrivateKey(key)
+	sponsoredKey, err := crypto.GenerateKey()
+	if err != nil {
+		return Summary{}, err
+	}
+	sponsoredUser := crypto.AddressFromPrivateKey(sponsoredKey)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	sponsoredReceiver := "0xdddddddddddddddddddddddddddddddddddddddd"
 	n, err := node.New(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000, sponsoredUser: 15},
 	})
 	if err != nil {
 		return Summary{}, err
@@ -252,15 +260,35 @@ func RunDemo() (Summary, error) {
 		return Summary{}, err
 	}
 
+	sponsoredTransfer := types.Transaction{
+		ChainID:   "chainlab-local",
+		Type:      types.TxTransfer,
+		From:      sponsoredUser,
+		To:        sponsoredReceiver,
+		Nonce:     0,
+		Value:     15,
+		GasLimit:  21_000,
+		GasPrice:  2,
+		Paymaster: alice,
+	}
+	if err := signSponsoredAndSubmit(n, sponsoredKey, key, sponsoredTransfer); err != nil {
+		return Summary{}, err
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		return Summary{}, err
+	}
+
 	return Summary{
-		Height:                  n.Head().Header.Height,
-		TransferReceiverBalance: n.Account(bob).Balance,
-		CounterValue:            n.Account(counter).Storage["count"],
-		TokenReceiverBalance:    n.Account(token).Storage["balance:"+bob],
-		WASMValue:               wasmValue,
-		Stake:                   n.StakeOf(alice),
-		YesVotes:                n.Proposal(proposalID).Votes["yes"],
-		GovernanceParam:         n.Param("governance.quorum"),
+		Height:                   n.Head().Header.Height,
+		TransferReceiverBalance:  n.Account(bob).Balance,
+		SponsoredReceiverBalance: n.Account(sponsoredReceiver).Balance,
+		SponsoredUserBalance:     n.Account(sponsoredUser).Balance,
+		CounterValue:             n.Account(counter).Storage["count"],
+		TokenReceiverBalance:     n.Account(token).Storage["balance:"+bob],
+		WASMValue:                wasmValue,
+		Stake:                    n.StakeOf(alice),
+		YesVotes:                 n.Proposal(proposalID).Votes["yes"],
+		GovernanceParam:          n.Param("governance.quorum"),
 	}, nil
 }
 
@@ -277,5 +305,19 @@ func signAndSubmit(n *node.Node, key crypto.PrivateKey, tx types.Transaction) er
 		return err
 	}
 	tx.Signature = signature
+	return n.SubmitTx(tx)
+}
+
+func signSponsoredAndSubmit(n *node.Node, userKey crypto.PrivateKey, paymasterKey crypto.PrivateKey, tx types.Transaction) error {
+	signature, err := crypto.Sign(userKey, tx.SigningBytes())
+	if err != nil {
+		return err
+	}
+	tx.Signature = signature
+	paymasterSignature, err := crypto.Sign(paymasterKey, tx.PaymasterSigningBytes())
+	if err != nil {
+		return err
+	}
+	tx.PaymasterSignature = paymasterSignature
 	return n.SubmitTx(tx)
 }

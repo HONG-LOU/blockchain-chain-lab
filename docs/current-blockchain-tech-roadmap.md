@@ -14,7 +14,7 @@ As of 2026-07-09, the practical way to build a serious chain is not to copy one 
 
 1. Keep ChainLab as a learning and prototype chain. The goal is to understand the state transition function, blocks, receipts, roots, mempool, signatures, RPC, contract VM boundary, and local validator operations.
 2. Add advanced concepts in small verified slices: uploaded WASM, deterministic resource metering, ABI encoding, richer event indexing, BFT finality simulation, and EVM-style raw transactions.
-   - Current ChainLab progress includes uploaded WASM code, deterministic WASM host-resource gas, an EIP-1559-style local fee market, validator set changes, and an explicit governance proposal lifecycle for parameter changes.
+   - Current ChainLab progress includes uploaded WASM code, deterministic WASM host-resource gas, an EIP-1559-style local fee market, native paymaster-sponsored gas, validator set changes, and an explicit governance proposal lifecycle for parameter changes.
 3. Once the product target is clear, choose a production base instead of shipping the custom dev chain as a mainnet:
    - OP Stack or another Ethereum rollup stack if liquidity, Solidity, and wallet compatibility matter most.
    - Cosmos SDK if the chain needs sovereign governance, IBC, and custom modules.
@@ -39,6 +39,7 @@ As of 2026-07-09, the practical way to build a serious chain is not to copy one 
 - Keep VM host functions minimal: no filesystem, network, clock, randomness, or global mutable process state.
 - Charge deterministic fees for every consensus-relevant resource: bytecode size, storage growth, CPU steps, memory, logs, and state reads/writes.
 - Keep fee and metering honest about scope: ChainLab now has a local EIP-1559-style base fee, base fee burn, priority fee rewards, uploaded WASM bytecode fees, and host ABI storage/event/arg/return resource gas; CPU instruction/fuel metering and Ethereum type-2 raw transaction compatibility remain separate milestones.
+- Treat account abstraction as a user-operation workflow, not only a wallet UI feature. ChainLab now supports a native paymaster path where the user signs the operation and a sponsor signs the exact user-signed transaction to pay gas; full ERC-4337 EntryPoint, EIP-7702 delegation, batching, and contract accounts remain separate milestones.
 - Prefer boring cryptography and audited libraries; do not invent signature schemes, hash functions, bridges, or consensus protocols for production.
 - Treat bridges and upgrade keys as the highest-risk parts of the system.
 - Build every feature with replay tests, persistence tests, CLI/RPC tests, and at least one real-node end-to-end path.
@@ -46,6 +47,9 @@ As of 2026-07-09, the practical way to build a serious chain is not to copy one 
 ## Reference Points
 
 - Ethereum roadmap: https://ethereum.org/roadmap/
+- Ethereum account abstraction: https://ethereum.org/roadmap/account-abstraction/
+- EIP-7702: https://eips.ethereum.org/EIPS/eip-7702
+- ERC-4337/paymasters: https://docs.erc4337.io/paymasters/
 - Solana programs and account model: https://solana.com/docs/core/programs
 - OP Stack: https://docs.optimism.io/op-stack/protocol/getting-started
 - Cosmos developer docs: https://docs.cosmos.network/

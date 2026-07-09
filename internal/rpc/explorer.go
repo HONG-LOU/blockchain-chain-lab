@@ -38,17 +38,19 @@ type explorerBlock struct {
 }
 
 type explorerTransaction struct {
-	Hash     string
-	URL      string
-	Type     types.TxType
-	From     string
-	FromURL  string
-	To       string
-	ToURL    string
-	Nonce    uint64
-	Value    uint64
-	GasLimit uint64
-	GasPrice uint64
+	Hash         string
+	URL          string
+	Type         types.TxType
+	From         string
+	FromURL      string
+	To           string
+	ToURL        string
+	Nonce        uint64
+	Value        uint64
+	GasLimit     uint64
+	GasPrice     uint64
+	Paymaster    string
+	PaymasterURL string
 }
 
 type explorerTransactionPageData struct {
@@ -215,17 +217,19 @@ func newExplorerBlock(block types.Block) explorerBlock {
 
 func newExplorerTransaction(tx types.Transaction) explorerTransaction {
 	return explorerTransaction{
-		Hash:     tx.Hash(),
-		URL:      explorerTransactionURL(tx.Hash()),
-		Type:     tx.Type,
-		From:     tx.From,
-		FromURL:  explorerAccountURL(tx.From),
-		To:       tx.To,
-		ToURL:    explorerAccountURL(tx.To),
-		Nonce:    tx.Nonce,
-		Value:    tx.Value,
-		GasLimit: tx.GasLimit,
-		GasPrice: tx.GasPrice,
+		Hash:         tx.Hash(),
+		URL:          explorerTransactionURL(tx.Hash()),
+		Type:         tx.Type,
+		From:         tx.From,
+		FromURL:      explorerAccountURL(tx.From),
+		To:           tx.To,
+		ToURL:        explorerAccountURL(tx.To),
+		Nonce:        tx.Nonce,
+		Value:        tx.Value,
+		GasLimit:     tx.GasLimit,
+		GasPrice:     tx.GasPrice,
+		Paymaster:    tx.Paymaster,
+		PaymasterURL: explorerAccountURL(tx.Paymaster),
 	}
 }
 
@@ -631,6 +635,7 @@ var explorerTransactionTemplate = template.Must(template.New("explorer-transacti
         <div class="field"><div class="label">Value</div><div>{{.Transaction.Value}}</div></div>
         <div class="field"><div class="label">Gas Limit</div><div>{{.Transaction.GasLimit}}</div></div>
         <div class="field"><div class="label">Gas Price</div><div>{{.Transaction.GasPrice}}</div></div>
+        {{if .Transaction.Paymaster}}<div class="field"><div class="label">Paymaster</div><div><a class="hash" href="{{.Transaction.PaymasterURL}}">{{.Transaction.Paymaster}}</a></div></div>{{end}}
       </div>
 
       <div class="section">
@@ -640,6 +645,7 @@ var explorerTransactionTemplate = template.Must(template.New("explorer-transacti
         <div class="field"><div class="label">Block</div><div><a href="{{.BlockURL}}">{{.BlockHeight}}</a></div></div>
         <div class="field"><div class="label">Block Hash</div><div class="hash">{{.BlockHash}}</div></div>
         <div class="field"><div class="label">Index</div><div>{{.Index}}</div></div>
+        {{if .Receipt.FeePayer}}<div class="field"><div class="label">Fee Payer</div><div><a class="hash" href="/explorer/account/{{.Receipt.FeePayer}}">{{.Receipt.FeePayer}}</a></div></div>{{end}}
         {{if .Receipt.ContractAddress}}<div class="field"><div class="label">Contract</div><div><a class="hash" href="/explorer/account/{{.Receipt.ContractAddress}}">{{.Receipt.ContractAddress}}</a></div></div>{{end}}
         {{if .Receipt.Error}}<div class="field"><div class="label">Error</div><div>{{.Receipt.Error}}</div></div>{{end}}
       </div>

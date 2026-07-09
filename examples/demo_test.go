@@ -35,4 +35,10 @@ func TestRunDemo(t *testing.T) {
 	if summary.GovernanceParam != "majority" {
 		t.Fatalf("governance param = %q", summary.GovernanceParam)
 	}
+	if summary.SponsoredReceiverBalance != 15 {
+		t.Fatalf("sponsored receiver balance = %d", summary.SponsoredReceiverBalance)
+	}
+	if summary.SponsoredUserBalance != 0 {
+		t.Fatalf("sponsored user balance = %d", summary.SponsoredUserBalance)
+	}
 }

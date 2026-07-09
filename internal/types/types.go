@@ -45,12 +45,20 @@ type Transaction struct {
 	GasPrice             uint64            `json:"gas_price,omitempty"`
 	MaxFeePerGas         uint64            `json:"max_fee_per_gas,omitempty"`
 	MaxPriorityFeePerGas uint64            `json:"max_priority_fee_per_gas,omitempty"`
+	Paymaster            string            `json:"paymaster,omitempty"`
 	Payload              map[string]string `json:"payload,omitempty"`
 	Signature            string            `json:"signature,omitempty"`
+	PaymasterSignature   string            `json:"paymaster_signature,omitempty"`
 }
 
 func (tx Transaction) SigningBytes() []byte {
 	tx.Signature = ""
+	tx.PaymasterSignature = ""
+	return hash.MustCanonicalBytes(tx)
+}
+
+func (tx Transaction) PaymasterSigningBytes() []byte {
+	tx.PaymasterSignature = ""
 	return hash.MustCanonicalBytes(tx)
 }
 
@@ -78,6 +86,7 @@ type Receipt struct {
 	GasUsed           uint64  `json:"gas_used"`
 	BaseFeePerGas     uint64  `json:"base_fee_per_gas,omitempty"`
 	EffectiveGasPrice uint64  `json:"effective_gas_price,omitempty"`
+	FeePayer          string  `json:"fee_payer,omitempty"`
 	BaseFeeBurned     uint64  `json:"base_fee_burned,omitempty"`
 	PriorityFeePaid   uint64  `json:"priority_fee_paid,omitempty"`
 	Events            []Event `json:"events,omitempty"`

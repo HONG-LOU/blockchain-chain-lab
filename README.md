@@ -15,6 +15,7 @@ It currently implements:
 - sandboxed WASM contract runtime with built-in `wasm.echo.v1` and chain-state uploaded modules through `wasm.upload`
 - deterministic WASM resource metering for uploaded bytecode size and ChainLab host ABI storage/event/arg/return usage
 - EIP-1559-style local fee market with block base fee, gas used/limit, base fee burn, priority fee rewards, and legacy `gas_price` compatibility
+- native paymaster-sponsored transactions: the user signs the operation and consumes their own nonce, while a paymaster signs an authorization and pays gas
 - HTTP REST endpoints and a small JSON-RPC-style endpoint
 - persistent node snapshots with committed blocks, state, and transaction index
 - local fork-choice that stores known branches and reorgs to a longer validated branch
@@ -105,6 +106,14 @@ go run ./cmd/chainlab tx transfer --rpc http://127.0.0.1:8547 --private-key <hex
 ```
 
 The block header records `base_fee_per_gas`, `gas_limit`, and `gas_used`. Receipts record `effective_gas_price`, burned base fee, and paid priority fee. ChainLab still uses its native signed transaction JSON; this is not full Ethereum EIP-2718 / type-2 raw transaction compatibility.
+
+Submit a sponsored transfer where a paymaster pays gas:
+
+```powershell
+go run ./cmd/chainlab tx transfer --rpc http://127.0.0.1:8547 --private-key <user-private-key> --to <address> --value 100 --gas-price 2 --paymaster-private-key <paymaster-private-key>
+```
+
+The user's signature covers the operation, the paymaster signature covers the user-signed transaction, and the receipt records `fee_payer`. This models the account-abstraction/paymaster workflow in a ChainLab-native way; it is not a full ERC-4337 EntryPoint or EIP-7702 implementation.
 
 Build a signed raw ChainLab transaction without broadcasting, then submit it later:
 
@@ -218,7 +227,7 @@ go run ./cmd/chainlab query estimate-gas --rpc http://127.0.0.1:8547 --type call
 - `POST /chain/produce`
 - `POST /peer/tx`
 - `POST /peer/block`
-- `POST /rpc` with methods `chain_head`, `chain_finality`, `chain_feeMarket`, `chain_getAccount`, `chain_validators`, `chain_proposal`, `chain_param`, `chain_sendTx`, and `chain_faucet`
+- `POST /rpc` with methods `chain_head`, `chain_finality`, `chain_feeMarket`, `chain_getAccount`, `chain_validators`, `chain_proposal`, `chain_param`, `chain_sendTx`, `chain_sendUserOperation`, and `chain_faucet`
 - `POST /rpc` with EVM-style methods `eth_chainId`, `eth_blockNumber`, `eth_gasPrice`, `eth_maxPriorityFeePerGas`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`, `eth_getLogs`, `eth_call`, `eth_estimateGas`, and `eth_sendRawTransaction`. Block range tags support `earliest`, `latest`, `safe`, `finalized`, and hex quantities. `eth_getTransactionCount` also supports `pending` for mempool-aware nonce calculation.
 - `POST /rpc` with txpool-style methods `txpool_status` and `txpool_content`
 
@@ -228,6 +237,7 @@ Next useful milestones:
 
 - real BFT finality and richer fork-choice safety rules
 - broader WASM ABI with CPU instruction/fuel metering
+- richer account abstraction, including policy-based paymasters, batched operations, and contract accounts
 - richer contract explorer views with decoded native contract state and events
 - richer governance thresholds, quorum rules, deposits, and upgrade proposal handlers
 - production-framework migration decision: OP Stack, Cosmos SDK, Avalanche L1, or another appchain stack

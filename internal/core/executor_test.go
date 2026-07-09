@@ -117,6 +117,98 @@ func TestEIP1559FeeMarketBurnsBaseFeeAndPaysPriorityFee(t *testing.T) {
 	}
 }
 
+func TestSponsoredTransferChargesPaymasterAndNotSenderForGas(t *testing.T) {
+	userKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	paymasterKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	user := chaincrypto.AddressFromPrivateKey(userKey)
+	paymaster := chaincrypto.AddressFromPrivateKey(paymasterKey)
+	receiver := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	feeCollector := "0xfee0000000000000000000000000000000000000"
+	store := state.NewStore()
+	store.SetBalance(user, 100)
+	store.SetBalance(paymaster, 100_000)
+	executor := core.NewExecutor("chainlab-local", feeCollector, contracts.NewRuntimeWithDefaults())
+
+	tx := sponsoredTx(t, userKey, paymasterKey, types.Transaction{
+		ChainID:              "chainlab-local",
+		Type:                 types.TxTransfer,
+		From:                 user,
+		To:                   receiver,
+		Nonce:                0,
+		Value:                100,
+		GasLimit:             21_000,
+		MaxFeePerGas:         3,
+		MaxPriorityFeePerGas: 1,
+		Paymaster:            paymaster,
+	})
+
+	receipt, err := executor.ExecuteWithContext(store, tx, core.ExecutionContext{
+		BlockHeight:   1,
+		BaseFeePerGas: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if receipt.FeePayer != paymaster {
+		t.Fatalf("fee payer = %q", receipt.FeePayer)
+	}
+	if got := store.GetAccount(user).Balance; got != 0 {
+		t.Fatalf("user balance = %d", got)
+	}
+	if got := store.GetAccount(receiver).Balance; got != 100 {
+		t.Fatalf("receiver balance = %d", got)
+	}
+	if got := store.GetAccount(paymaster).Balance; got != 37_000 {
+		t.Fatalf("paymaster balance = %d", got)
+	}
+	if got := store.GetAccount(feeCollector).Balance; got != 21_000 {
+		t.Fatalf("fee collector balance = %d", got)
+	}
+	if len(receipt.Events) != 2 || receipt.Events[1].Type != "paymaster.sponsored" {
+		t.Fatalf("events = %#v", receipt.Events)
+	}
+}
+
+func TestSponsoredTransferRequiresPaymasterSignature(t *testing.T) {
+	userKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	paymasterKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	user := chaincrypto.AddressFromPrivateKey(userKey)
+	paymaster := chaincrypto.AddressFromPrivateKey(paymasterKey)
+	store := state.NewStore()
+	store.SetBalance(user, 100)
+	store.SetBalance(paymaster, 100_000)
+	executor := core.NewExecutor("chainlab-local", "0xfee0000000000000000000000000000000000000", contracts.NewRuntimeWithDefaults())
+
+	tx := signedTx(t, userKey, types.Transaction{
+		ChainID:   "chainlab-local",
+		Type:      types.TxTransfer,
+		From:      user,
+		To:        "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Nonce:     0,
+		Value:     100,
+		GasLimit:  21_000,
+		GasPrice:  2,
+		Paymaster: paymaster,
+	})
+
+	if _, err := executor.Execute(store, tx); err == nil {
+		t.Fatal("sponsored transaction without paymaster signature should fail")
+	}
+}
+
 func TestRejectsBadSignatureAndBadNonce(t *testing.T) {
 	store, executor, key, alice, bob := newExecutorFixture(t)
 	tx := signedTx(t, key, types.Transaction{
@@ -139,6 +231,21 @@ func TestRejectsBadSignatureAndBadNonce(t *testing.T) {
 	if _, err := executor.Execute(store, tx); err == nil {
 		t.Fatal("bad signature should fail")
 	}
+}
+
+func sponsoredTx(t *testing.T, userKey chaincrypto.PrivateKey, paymasterKey chaincrypto.PrivateKey, tx types.Transaction) types.Transaction {
+	t.Helper()
+	signature, err := chaincrypto.Sign(userKey, tx.SigningBytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx.Signature = signature
+	paymasterSignature, err := chaincrypto.Sign(paymasterKey, tx.PaymasterSigningBytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx.PaymasterSignature = paymasterSignature
+	return tx
 }
 
 func TestStakeUnstakeAndVote(t *testing.T) {

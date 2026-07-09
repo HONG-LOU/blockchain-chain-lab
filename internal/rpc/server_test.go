@@ -246,6 +246,65 @@ func TestRPCExposesFeeMarketFields(t *testing.T) {
 	}
 }
 
+func TestRPCSubmitsSponsoredUserOperation(t *testing.T) {
+	userKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	paymasterKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	user := chaincrypto.AddressFromPrivateKey(userKey)
+	paymaster := chaincrypto.AddressFromPrivateKey(paymasterKey)
+	receiver := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	n, err := node.New(node.Config{
+		ChainID:     "chainlab-local",
+		ProposerKey: paymasterKey,
+		GenesisBalance: map[string]uint64{
+			user:      100,
+			paymaster: 100_000,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	tx := sponsoredRPCTransaction(t, userKey, paymasterKey, types.Transaction{
+		ChainID:   "chainlab-local",
+		Type:      types.TxTransfer,
+		From:      user,
+		To:        receiver,
+		Nonce:     0,
+		Value:     100,
+		GasLimit:  21_000,
+		GasPrice:  2,
+		Paymaster: paymaster,
+	})
+	result := callRPC(t, server.URL, "chain_sendUserOperation", []any{tx})
+	resultMap, ok := result.(map[string]any)
+	if !ok || resultMap["hash"] != tx.Hash() {
+		t.Fatalf("send user operation result = %#v", result)
+	}
+	pool := n.TxPool()
+	if pool.PendingCount != 1 || pool.Pending[0].Paymaster != paymaster {
+		t.Fatalf("txpool = %+v", pool)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+	receiptResult := callRPC(t, server.URL, "eth_getTransactionReceipt", []any{tx.Hash()})
+	receiptMap, ok := receiptResult.(map[string]any)
+	if !ok || receiptMap["feePayer"] != paymaster {
+		t.Fatalf("receipt = %#v", receiptResult)
+	}
+	if got := n.Account(user).Balance; got != 0 {
+		t.Fatalf("user balance = %d", got)
+	}
+}
+
 func TestRPCExposesValidatorSet(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {
@@ -1249,6 +1308,17 @@ func signedRPCTransaction(t *testing.T, key chaincrypto.PrivateKey, tx types.Tra
 		t.Fatal(err)
 	}
 	tx.Signature = sig
+	return tx
+}
+
+func sponsoredRPCTransaction(t *testing.T, userKey chaincrypto.PrivateKey, paymasterKey chaincrypto.PrivateKey, tx types.Transaction) types.Transaction {
+	t.Helper()
+	tx = signedRPCTransaction(t, userKey, tx)
+	signature, err := chaincrypto.Sign(paymasterKey, tx.PaymasterSigningBytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx.PaymasterSignature = signature
 	return tx
 }
 

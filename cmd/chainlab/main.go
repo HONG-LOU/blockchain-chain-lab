@@ -385,11 +385,12 @@ func transferCommand(args []string, out io.Writer) error {
 	gasPrice := flags.Uint64("gas-price", 1, "gas price")
 	maxFeePerGas := flags.Uint64("max-fee-per-gas", 0, "EIP-1559-style max fee per gas")
 	maxPriorityFeePerGas := flags.Uint64("max-priority-fee-per-gas", 0, "EIP-1559-style max priority fee per gas")
+	paymasterPrivateKeyHex := flags.String("paymaster-private-key", "", "optional paymaster private key for sponsored gas")
 	rawOnly := flags.Bool("raw-only", false, "print signed raw transaction without submitting")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	tx, err := buildSignedTransferWithFeeCaps(*rpcURL, *privateKeyHex, *to, *value, *gasLimit, *gasPrice, *maxFeePerGas, *maxPriorityFeePerGas)
+	tx, err := buildSignedTransferWithFeeCapsAndPaymaster(*rpcURL, *privateKeyHex, *to, *value, *gasLimit, *gasPrice, *maxFeePerGas, *maxPriorityFeePerGas, *paymasterPrivateKeyHex)
 	if err != nil {
 		return err
 	}
@@ -777,13 +778,17 @@ func buildSignedTransfer(rpcURL string, privateKeyHex string, to string, value u
 }
 
 func buildSignedTransferWithFeeCaps(rpcURL string, privateKeyHex string, to string, value uint64, gasLimit uint64, gasPrice uint64, maxFeePerGas uint64, maxPriorityFeePerGas uint64) (types.Transaction, error) {
+	return buildSignedTransferWithFeeCapsAndPaymaster(rpcURL, privateKeyHex, to, value, gasLimit, gasPrice, maxFeePerGas, maxPriorityFeePerGas, "")
+}
+
+func buildSignedTransferWithFeeCapsAndPaymaster(rpcURL string, privateKeyHex string, to string, value uint64, gasLimit uint64, gasPrice uint64, maxFeePerGas uint64, maxPriorityFeePerGas uint64, paymasterPrivateKeyHex string) (types.Transaction, error) {
 	if privateKeyHex == "" {
 		return types.Transaction{}, fmt.Errorf("private key is required")
 	}
 	if to == "" {
 		return types.Transaction{}, fmt.Errorf("recipient is required")
 	}
-	return buildSignedTransactionWithFeeCaps(rpcURL, privateKeyHex, types.TxTransfer, to, value, gasLimit, gasPrice, maxFeePerGas, maxPriorityFeePerGas, nil)
+	return buildSignedTransactionWithFeeCapsAndPaymaster(rpcURL, privateKeyHex, types.TxTransfer, to, value, gasLimit, gasPrice, maxFeePerGas, maxPriorityFeePerGas, nil, paymasterPrivateKeyHex)
 }
 
 func buildSignedTransaction(rpcURL string, privateKeyHex string, txType types.TxType, to string, value uint64, gasLimit uint64, gasPrice uint64, payload map[string]string) (types.Transaction, error) {
@@ -791,12 +796,25 @@ func buildSignedTransaction(rpcURL string, privateKeyHex string, txType types.Tx
 }
 
 func buildSignedTransactionWithFeeCaps(rpcURL string, privateKeyHex string, txType types.TxType, to string, value uint64, gasLimit uint64, gasPrice uint64, maxFeePerGas uint64, maxPriorityFeePerGas uint64, payload map[string]string) (types.Transaction, error) {
+	return buildSignedTransactionWithFeeCapsAndPaymaster(rpcURL, privateKeyHex, txType, to, value, gasLimit, gasPrice, maxFeePerGas, maxPriorityFeePerGas, payload, "")
+}
+
+func buildSignedTransactionWithFeeCapsAndPaymaster(rpcURL string, privateKeyHex string, txType types.TxType, to string, value uint64, gasLimit uint64, gasPrice uint64, maxFeePerGas uint64, maxPriorityFeePerGas uint64, payload map[string]string, paymasterPrivateKeyHex string) (types.Transaction, error) {
 	if privateKeyHex == "" {
 		return types.Transaction{}, fmt.Errorf("private key is required")
 	}
 	key, err := crypto.PrivateKeyFromHex(privateKeyHex)
 	if err != nil {
 		return types.Transaction{}, err
+	}
+	var paymasterKey crypto.PrivateKey
+	var paymaster string
+	if strings.TrimSpace(paymasterPrivateKeyHex) != "" {
+		paymasterKey, err = crypto.PrivateKeyFromHex(paymasterPrivateKeyHex)
+		if err != nil {
+			return types.Transaction{}, err
+		}
+		paymaster = crypto.AddressFromPrivateKey(paymasterKey)
 	}
 	from := crypto.AddressFromPrivateKey(key)
 	var chainIDHex string
@@ -823,6 +841,7 @@ func buildSignedTransactionWithFeeCaps(rpcURL string, privateKeyHex string, txTy
 		GasPrice:             gasPrice,
 		MaxFeePerGas:         maxFeePerGas,
 		MaxPriorityFeePerGas: maxPriorityFeePerGas,
+		Paymaster:            paymaster,
 		Payload:              payload,
 	}
 	signature, err := crypto.Sign(key, tx.SigningBytes())
@@ -830,6 +849,13 @@ func buildSignedTransactionWithFeeCaps(rpcURL string, privateKeyHex string, txTy
 		return types.Transaction{}, err
 	}
 	tx.Signature = signature
+	if paymasterKey != nil {
+		paymasterSignature, err := crypto.Sign(paymasterKey, tx.PaymasterSigningBytes())
+		if err != nil {
+			return types.Transaction{}, err
+		}
+		tx.PaymasterSignature = paymasterSignature
+	}
 	return tx, nil
 }
 
