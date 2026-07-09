@@ -14,7 +14,7 @@ It currently implements:
 - transaction, receipt, and state roots
 - native smart-contract runtime with `counter.v1` and `token.v1`
 - sandboxed WASM contract runtime with built-in `wasm.echo.v1` and chain-state uploaded modules through `wasm.upload`
-- deterministic WASM resource metering for uploaded bytecode size, static function-body fuel, and ChainLab host ABI storage/event/arg/return usage
+- deterministic WASM resource metering for uploaded bytecode size, static function-body fuel, and ChainLab host ABI storage/event/arg/return usage, plus a wazero context deadline that interrupts runaway guest execution
 - EIP-1559-style local fee market with block base fee, gas used/limit, base fee burn, priority fee rewards, and legacy `gas_price` compatibility
 - native paymaster-sponsored transactions: the user signs the operation and consumes their own nonce, while a paymaster signs an authorization and pays gas
 - ChainLab-native batched user operations: one signed transaction can atomically execute multiple transfer/call operations with one sender nonce and one fee settlement
@@ -186,7 +186,7 @@ The upload receipt contains `receipt.code_id`; use that value in the deploy comm
 
 Uploaded WASM runs inside a restricted wazero sandbox and only receives ChainLab host functions for args, contract storage, return data, and events. The module must implement ChainLab's current `deploy`, `call`, and `read` exports. This is not CosmWasm compatibility yet.
 
-WASM upload gas scales with bytecode size. WASM deploy and write-call receipts include deterministic extra gas for module instantiation, static exported function-body fuel, argument copies, storage reads/writes, return data, and emitted event bytes. This is deterministic resource accounting, not a full runtime interrupt mechanism for infinite loops.
+WASM upload gas scales with bytecode size. WASM deploy and write-call receipts include deterministic extra gas for module instantiation, static exported function-body fuel, argument copies, storage reads/writes, return data, and emitted event bytes. Runtime calls also run with wazero context cancellation so an infinite loop is interrupted instead of pinning the node. The timeout is a sandbox safety valve, not deterministic gas accounting.
 
 Stake, join, and leave the validator set:
 
@@ -282,7 +282,7 @@ go run ./cmd/chainlab query estimate-gas --rpc http://127.0.0.1:8547 --type call
 Next useful milestones:
 
 - BFT timeout/round handling, richer fork-choice safety rules, and production-grade slashing economics
-- broader WASM ABI with runtime step limits, ABI encoding, and richer host functions
+- broader WASM ABI with deterministic runtime step limits, ABI encoding, and richer host functions
 - richer account abstraction, including policy-based paymasters, social recovery/session-key smart accounts, and ERC-4337/EIP-7702 compatibility experiments
 - richer contract explorer views with decoded native contract state, event pages, and longer-lived external indexer support
 - richer governance thresholds, quorum rules, deposits, and upgrade proposal handlers

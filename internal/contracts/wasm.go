@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
@@ -19,6 +20,8 @@ const (
 	wasmHostCallGas    = 100
 	wasmByteGas        = 1
 )
+
+const wasmExecutionTimeout = 250 * time.Millisecond
 
 type WasmContract struct {
 	code []byte
@@ -111,7 +114,11 @@ func (i *wasmInvocation) call(code []byte, export string) error {
 		return i.err
 	}
 	ctx := context.Background()
-	runtime := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().WithMemoryLimitPages(1))
+	execCtx, cancel := context.WithTimeout(ctx, wasmExecutionTimeout)
+	defer cancel()
+	runtime := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().
+		WithMemoryLimitPages(1).
+		WithCloseOnContextDone(true))
 	defer runtime.Close(ctx)
 
 	if _, err := runtime.NewHostModuleBuilder(wasmHostModule).
@@ -120,22 +127,41 @@ func (i *wasmInvocation) call(code []byte, export string) error {
 		NewFunctionBuilder().WithFunc(i.storageSet).Export("storage_set").
 		NewFunctionBuilder().WithFunc(i.returnSet).Export("return_set").
 		NewFunctionBuilder().WithFunc(i.emitEvent).Export("emit_event").
-		Instantiate(ctx); err != nil {
+		Instantiate(execCtx); err != nil {
+		if timeoutErr := wasmTimeoutError(execCtx); timeoutErr != nil {
+			return timeoutErr
+		}
 		return err
 	}
 
-	module, err := runtime.Instantiate(ctx, code)
+	module, err := runtime.Instantiate(execCtx, code)
 	if err != nil {
+		if timeoutErr := wasmTimeoutError(execCtx); timeoutErr != nil {
+			return timeoutErr
+		}
 		return err
 	}
 	fn := module.ExportedFunction(export)
 	if fn == nil {
 		return fmt.Errorf("wasm export %q is missing", export)
 	}
-	if _, err := fn.Call(ctx); err != nil {
+	if _, err := fn.Call(execCtx); err != nil {
+		if timeoutErr := wasmTimeoutError(execCtx); timeoutErr != nil {
+			return timeoutErr
+		}
 		return err
 	}
+	if timeoutErr := wasmTimeoutError(execCtx); timeoutErr != nil {
+		return timeoutErr
+	}
 	return i.err
+}
+
+func wasmTimeoutError(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("wasm execution timeout: %w", err)
+	}
+	return nil
 }
 
 func (i *wasmInvocation) argCopy(ctx context.Context, module api.Module, keyPtr uint32, keyLen uint32, dstPtr uint32) uint32 {
