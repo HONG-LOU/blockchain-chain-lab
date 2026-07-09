@@ -428,6 +428,100 @@ func TestBatchTransferCommandSendsSignedBatchTx(t *testing.T) {
 	}
 }
 
+func TestTransferCommandCanBuildSmartAccountTx(t *testing.T) {
+	ownerKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := crypto.AddressFromPrivateKey(ownerKey)
+	smartAccount := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	receiver := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    ownerKey,
+		GenesisBalance: map[string]uint64{owner: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	var out bytes.Buffer
+	if err := transferCommand([]string{
+		"--rpc", server.URL,
+		"--from", smartAccount,
+		"--private-key", crypto.PrivateKeyToHex(ownerKey),
+		"--to", receiver,
+		"--value", "100",
+		"--raw-only",
+	}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var response struct {
+		Transaction types.Transaction `json:"transaction"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	tx := response.Transaction
+	if tx.From != smartAccount || tx.Signer != owner {
+		t.Fatalf("smart account tx = %+v", tx)
+	}
+	if tx.Nonce != 0 {
+		t.Fatalf("nonce = %d", tx.Nonce)
+	}
+	if !crypto.Verify(owner, tx.SigningBytes(), tx.Signature) {
+		t.Fatal("smart account transaction signature should verify against owner")
+	}
+}
+
+func TestBatchTransferCommandCanBuildSmartAccountTx(t *testing.T) {
+	ownerKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := crypto.AddressFromPrivateKey(ownerKey)
+	smartAccount := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    ownerKey,
+		GenesisBalance: map[string]uint64{owner: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	var out bytes.Buffer
+	if err := batchTransferCommand([]string{
+		"--rpc", server.URL,
+		"--from", smartAccount,
+		"--private-key", crypto.PrivateKeyToHex(ownerKey),
+		"--to", bob + ":10",
+		"--to", carol + ":20",
+		"--raw-only",
+	}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var response struct {
+		Transaction types.Transaction `json:"transaction"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	tx := response.Transaction
+	if tx.Type != types.TxBatch || tx.From != smartAccount || tx.Signer != owner || len(tx.Batch) != 2 {
+		t.Fatalf("smart account batch tx = %+v", tx)
+	}
+	if !crypto.Verify(owner, tx.SigningBytes(), tx.Signature) {
+		t.Fatal("smart account batch signature should verify against owner")
+	}
+}
+
 func TestTransferCommandUsesPendingNonceAndQueryMempool(t *testing.T) {
 	key, err := crypto.GenerateKey()
 	if err != nil {

@@ -39,6 +39,7 @@ type Transaction struct {
 	ChainID              string            `json:"chain_id"`
 	Type                 TxType            `json:"type"`
 	From                 string            `json:"from"`
+	Signer               string            `json:"signer,omitempty"`
 	To                   string            `json:"to,omitempty"`
 	Nonce                uint64            `json:"nonce"`
 	Value                uint64            `json:"value,omitempty"`

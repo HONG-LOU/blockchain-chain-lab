@@ -48,8 +48,8 @@ func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, 
 	if tx.ChainID != e.chainID {
 		return types.Receipt{}, fmt.Errorf("wrong chain id %q", tx.ChainID)
 	}
-	if !chaincrypto.Verify(tx.From, tx.SigningBytes(), tx.Signature) {
-		return types.Receipt{}, errors.New("invalid transaction signature")
+	if err := validateTransactionAuthorization(store, tx); err != nil {
+		return types.Receipt{}, err
 	}
 	if err := validatePaymasterAuthorization(tx); err != nil {
 		return types.Receipt{}, err
@@ -369,6 +369,31 @@ func tagBatchEvents(events []types.Event, index int) {
 		}
 		events[i].Attributes["op_index"] = strconv.Itoa(index)
 	}
+}
+
+func validateTransactionAuthorization(store *state.Store, tx types.Transaction) error {
+	signer := strings.ToLower(strings.TrimSpace(tx.Signer))
+	if signer == "" {
+		if !chaincrypto.Verify(tx.From, tx.SigningBytes(), tx.Signature) {
+			return errors.New("invalid transaction signature")
+		}
+		return nil
+	}
+	if !chaincrypto.Verify(signer, tx.SigningBytes(), tx.Signature) {
+		return errors.New("invalid transaction signature")
+	}
+	account := store.GetAccount(tx.From)
+	if account.CodeID != contracts.AccountCodeID {
+		return errors.New("transaction signer requires account.v1 from account")
+	}
+	owner := strings.ToLower(strings.TrimSpace(store.GetStorage(tx.From, "owner")))
+	if owner == "" {
+		return errors.New("smart account owner is not set")
+	}
+	if signer != owner {
+		return errors.New("transaction signer is not smart account owner")
+	}
+	return nil
 }
 
 func validatePaymasterAuthorization(tx types.Transaction) error {

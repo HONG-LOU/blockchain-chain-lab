@@ -11,18 +11,21 @@ import (
 )
 
 type Summary struct {
-	Height                   uint64
-	TransferReceiverBalance  uint64
-	SponsoredReceiverBalance uint64
-	SponsoredUserBalance     uint64
-	BatchReceiverBalance     uint64
-	BatchCounterValue        string
-	CounterValue             string
-	TokenReceiverBalance     string
-	WASMValue                string
-	Stake                    uint64
-	YesVotes                 uint64
-	GovernanceParam          string
+	Height                      uint64
+	TransferReceiverBalance     uint64
+	SponsoredReceiverBalance    uint64
+	SponsoredUserBalance        uint64
+	BatchReceiverBalance        uint64
+	BatchCounterValue           string
+	SmartAccountReceiverBalance uint64
+	SmartAccountBalance         uint64
+	SmartAccountNonce           uint64
+	CounterValue                string
+	TokenReceiverBalance        string
+	WASMValue                   string
+	Stake                       uint64
+	YesVotes                    uint64
+	GovernanceParam             string
 }
 
 func RunDemo() (Summary, error) {
@@ -39,10 +42,11 @@ func RunDemo() (Summary, error) {
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	sponsoredReceiver := "0xdddddddddddddddddddddddddddddddddddddddd"
 	batchReceiver := "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	smartAccountReceiver := "0xffffffffffffffffffffffffffffffffffffffff"
 	n, err := node.New(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000, sponsoredUser: 15},
+		GenesisBalance: map[string]uint64{alice: 2_000_000, sponsoredUser: 15},
 	})
 	if err != nil {
 		return Summary{}, err
@@ -320,19 +324,66 @@ func RunDemo() (Summary, error) {
 		return Summary{}, err
 	}
 
+	smartAccountBlock, err := submitAndProduce(n, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxDeploy,
+		From:     alice,
+		Nonce:    15,
+		GasLimit: 80_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"code_id": contracts.AccountCodeID,
+			"owner":   alice,
+		},
+	})
+	if err != nil {
+		return Summary{}, err
+	}
+	smartAccount := smartAccountBlock.Receipts[0].ContractAddress
+
+	if _, err := submitAndProduce(n, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     alice,
+		To:       smartAccount,
+		Nonce:    16,
+		Value:    50_000,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	}); err != nil {
+		return Summary{}, err
+	}
+
+	if _, err := submitAndProduce(n, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     smartAccount,
+		Signer:   alice,
+		To:       smartAccountReceiver,
+		Nonce:    0,
+		Value:    42,
+		GasLimit: 21_000,
+		GasPrice: 2,
+	}); err != nil {
+		return Summary{}, err
+	}
+
 	return Summary{
-		Height:                   n.Head().Header.Height,
-		TransferReceiverBalance:  n.Account(bob).Balance,
-		SponsoredReceiverBalance: n.Account(sponsoredReceiver).Balance,
-		SponsoredUserBalance:     n.Account(sponsoredUser).Balance,
-		BatchReceiverBalance:     n.Account(batchReceiver).Balance,
-		BatchCounterValue:        n.Account(batchCounter).Storage["count"],
-		CounterValue:             n.Account(counter).Storage["count"],
-		TokenReceiverBalance:     n.Account(token).Storage["balance:"+bob],
-		WASMValue:                wasmValue,
-		Stake:                    n.StakeOf(alice),
-		YesVotes:                 n.Proposal(proposalID).Votes["yes"],
-		GovernanceParam:          n.Param("governance.quorum"),
+		Height:                      n.Head().Header.Height,
+		TransferReceiverBalance:     n.Account(bob).Balance,
+		SponsoredReceiverBalance:    n.Account(sponsoredReceiver).Balance,
+		SponsoredUserBalance:        n.Account(sponsoredUser).Balance,
+		BatchReceiverBalance:        n.Account(batchReceiver).Balance,
+		BatchCounterValue:           n.Account(batchCounter).Storage["count"],
+		SmartAccountReceiverBalance: n.Account(smartAccountReceiver).Balance,
+		SmartAccountBalance:         n.Account(smartAccount).Balance,
+		SmartAccountNonce:           n.Account(smartAccount).Nonce,
+		CounterValue:                n.Account(counter).Storage["count"],
+		TokenReceiverBalance:        n.Account(token).Storage["balance:"+bob],
+		WASMValue:                   wasmValue,
+		Stake:                       n.StakeOf(alice),
+		YesVotes:                    n.Proposal(proposalID).Votes["yes"],
+		GovernanceParam:             n.Param("governance.quorum"),
 	}, nil
 }
 

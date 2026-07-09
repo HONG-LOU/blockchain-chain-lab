@@ -43,6 +43,8 @@ type explorerTransaction struct {
 	Type         types.TxType
 	From         string
 	FromURL      string
+	Signer       string
+	SignerURL    string
 	To           string
 	ToURL        string
 	Nonce        uint64
@@ -223,6 +225,8 @@ func newExplorerTransaction(tx types.Transaction) explorerTransaction {
 		Type:         tx.Type,
 		From:         tx.From,
 		FromURL:      explorerAccountURL(tx.From),
+		Signer:       tx.Signer,
+		SignerURL:    explorerAccountURL(tx.Signer),
 		To:           tx.To,
 		ToURL:        explorerAccountURL(tx.To),
 		Nonce:        tx.Nonce,
@@ -632,6 +636,7 @@ var explorerTransactionTemplate = template.Must(template.New("explorer-transacti
         <div class="field"><div class="label">Hash</div><div class="hash">{{.Transaction.Hash}}</div></div>
         <div class="field"><div class="label">Type</div><div><span class="pill">{{.Transaction.Type}}</span></div></div>
         <div class="field"><div class="label">From</div><div><a class="hash" href="{{.Transaction.FromURL}}">{{.Transaction.From}}</a></div></div>
+        {{if .Transaction.Signer}}<div class="field"><div class="label">Signer</div><div><a class="hash" href="{{.Transaction.SignerURL}}">{{.Transaction.Signer}}</a></div></div>{{end}}
         <div class="field"><div class="label">To</div><div>{{if .Transaction.ToURL}}<a class="hash" href="{{.Transaction.ToURL}}">{{.Transaction.To}}</a>{{else}}-{{end}}</div></div>
         <div class="field"><div class="label">Nonce</div><div>{{.Transaction.Nonce}}</div></div>
         <div class="field"><div class="label">Value</div><div>{{.Transaction.Value}}</div></div>

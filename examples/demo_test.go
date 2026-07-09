@@ -47,4 +47,13 @@ func TestRunDemo(t *testing.T) {
 	if summary.BatchCounterValue != "2" {
 		t.Fatalf("batch counter value = %q", summary.BatchCounterValue)
 	}
+	if summary.SmartAccountReceiverBalance != 42 {
+		t.Fatalf("smart account receiver balance = %d", summary.SmartAccountReceiverBalance)
+	}
+	if summary.SmartAccountBalance != 7_958 {
+		t.Fatalf("smart account balance = %d", summary.SmartAccountBalance)
+	}
+	if summary.SmartAccountNonce != 1 {
+		t.Fatalf("smart account nonce = %d", summary.SmartAccountNonce)
+	}
 }

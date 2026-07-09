@@ -384,6 +384,90 @@ func TestRPCSubmitsSponsoredBatchUserOperationAndEstimatesGas(t *testing.T) {
 	}
 }
 
+func TestRPCExposesSmartAccountSigner(t *testing.T) {
+	ownerKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := chaincrypto.AddressFromPrivateKey(ownerKey)
+	receiver := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    ownerKey,
+		GenesisBalance: map[string]uint64{owner: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	deploy := signedRPCTransaction(t, ownerKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxDeploy,
+		From:     owner,
+		Nonce:    0,
+		GasLimit: 80_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"code_id": contracts.AccountCodeID,
+			"owner":   owner,
+		},
+	})
+	if err := n.SubmitTx(deploy); err != nil {
+		t.Fatal(err)
+	}
+	deployBlock, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	smartAccount := deployBlock.Receipts[0].ContractAddress
+
+	fund := signedRPCTransaction(t, ownerKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     owner,
+		To:       smartAccount,
+		Nonce:    1,
+		Value:    50_000,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+	if err := n.SubmitTx(fund); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+
+	tx := signedRPCTransaction(t, ownerKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     smartAccount,
+		Signer:   owner,
+		To:       receiver,
+		Nonce:    0,
+		Value:    100,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+	if err := n.SubmitTx(tx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+
+	txResult := callRPC(t, server.URL, "eth_getTransactionByHash", []any{tx.Hash()})
+	txMap, ok := txResult.(map[string]any)
+	if !ok {
+		t.Fatalf("transaction result type = %T", txResult)
+	}
+	if txMap["signer"] != strings.ToLower(owner) {
+		t.Fatalf("transaction signer = %#v", txMap["signer"])
+	}
+}
+
 func TestRPCExposesValidatorSet(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {

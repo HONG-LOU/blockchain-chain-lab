@@ -63,6 +63,94 @@ func TestNodeSubmitsTxAndProducesBlock(t *testing.T) {
 	}
 }
 
+func TestNodeProducesSmartAccountTransaction(t *testing.T) {
+	ownerKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := chaincrypto.AddressFromPrivateKey(ownerKey)
+	receiver := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    ownerKey,
+		GenesisBalance: map[string]uint64{owner: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deploy := signedNodeTx(t, ownerKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxDeploy,
+		From:     owner,
+		Nonce:    0,
+		GasLimit: 80_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"code_id": contracts.AccountCodeID,
+			"owner":   owner,
+		},
+	})
+	if err := n.SubmitTx(deploy); err != nil {
+		t.Fatal(err)
+	}
+	deployBlock, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	smartAccount := deployBlock.Receipts[0].ContractAddress
+
+	fund := signedNodeTx(t, ownerKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     owner,
+		To:       smartAccount,
+		Nonce:    1,
+		Value:    50_000,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+	if err := n.SubmitTx(fund); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+
+	tx := signedNodeTx(t, ownerKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     smartAccount,
+		Signer:   owner,
+		To:       receiver,
+		Nonce:    0,
+		Value:    100,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+	if err := n.SubmitTx(tx); err != nil {
+		t.Fatal(err)
+	}
+	block, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := n.Account(smartAccount).Nonce; got != 1 {
+		t.Fatalf("smart account nonce = %d", got)
+	}
+	if got := n.Account(receiver).Balance; got != 100 {
+		t.Fatalf("receiver balance = %d", got)
+	}
+	record, ok := n.Transaction(tx.Hash())
+	if !ok {
+		t.Fatal("smart account transaction should be indexed")
+	}
+	if record.BlockHash != block.Hash() || record.Transaction.Signer != owner {
+		t.Fatalf("record = %+v", record)
+	}
+}
+
 func TestNodeFeeMarketAdjustsBaseFeeAndRecordsGasUsed(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {

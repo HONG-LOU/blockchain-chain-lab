@@ -382,7 +382,8 @@ func chainCommand(args []string, out io.Writer) {
 func transferCommand(args []string, out io.Writer) error {
 	flags := flag.NewFlagSet("tx transfer", flag.ContinueOnError)
 	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
-	privateKeyHex := flags.String("private-key", "", "sender private key")
+	from := flags.String("from", "", "optional account address to send from; private key signs as owner")
+	privateKeyHex := flags.String("private-key", "", "sender or owner private key")
 	to := flags.String("to", "", "recipient address")
 	value := flags.Uint64("value", 0, "transfer amount")
 	gasLimit := flags.Uint64("gas-limit", 21_000, "gas limit")
@@ -394,7 +395,7 @@ func transferCommand(args []string, out io.Writer) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	tx, err := buildSignedTransferWithFeeCapsAndPaymaster(*rpcURL, *privateKeyHex, *to, *value, *gasLimit, *gasPrice, *maxFeePerGas, *maxPriorityFeePerGas, *paymasterPrivateKeyHex)
+	tx, err := buildSignedTransferFromWithFeeCapsAndPaymaster(*rpcURL, *privateKeyHex, *from, *to, *value, *gasLimit, *gasPrice, *maxFeePerGas, *maxPriorityFeePerGas, *paymasterPrivateKeyHex)
 	if err != nil {
 		return err
 	}
@@ -415,7 +416,8 @@ func transferCommand(args []string, out io.Writer) error {
 func batchTransferCommand(args []string, out io.Writer) error {
 	flags := flag.NewFlagSet("tx batch-transfer", flag.ContinueOnError)
 	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
-	privateKeyHex := flags.String("private-key", "", "sender private key")
+	from := flags.String("from", "", "optional account address to send from; private key signs as owner")
+	privateKeyHex := flags.String("private-key", "", "sender or owner private key")
 	gasLimit := flags.Uint64("gas-limit", 0, "gas limit; defaults to estimated batch gas")
 	gasPrice := flags.Uint64("gas-price", 1, "gas price")
 	maxFeePerGas := flags.Uint64("max-fee-per-gas", 0, "EIP-1559-style max fee per gas")
@@ -438,7 +440,7 @@ func batchTransferCommand(args []string, out io.Writer) error {
 			return err
 		}
 	}
-	tx, err := buildSignedBatchTransactionWithFeeCapsAndPaymaster(*rpcURL, *privateKeyHex, batch, limit, *gasPrice, *maxFeePerGas, *maxPriorityFeePerGas, *paymasterPrivateKeyHex)
+	tx, err := buildSignedBatchTransactionFromWithFeeCapsAndPaymaster(*rpcURL, *privateKeyHex, *from, batch, limit, *gasPrice, *maxFeePerGas, *maxPriorityFeePerGas, *paymasterPrivateKeyHex)
 	if err != nil {
 		return err
 	}
@@ -830,13 +832,27 @@ func buildSignedTransferWithFeeCaps(rpcURL string, privateKeyHex string, to stri
 }
 
 func buildSignedTransferWithFeeCapsAndPaymaster(rpcURL string, privateKeyHex string, to string, value uint64, gasLimit uint64, gasPrice uint64, maxFeePerGas uint64, maxPriorityFeePerGas uint64, paymasterPrivateKeyHex string) (types.Transaction, error) {
+	return buildSignedTransferFromWithFeeCapsAndPaymaster(rpcURL, privateKeyHex, "", to, value, gasLimit, gasPrice, maxFeePerGas, maxPriorityFeePerGas, paymasterPrivateKeyHex)
+}
+
+func buildSignedTransferFromWithFeeCapsAndPaymaster(rpcURL string, privateKeyHex string, fromOverride string, to string, value uint64, gasLimit uint64, gasPrice uint64, maxFeePerGas uint64, maxPriorityFeePerGas uint64, paymasterPrivateKeyHex string) (types.Transaction, error) {
 	if privateKeyHex == "" {
 		return types.Transaction{}, fmt.Errorf("private key is required")
 	}
 	if to == "" {
 		return types.Transaction{}, fmt.Errorf("recipient is required")
 	}
-	return buildSignedTransactionWithFeeCapsAndPaymaster(rpcURL, privateKeyHex, types.TxTransfer, to, value, gasLimit, gasPrice, maxFeePerGas, maxPriorityFeePerGas, nil, paymasterPrivateKeyHex)
+	return buildSignedTransactionFromSpec(rpcURL, privateKeyHex, signedTransactionSpec{
+		txType:                 types.TxTransfer,
+		fromOverride:           fromOverride,
+		to:                     to,
+		value:                  value,
+		gasLimit:               gasLimit,
+		gasPrice:               gasPrice,
+		maxFeePerGas:           maxFeePerGas,
+		maxPriorityFeePerGas:   maxPriorityFeePerGas,
+		paymasterPrivateKeyHex: paymasterPrivateKeyHex,
+	})
 }
 
 func buildSignedTransaction(rpcURL string, privateKeyHex string, txType types.TxType, to string, value uint64, gasLimit uint64, gasPrice uint64, payload map[string]string) (types.Transaction, error) {
@@ -862,11 +878,16 @@ func buildSignedTransactionWithFeeCapsAndPaymaster(rpcURL string, privateKeyHex 
 }
 
 func buildSignedBatchTransactionWithFeeCapsAndPaymaster(rpcURL string, privateKeyHex string, batch []types.BatchOperation, gasLimit uint64, gasPrice uint64, maxFeePerGas uint64, maxPriorityFeePerGas uint64, paymasterPrivateKeyHex string) (types.Transaction, error) {
+	return buildSignedBatchTransactionFromWithFeeCapsAndPaymaster(rpcURL, privateKeyHex, "", batch, gasLimit, gasPrice, maxFeePerGas, maxPriorityFeePerGas, paymasterPrivateKeyHex)
+}
+
+func buildSignedBatchTransactionFromWithFeeCapsAndPaymaster(rpcURL string, privateKeyHex string, fromOverride string, batch []types.BatchOperation, gasLimit uint64, gasPrice uint64, maxFeePerGas uint64, maxPriorityFeePerGas uint64, paymasterPrivateKeyHex string) (types.Transaction, error) {
 	if len(batch) == 0 {
 		return types.Transaction{}, fmt.Errorf("batch requires at least one operation")
 	}
 	return buildSignedTransactionFromSpec(rpcURL, privateKeyHex, signedTransactionSpec{
 		txType:                 types.TxBatch,
+		fromOverride:           fromOverride,
 		gasLimit:               gasLimit,
 		gasPrice:               gasPrice,
 		maxFeePerGas:           maxFeePerGas,
@@ -878,6 +899,7 @@ func buildSignedBatchTransactionWithFeeCapsAndPaymaster(rpcURL string, privateKe
 
 type signedTransactionSpec struct {
 	txType                 types.TxType
+	fromOverride           string
 	to                     string
 	value                  uint64
 	gasLimit               uint64
@@ -906,7 +928,15 @@ func buildSignedTransactionFromSpec(rpcURL string, privateKeyHex string, spec si
 		}
 		paymaster = crypto.AddressFromPrivateKey(paymasterKey)
 	}
-	from := crypto.AddressFromPrivateKey(key)
+	signer := crypto.AddressFromPrivateKey(key)
+	from := signer
+	if override := strings.ToLower(strings.TrimSpace(spec.fromOverride)); override != "" {
+		from = override
+	}
+	signerField := ""
+	if !strings.EqualFold(from, signer) {
+		signerField = signer
+	}
 	var chainIDHex string
 	if err := rpcCall(rpcURL, "eth_chainId", []any{}, &chainIDHex); err != nil {
 		return types.Transaction{}, err
@@ -924,6 +954,7 @@ func buildSignedTransactionFromSpec(rpcURL string, privateKeyHex string, spec si
 		ChainID:              chainID,
 		Type:                 spec.txType,
 		From:                 from,
+		Signer:               signerField,
 		To:                   spec.to,
 		Nonce:                nonce,
 		Value:                spec.value,

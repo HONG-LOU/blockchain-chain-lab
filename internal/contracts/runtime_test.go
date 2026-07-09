@@ -116,3 +116,28 @@ func TestWASMContractEchoLifecycle(t *testing.T) {
 		t.Fatalf("updated wasm read = %q", value)
 	}
 }
+
+func TestAccountContractStoresOwner(t *testing.T) {
+	store := state.NewStore()
+	runtime := contracts.NewRuntimeWithDefaults()
+	creator := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	owner := "0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+
+	addr, events, err := runtime.Deploy(store, creator, contracts.AccountCodeID, "seed-account", map[string]string{"owner": owner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := store.GetStorage(addr, "owner"); got != "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
+		t.Fatalf("owner storage = %q", got)
+	}
+	value, err := runtime.Read(store, addr, creator, "owner", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value != "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
+		t.Fatalf("owner read = %q", value)
+	}
+	if len(events) != 2 || events[1].Type != "account.owner_set" {
+		t.Fatalf("events = %#v", events)
+	}
+}

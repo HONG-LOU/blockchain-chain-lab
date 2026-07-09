@@ -408,6 +408,161 @@ func TestBatchCallUpdatesContractState(t *testing.T) {
 	}
 }
 
+func TestSmartAccountTransferUsesOwnerSignatureAndContractNonce(t *testing.T) {
+	ownerKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := chaincrypto.AddressFromPrivateKey(ownerKey)
+	smartAccount := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	receiver := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	store := state.NewStore()
+	store.SetCodeID(smartAccount, contracts.AccountCodeID)
+	store.SetStorage(smartAccount, "owner", owner)
+	store.SetBalance(smartAccount, 50_000)
+	executor := core.NewExecutor("chainlab-local", "0xfee0000000000000000000000000000000000000", contracts.NewRuntimeWithDefaults())
+
+	tx := signedTx(t, ownerKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     smartAccount,
+		Signer:   owner,
+		To:       receiver,
+		Nonce:    0,
+		Value:    100,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+
+	receipt, err := executor.Execute(store, tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !receipt.Success {
+		t.Fatalf("receipt should succeed: %+v", receipt)
+	}
+	if got := store.GetAccount(smartAccount).Nonce; got != 1 {
+		t.Fatalf("smart account nonce = %d", got)
+	}
+	if got := store.GetAccount(smartAccount).Balance; got != 28_900 {
+		t.Fatalf("smart account balance = %d", got)
+	}
+	if got := store.GetAccount(receiver).Balance; got != 100 {
+		t.Fatalf("receiver balance = %d", got)
+	}
+	if got := store.GetAccount(owner).Balance; got != 0 {
+		t.Fatalf("owner balance = %d", got)
+	}
+}
+
+func TestSmartAccountRejectsUnauthorizedSigner(t *testing.T) {
+	ownerKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	intruderKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := chaincrypto.AddressFromPrivateKey(ownerKey)
+	intruder := chaincrypto.AddressFromPrivateKey(intruderKey)
+	smartAccount := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	receiver := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	store := state.NewStore()
+	store.SetCodeID(smartAccount, contracts.AccountCodeID)
+	store.SetStorage(smartAccount, "owner", owner)
+	store.SetBalance(smartAccount, 50_000)
+	executor := core.NewExecutor("chainlab-local", "0xfee0000000000000000000000000000000000000", contracts.NewRuntimeWithDefaults())
+
+	tx := signedTx(t, intruderKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     smartAccount,
+		Signer:   intruder,
+		To:       receiver,
+		Nonce:    0,
+		Value:    100,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+
+	if _, err := executor.Execute(store, tx); err == nil {
+		t.Fatal("unauthorized smart account signer should fail")
+	}
+	if got := store.GetAccount(smartAccount).Nonce; got != 0 {
+		t.Fatalf("smart account nonce = %d", got)
+	}
+	if got := store.GetAccount(receiver).Balance; got != 0 {
+		t.Fatalf("receiver balance = %d", got)
+	}
+}
+
+func TestSmartAccountBatchCanUsePaymaster(t *testing.T) {
+	ownerKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	paymasterKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := chaincrypto.AddressFromPrivateKey(ownerKey)
+	paymaster := chaincrypto.AddressFromPrivateKey(paymasterKey)
+	smartAccount := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
+	feeCollector := "0xfee0000000000000000000000000000000000000"
+	store := state.NewStore()
+	store.SetCodeID(smartAccount, contracts.AccountCodeID)
+	store.SetStorage(smartAccount, "owner", owner)
+	store.SetBalance(smartAccount, 30)
+	store.SetBalance(paymaster, 500_000)
+	executor := core.NewExecutor("chainlab-local", feeCollector, contracts.NewRuntimeWithDefaults())
+
+	tx := sponsoredTx(t, ownerKey, paymasterKey, types.Transaction{
+		ChainID:   "chainlab-local",
+		Type:      types.TxBatch,
+		From:      smartAccount,
+		Signer:    owner,
+		Nonce:     0,
+		GasLimit:  84_000,
+		GasPrice:  1,
+		Paymaster: paymaster,
+		Batch: []types.BatchOperation{
+			{Type: types.TxTransfer, To: bob, Value: 10},
+			{Type: types.TxTransfer, To: carol, Value: 20},
+		},
+	})
+
+	receipt, err := executor.Execute(store, tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if receipt.FeePayer != paymaster {
+		t.Fatalf("fee payer = %q", receipt.FeePayer)
+	}
+	if got := store.GetAccount(smartAccount).Nonce; got != 1 {
+		t.Fatalf("smart account nonce = %d", got)
+	}
+	if got := store.GetAccount(smartAccount).Balance; got != 0 {
+		t.Fatalf("smart account balance = %d", got)
+	}
+	if got := store.GetAccount(bob).Balance; got != 10 {
+		t.Fatalf("bob balance = %d", got)
+	}
+	if got := store.GetAccount(carol).Balance; got != 20 {
+		t.Fatalf("carol balance = %d", got)
+	}
+	if got := store.GetAccount(paymaster).Balance; got != 416_000 {
+		t.Fatalf("paymaster balance = %d", got)
+	}
+	if got := store.GetAccount(feeCollector).Balance; got != 84_000 {
+		t.Fatalf("fee collector balance = %d", got)
+	}
+}
+
 func TestRejectsBadSignatureAndBadNonce(t *testing.T) {
 	store, executor, key, alice, bob := newExecutorFixture(t)
 	tx := signedTx(t, key, types.Transaction{
