@@ -571,6 +571,12 @@ func (n *Node) ChainID() string {
 	return n.chainID
 }
 
+func (n *Node) Proposer() string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.proposer
+}
+
 func (n *Node) Account(address string) types.Account {
 	n.mu.Lock()
 	defer n.mu.Unlock()

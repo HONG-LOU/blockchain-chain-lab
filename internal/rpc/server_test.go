@@ -252,6 +252,7 @@ func TestJSONRPCExposesClientAndNetworkProbeMethods(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	proposer := chaincrypto.AddressFromPrivateKey(key)
 	n, err := node.New(node.Config{
 		ChainID:     "chainlab-local",
 		ProposerKey: key,
@@ -273,6 +274,19 @@ func TestJSONRPCExposesClientAndNetworkProbeMethods(t *testing.T) {
 	}
 	if got := callRPC(t, server.URL, "eth_syncing", []any{}); got != false {
 		t.Fatalf("eth_syncing = %#v", got)
+	}
+	accounts, ok := callRPC(t, server.URL, "eth_accounts", []any{}).([]any)
+	if !ok || len(accounts) != 1 || accounts[0] != proposer {
+		t.Fatalf("eth_accounts = %#v", accounts)
+	}
+	if got := callRPC(t, server.URL, "eth_coinbase", []any{}); got != proposer {
+		t.Fatalf("eth_coinbase = %#v", got)
+	}
+	if got := callRPC(t, server.URL, "eth_mining", []any{}); got != true {
+		t.Fatalf("eth_mining = %#v", got)
+	}
+	if got := callRPC(t, server.URL, "eth_hashrate", []any{}); got != "0x0" {
+		t.Fatalf("eth_hashrate = %#v", got)
 	}
 }
 

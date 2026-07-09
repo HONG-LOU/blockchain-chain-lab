@@ -385,6 +385,14 @@ func (s *Server) handleSingleJSONRPC(w http.ResponseWriter, request rpcRequest) 
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: strconv.FormatUint(chainNumber(n.ChainID()), 10)})
 	case "net_listening":
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: true})
+	case "eth_accounts":
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: []string{n.Proposer()}})
+	case "eth_coinbase":
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: n.Proposer()})
+	case "eth_mining":
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: localProposerIsValidator(n)})
+	case "eth_hashrate":
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: quantity(0)})
 	case "eth_chainId":
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: quantity(chainNumber(n.ChainID()))})
 	case "eth_syncing":
@@ -1041,6 +1049,16 @@ func validateOptionalBlockTag(n *node.Node, params []any, index int) error {
 	}
 	_, err := parseRPCBlockNumber(n, params[index])
 	return err
+}
+
+func localProposerIsValidator(n *node.Node) bool {
+	proposer := strings.ToLower(n.Proposer())
+	for _, validator := range n.Validators() {
+		if strings.ToLower(validator) == proposer {
+			return true
+		}
+	}
+	return false
 }
 
 func parseRPCBlockNumber(n *node.Node, value any) (uint64, error) {
