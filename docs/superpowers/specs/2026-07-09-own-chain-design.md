@@ -104,6 +104,7 @@ Executes transactions against state and produces receipts. This is the state tra
 Implements local proof-of-authority block validation:
 
 - proposer must be in the validator set
+- proposer must match deterministic height-based rotation: height 1 uses validator 0, height 2 uses validator 1, then cycles
 - block height must increase by one
 - parent hash must match
 - transaction root, receipt root, and state root must match recomputation
@@ -185,6 +186,8 @@ Phase 2 progress:
 - Local devnet peers can relay submitted transactions, produce a block through `POST /chain/produce`, broadcast produced blocks, and import peer blocks after replaying transactions and checking receipt root, state root, PoA signature, height, and parent hash.
 - CLI nodes accept repeated `--peer` URLs for HTTP peer sync.
 - CLI wallet-style commands can fetch nonce over RPC, sign and submit transfers, produce blocks, and query head/account/transaction records.
+- Genesis files include a `validators` array, and `chainlab node --private-key` can start a different local validator from the same genesis file.
+- PoA now enforces deterministic proposer rotation and treats repeated imports of already-known canonical blocks as idempotent peer sync events.
 
 Phase 3:
 

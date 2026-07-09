@@ -7,7 +7,7 @@ It currently implements:
 - account balances, nonces, storage, and deterministic state roots
 - secp256k1 signatures and Ethereum-style 20-byte addresses
 - transfers, staking, unstaking, and governance voting
-- local proof-of-authority block production and validation
+- local proof-of-authority block production with deterministic multi-validator proposer rotation
 - transaction, receipt, and state roots
 - native smart-contract runtime with `counter.v1` and `token.v1`
 - HTTP REST endpoints and a small JSON-RPC-style endpoint
@@ -39,6 +39,8 @@ Create a local genesis file:
 go run ./cmd/chainlab init --out config/genesis.json
 ```
 
+The generated genesis includes a `validators` array. For a multi-validator devnet, generate additional keys with `keygen`, add their addresses to `validators`, and start each validator with its own `--private-key`.
+
 Start a local node:
 
 ```powershell
@@ -61,6 +63,12 @@ Start a producing node that broadcasts to the follower:
 
 ```powershell
 go run ./cmd/chainlab node --genesis config/genesis.json --listen :8547 --data-dir data/producer --peer http://127.0.0.1:8548
+```
+
+Start a second validator from the same genesis:
+
+```powershell
+go run ./cmd/chainlab node --genesis config/genesis.json --private-key <validator-2-private-key> --listen :8548 --data-dir data/validator-2 --peer http://127.0.0.1:8547
 ```
 
 Run the built-in demo:
@@ -107,7 +115,7 @@ go run ./cmd/chainlab query tx --rpc http://127.0.0.1:8547 --hash <tx-hash>
 
 Next useful milestones:
 
-- multi-validator scheduling and fork-choice rules
+- validator-set change transactions and stronger fork-choice or finality rules
 - WASM contract runtime
 - block explorer UI
 - production-framework migration decision: OP Stack, Cosmos SDK, Avalanche L1, or another appchain stack

@@ -41,6 +41,7 @@ type GenesisFile struct {
 	ChainID    string            `json:"chain_id"`
 	Proposer   string            `json:"proposer"`
 	PrivateKey string            `json:"private_key"`
+	Validators []string          `json:"validators"`
 	Balances   map[string]uint64 `json:"balances"`
 }
 
@@ -104,6 +105,7 @@ func initCommand(args []string) {
 			ChainID:    "chainlab-local",
 			Proposer:   crypto.AddressFromPrivateKey(key),
 			PrivateKey: crypto.PrivateKeyToHex(key),
+			Validators: []string{crypto.AddressFromPrivateKey(key)},
 			Balances: map[string]uint64{
 				crypto.AddressFromPrivateKey(key): 1_000_000_000,
 			},
@@ -150,13 +152,17 @@ func buildNodeConfig(options nodeOptions) (node.Config, error) {
 	chainID := "chainlab-local"
 	balances := make(map[string]uint64)
 	privateKeyHex := options.PrivateKeyHex
+	var validators []string
 	if options.GenesisPath != "" {
 		genesis, err := readGenesisFile(options.GenesisPath)
 		if err != nil {
 			return node.Config{}, err
 		}
 		chainID = genesis.ChainID
-		privateKeyHex = genesis.PrivateKey
+		if privateKeyHex == "" {
+			privateKeyHex = genesis.PrivateKey
+		}
+		validators = genesis.Validators
 		balances = genesis.Balances
 	}
 	var key crypto.PrivateKey
@@ -176,6 +182,7 @@ func buildNodeConfig(options nodeOptions) (node.Config, error) {
 	return node.Config{
 		ChainID:        chainID,
 		ProposerKey:    key,
+		Validators:     validators,
 		GenesisBalance: balances,
 		DataDir:        options.DataDir,
 	}, nil
@@ -491,6 +498,7 @@ func createGenesisFile(path string) (GenesisFile, error) {
 		ChainID:    "chainlab-local",
 		Proposer:   proposer,
 		PrivateKey: crypto.PrivateKeyToHex(key),
+		Validators: []string{proposer},
 		Balances:   map[string]uint64{proposer: 1_000_000_000},
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

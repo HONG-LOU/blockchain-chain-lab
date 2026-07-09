@@ -191,6 +191,96 @@ func TestNodeImportsValidatedBlockFromPeer(t *testing.T) {
 	}
 }
 
+func TestNodeProducesOnlyWhenLocalValidatorIsScheduled(t *testing.T) {
+	keyA, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyB, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validatorA := chaincrypto.AddressFromPrivateKey(keyA)
+	validatorB := chaincrypto.AddressFromPrivateKey(keyB)
+	genesisBalances := map[string]uint64{validatorA: 1_000_000}
+	validators := []string{validatorA, validatorB}
+
+	nodeA, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    keyA,
+		GenesisBalance: genesisBalances,
+		Validators:     validators,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeB, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    keyB,
+		GenesisBalance: genesisBalances,
+		Validators:     validators,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	block1, err := nodeA.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if block1.Header.Proposer != validatorA {
+		t.Fatalf("height 1 proposer = %q", block1.Header.Proposer)
+	}
+	if _, err := nodeA.ProduceBlock(); err == nil {
+		t.Fatal("validator A should not produce height 2")
+	}
+
+	if err := nodeB.ImportBlock(block1); err != nil {
+		t.Fatal(err)
+	}
+	block2, err := nodeB.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if block2.Header.Height != 2 {
+		t.Fatalf("height = %d", block2.Header.Height)
+	}
+	if block2.Header.Proposer != validatorB {
+		t.Fatalf("height 2 proposer = %q", block2.Header.Proposer)
+	}
+}
+
+func TestNodeImportKnownCanonicalBlockIsIdempotent(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validator := chaincrypto.AddressFromPrivateKey(key)
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{validator: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	block1, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := n.ImportBlock(block1); err != nil {
+		t.Fatal(err)
+	}
+	if n.Head().Header.Height != 2 {
+		t.Fatalf("head height = %d", n.Head().Header.Height)
+	}
+}
+
 func TestNodeRejectsImportedBlockWithBadStateRoot(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {

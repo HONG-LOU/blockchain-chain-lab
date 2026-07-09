@@ -38,6 +38,14 @@ func TestWriteAndReadGenesisFile(t *testing.T) {
 	if fromDisk.Proposer == "" || fromDisk.PrivateKey == "" {
 		t.Fatalf("genesis missing proposer credentials: %+v", fromDisk)
 	}
+	var rawGenesis map[string]any
+	if err := json.Unmarshal(raw, &rawGenesis); err != nil {
+		t.Fatal(err)
+	}
+	validators, ok := rawGenesis["validators"].([]any)
+	if !ok || len(validators) != 1 || validators[0] != fromDisk.Proposer {
+		t.Fatalf("genesis validators = %#v", rawGenesis["validators"])
+	}
 
 	loaded, err := readGenesisFile(path)
 	if err != nil {
@@ -66,6 +74,79 @@ func TestBuildNodeConfigUsesDataDir(t *testing.T) {
 	}
 	if config.ChainID != "chainlab-local" {
 		t.Fatalf("chain id = %q", config.ChainID)
+	}
+}
+
+func TestBuildNodeConfigUsesGenesisValidators(t *testing.T) {
+	keyA, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyB, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validatorA := crypto.AddressFromPrivateKey(keyA)
+	validatorB := crypto.AddressFromPrivateKey(keyB)
+	path := filepath.Join(t.TempDir(), "genesis.json")
+	raw := []byte(`{
+		"chain_id": "chainlab-local",
+		"private_key": "` + crypto.PrivateKeyToHex(keyA) + `",
+		"proposer": "` + validatorA + `",
+		"validators": ["` + validatorA + `", "` + validatorB + `"],
+		"balances": {"` + validatorA + `": 1000000}
+	}`)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	config, err := buildNodeConfig(nodeOptions{GenesisPath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(config.Validators) != 2 {
+		t.Fatalf("validator count = %d", len(config.Validators))
+	}
+	if config.Validators[0] != validatorA || config.Validators[1] != validatorB {
+		t.Fatalf("validators = %#v", config.Validators)
+	}
+}
+
+func TestBuildNodeConfigPrivateKeyFlagOverridesGenesisKey(t *testing.T) {
+	keyA, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyB, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validatorA := crypto.AddressFromPrivateKey(keyA)
+	validatorB := crypto.AddressFromPrivateKey(keyB)
+	path := filepath.Join(t.TempDir(), "genesis.json")
+	raw := []byte(`{
+		"chain_id": "chainlab-local",
+		"private_key": "` + crypto.PrivateKeyToHex(keyA) + `",
+		"proposer": "` + validatorA + `",
+		"validators": ["` + validatorA + `", "` + validatorB + `"],
+		"balances": {"` + validatorA + `": 1000000}
+	}`)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	config, err := buildNodeConfig(nodeOptions{
+		GenesisPath:   path,
+		PrivateKeyHex: crypto.PrivateKeyToHex(keyB),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := crypto.AddressFromPrivateKey(config.ProposerKey); got != validatorB {
+		t.Fatalf("proposer = %q", got)
+	}
+	if len(config.Validators) != 2 {
+		t.Fatalf("validator count = %d", len(config.Validators))
 	}
 }
 

@@ -176,7 +176,7 @@ func (n *Node) ImportBlock(block types.Block) error {
 	}
 	head := n.blocks[len(n.blocks)-1]
 	if block.Header.Height <= head.Header.Height {
-		if block.Hash() == head.Hash() {
+		if block.Header.Height < uint64(len(n.blocks)) && block.Hash() == n.blocks[block.Header.Height].Hash() {
 			return nil
 		}
 		return errors.New("imported block is not ahead of local head")
