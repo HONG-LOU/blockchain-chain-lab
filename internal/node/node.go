@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -27,17 +28,19 @@ type Config struct {
 }
 
 type Node struct {
-	mu          sync.Mutex
-	chainID     string
-	proposerKey chaincrypto.PrivateKey
-	proposer    string
-	state       *state.Store
-	executor    *core.Executor
-	consensus   *consensus.POA
-	blocks      []types.Block
-	mempool     []types.Transaction
-	txIndex     map[string]types.TransactionRecord
-	dataDir     string
+	mu           sync.Mutex
+	chainID      string
+	proposerKey  chaincrypto.PrivateKey
+	proposer     string
+	state        *state.Store
+	executor     *core.Executor
+	consensus    *consensus.POA
+	blocks       []types.Block
+	genesisState state.Snapshot
+	knownBlocks  map[string]types.Block
+	mempool      []types.Transaction
+	txIndex      map[string]types.TransactionRecord
+	dataDir      string
 }
 
 const (
@@ -63,9 +66,11 @@ type MempoolSnapshot struct {
 }
 
 type diskSnapshot struct {
-	ChainID string         `json:"chain_id"`
-	State   state.Snapshot `json:"state"`
-	Blocks  []types.Block  `json:"blocks"`
+	ChainID      string         `json:"chain_id"`
+	GenesisState state.Snapshot `json:"genesis_state,omitempty"`
+	State        state.Snapshot `json:"state"`
+	Blocks       []types.Block  `json:"blocks"`
+	KnownBlocks  []types.Block  `json:"known_blocks,omitempty"`
 }
 
 func New(config Config) (*Node, error) {
@@ -91,9 +96,12 @@ func New(config Config) (*Node, error) {
 		proposer:    proposer,
 		executor:    core.NewExecutor(config.ChainID, feeCollector, contracts.NewRuntimeWithDefaults()),
 		consensus:   consensus.NewPOA(validators),
+		knownBlocks: make(map[string]types.Block),
 		txIndex:     make(map[string]types.TransactionRecord),
 		dataDir:     config.DataDir,
 	}
+	genesisStore := newGenesisStore(config.GenesisBalance, validators)
+	genesisState := genesisStore.Snapshot()
 
 	if config.DataDir != "" {
 		loaded, err := loadDiskSnapshot(config.DataDir)
@@ -104,6 +112,10 @@ func New(config Config) (*Node, error) {
 			if loaded.ChainID != config.ChainID {
 				return nil, errors.New("persisted chain id does not match config")
 			}
+			n.genesisState = loaded.GenesisState
+			if snapshotIsEmpty(n.genesisState) {
+				n.genesisState = genesisState
+			}
 			n.state = state.NewStoreFromSnapshot(loaded.State)
 			if len(n.state.Validators()) == 0 {
 				n.state.SetValidators(validators)
@@ -113,24 +125,41 @@ func New(config Config) (*Node, error) {
 			if len(n.blocks) == 0 {
 				return nil, errors.New("persisted chain has no blocks")
 			}
+			for _, block := range loaded.KnownBlocks {
+				n.knownBlocks[block.Hash()] = block
+			}
+			for _, block := range n.blocks {
+				n.knownBlocks[block.Hash()] = block
+			}
 			n.rebuildTxIndex()
 			return n, nil
 		}
 	}
 
-	store := state.NewStore()
-	for address, balance := range config.GenesisBalance {
-		store.SetBalance(address, balance)
-	}
-	store.SetValidators(validators)
+	store := genesisStore
 	genesis := types.GenesisBlock(config.ChainID, store.Root())
+	n.genesisState = genesisState
 	n.state = store
 	n.refreshConsensusLocked()
 	n.blocks = []types.Block{genesis}
+	n.knownBlocks[genesis.Hash()] = genesis
 	if err := n.persistLocked(); err != nil {
 		return nil, err
 	}
 	return n, nil
+}
+
+func newGenesisStore(balances map[string]uint64, validators []string) *state.Store {
+	store := state.NewStore()
+	for address, balance := range balances {
+		store.SetBalance(address, balance)
+	}
+	store.SetValidators(validators)
+	return store
+}
+
+func snapshotIsEmpty(snapshot state.Snapshot) bool {
+	return len(snapshot.Accounts) == 0 && len(snapshot.Stakes) == 0 && len(snapshot.Proposals) == 0 && len(snapshot.Validators) == 0
 }
 
 func (n *Node) SubmitTx(tx types.Transaction) error {
@@ -229,6 +258,7 @@ func (n *Node) ProduceBlock() (types.Block, error) {
 	n.state.ReplaceWith(working)
 	n.refreshConsensusLocked()
 	n.blocks = append(n.blocks, block)
+	n.knownBlocks[block.Hash()] = block
 	n.indexBlock(block)
 	n.mempool = nil
 	if err := n.persistLocked(); err != nil {
@@ -244,39 +274,34 @@ func (n *Node) ImportBlock(block types.Block) error {
 	if block.Header.ChainID != n.chainID {
 		return errors.New("imported block chain id does not match node")
 	}
-	head := n.blocks[len(n.blocks)-1]
-	if block.Header.Height <= head.Header.Height {
-		if block.Header.Height < uint64(len(n.blocks)) && block.Hash() == n.blocks[block.Header.Height].Hash() {
-			return nil
-		}
-		return errors.New("imported block is not ahead of local head")
+	blockHash := block.Hash()
+	if _, ok := n.knownBlocks[blockHash]; ok {
+		return nil
 	}
-
-	working := n.state.Clone()
-	executor := core.NewExecutor(n.chainID, block.Header.Proposer, contracts.NewRuntimeWithDefaults())
-	receipts := make([]types.Receipt, 0, len(block.Transactions))
-	for _, tx := range block.Transactions {
-		receipt, err := executor.Execute(working, tx)
-		if err != nil {
-			return err
-		}
-		receipts = append(receipts, receipt)
+	parent, ok := n.knownBlocks[block.Header.ParentHash]
+	if !ok {
+		return errors.New("imported block parent is unknown")
 	}
-	if types.ReceiptRoot(receipts) != block.Header.ReceiptRoot {
-		return errors.New("imported block receipt root mismatch")
+	parentState, err := n.replayStateLocked(parent.Hash())
+	if err != nil {
+		return err
 	}
-	if working.Root() != block.Header.StateRoot {
-		return errors.New("imported block state root mismatch")
-	}
-	if err := n.consensus.ValidateBlock(head, block); err != nil {
+	if _, err := n.validateBlockOnStateLocked(parent, parentState, block); err != nil {
 		return err
 	}
 
-	n.state.ReplaceWith(working)
-	n.refreshConsensusLocked()
-	n.blocks = append(n.blocks, block)
-	n.indexBlock(block)
-	n.removeMempoolTransactions(block.Transactions)
+	n.knownBlocks[blockHash] = block
+	if block.Header.Height > n.blocks[len(n.blocks)-1].Header.Height {
+		chain, working, err := n.replayKnownChainLocked(blockHash)
+		if err != nil {
+			return err
+		}
+		n.blocks = chain
+		n.state.ReplaceWith(working)
+		n.refreshConsensusLocked()
+		n.rebuildTxIndex()
+		n.removeMempoolTransactions(transactionsInBlocks(chain))
+	}
 	return n.persistLocked()
 }
 
@@ -408,6 +433,78 @@ func (n *Node) pendingStateLocked() (*state.Store, error) {
 	return working, nil
 }
 
+func (n *Node) replayStateLocked(blockHash string) (*state.Store, error) {
+	_, working, err := n.replayKnownChainLocked(blockHash)
+	return working, err
+}
+
+func (n *Node) replayKnownChainLocked(blockHash string) ([]types.Block, *state.Store, error) {
+	chain, err := n.knownChainLocked(blockHash)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(chain) == 0 {
+		return nil, nil, errors.New("known chain is empty")
+	}
+	working := state.NewStoreFromSnapshot(n.genesisState)
+	if chain[0].Header.Height != 0 || chain[0].Header.StateRoot != working.Root() {
+		return nil, nil, errors.New("genesis state root mismatch")
+	}
+	for i := 1; i < len(chain); i++ {
+		next, err := n.validateBlockOnStateLocked(chain[i-1], working, chain[i])
+		if err != nil {
+			return nil, nil, err
+		}
+		working = next
+	}
+	return chain, working, nil
+}
+
+func (n *Node) knownChainLocked(blockHash string) ([]types.Block, error) {
+	block, ok := n.knownBlocks[blockHash]
+	if !ok {
+		return nil, errors.New("block is unknown")
+	}
+	reversed := []types.Block{block}
+	for block.Header.Height > 0 {
+		parent, ok := n.knownBlocks[block.Header.ParentHash]
+		if !ok {
+			return nil, errors.New("known chain parent is missing")
+		}
+		reversed = append(reversed, parent)
+		block = parent
+	}
+	chain := make([]types.Block, len(reversed))
+	for i := range reversed {
+		chain[len(reversed)-1-i] = reversed[i]
+	}
+	return chain, nil
+}
+
+func (n *Node) validateBlockOnStateLocked(parent types.Block, parentState *state.Store, block types.Block) (*state.Store, error) {
+	working := parentState.Clone()
+	executor := core.NewExecutor(n.chainID, block.Header.Proposer, contracts.NewRuntimeWithDefaults())
+	receipts := make([]types.Receipt, 0, len(block.Transactions))
+	for _, tx := range block.Transactions {
+		receipt, err := executor.Execute(working, tx)
+		if err != nil {
+			return nil, err
+		}
+		receipts = append(receipts, receipt)
+	}
+	if types.ReceiptRoot(receipts) != block.Header.ReceiptRoot {
+		return nil, errors.New("imported block receipt root mismatch")
+	}
+	if working.Root() != block.Header.StateRoot {
+		return nil, errors.New("imported block state root mismatch")
+	}
+	engine := consensus.NewPOA(parentState.Validators())
+	if err := engine.ValidateBlock(parent, block); err != nil {
+		return nil, err
+	}
+	return working, nil
+}
+
 func (n *Node) refreshConsensusLocked() {
 	n.consensus = consensus.NewPOA(n.state.Validators())
 }
@@ -453,6 +550,14 @@ func (n *Node) removeMempoolTransactions(txs []types.Transaction) {
 	n.mempool = remaining
 }
 
+func transactionsInBlocks(blocks []types.Block) []types.Transaction {
+	var txs []types.Transaction
+	for _, block := range blocks {
+		txs = append(txs, block.Transactions...)
+	}
+	return txs
+}
+
 func (n *Node) persistLocked() error {
 	if n.dataDir == "" {
 		return nil
@@ -461,9 +566,11 @@ func (n *Node) persistLocked() error {
 		return err
 	}
 	snapshot := diskSnapshot{
-		ChainID: n.chainID,
-		State:   n.state.Snapshot(),
-		Blocks:  n.blocks,
+		ChainID:      n.chainID,
+		GenesisState: n.genesisState,
+		State:        n.state.Snapshot(),
+		Blocks:       n.blocks,
+		KnownBlocks:  n.knownBlockListLocked(),
 	}
 	raw, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
@@ -475,6 +582,20 @@ func (n *Node) persistLocked() error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+func (n *Node) knownBlockListLocked() []types.Block {
+	blocks := make([]types.Block, 0, len(n.knownBlocks))
+	for _, block := range n.knownBlocks {
+		blocks = append(blocks, block)
+	}
+	sort.Slice(blocks, func(i int, j int) bool {
+		if blocks[i].Header.Height != blocks[j].Header.Height {
+			return blocks[i].Header.Height < blocks[j].Header.Height
+		}
+		return blocks[i].Hash() < blocks[j].Hash()
+	})
+	return blocks
 }
 
 func loadDiskSnapshot(dataDir string) (*diskSnapshot, error) {

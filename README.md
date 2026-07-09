@@ -14,6 +14,7 @@ It currently implements:
 - native smart-contract runtime with `counter.v1` and `token.v1`
 - HTTP REST endpoints and a small JSON-RPC-style endpoint
 - persistent node snapshots with committed blocks, state, and transaction index
+- local fork-choice that stores known branches and reorgs to a longer validated branch
 - EVM-compatible JSON-RPC read subset: `eth_chainId`, `eth_blockNumber`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`, `eth_getLogs`, `eth_call`, `eth_estimateGas`
 - EVM-style `safe` and `finalized` block tags for block and log reads
 - pending nonce calculation and txpool inspection for uncommitted transactions
@@ -175,7 +176,7 @@ go run ./cmd/chainlab query estimate-gas --rpc http://127.0.0.1:8547 --type call
 
 Next useful milestones:
 
-- stronger fork-choice rules and real BFT finality
+- real BFT finality and richer fork-choice safety rules
 - WASM contract runtime
 - richer contract explorer views with decoded native contract state and events
 - production-framework migration decision: OP Stack, Cosmos SDK, Avalanche L1, or another appchain stack

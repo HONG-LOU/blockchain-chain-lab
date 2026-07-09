@@ -191,6 +191,127 @@ func TestNodeImportsValidatedBlockFromPeer(t *testing.T) {
 	}
 }
 
+func TestNodeReorgsToLongerImportedBranch(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
+	genesisBalances := map[string]uint64{alice: 1_000_000}
+
+	branchA, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: genesisBalances,
+		Validators:     []string{alice},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	branchB, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: genesisBalances,
+		Validators:     []string{alice},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	follower, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: genesisBalances,
+		Validators:     []string{alice},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	txA := signedNodeTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     alice,
+		To:       bob,
+		Nonce:    0,
+		Value:    100,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+	if err := branchA.SubmitTx(txA); err != nil {
+		t.Fatal(err)
+	}
+	blockA1, err := branchA.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	txB := signedNodeTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     alice,
+		To:       carol,
+		Nonce:    0,
+		Value:    200,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+	if err := branchB.SubmitTx(txB); err != nil {
+		t.Fatal(err)
+	}
+	blockB1, err := branchB.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockB2, err := branchB.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := follower.ImportBlock(blockA1); err != nil {
+		t.Fatal(err)
+	}
+	if follower.Head().Hash() != blockA1.Hash() {
+		t.Fatal("follower should adopt first imported branch")
+	}
+	if got := follower.Account(bob).Balance; got != 100 {
+		t.Fatalf("bob balance before reorg = %d", got)
+	}
+	if _, ok := follower.Transaction(txA.Hash()); !ok {
+		t.Fatal("canonical branch A transaction should be indexed before reorg")
+	}
+
+	if err := follower.ImportBlock(blockB1); err != nil {
+		t.Fatal(err)
+	}
+	if follower.Head().Hash() != blockA1.Hash() {
+		t.Fatal("equal-height side branch should not replace canonical head")
+	}
+	if got := follower.Account(carol).Balance; got != 0 {
+		t.Fatalf("carol balance before longer branch = %d", got)
+	}
+
+	if err := follower.ImportBlock(blockB2); err != nil {
+		t.Fatal(err)
+	}
+	if follower.Head().Hash() != blockB2.Hash() {
+		t.Fatal("longer side branch should become canonical head")
+	}
+	if got := follower.Account(bob).Balance; got != 0 {
+		t.Fatalf("bob balance after reorg = %d", got)
+	}
+	if got := follower.Account(carol).Balance; got != 200 {
+		t.Fatalf("carol balance after reorg = %d", got)
+	}
+	if _, ok := follower.Transaction(txA.Hash()); ok {
+		t.Fatal("old branch transaction should leave canonical tx index after reorg")
+	}
+	if record, ok := follower.Transaction(txB.Hash()); !ok || record.BlockHash != blockB1.Hash() || record.BlockHeight != 1 {
+		t.Fatalf("new canonical transaction record = %+v ok=%v", record, ok)
+	}
+}
+
 func TestNodeProducesOnlyWhenLocalValidatorIsScheduled(t *testing.T) {
 	keyA, err := chaincrypto.GenerateKey()
 	if err != nil {
