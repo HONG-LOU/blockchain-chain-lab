@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -154,6 +155,27 @@ func (e *Executor) Execute(store *state.Store, tx types.Transaction) (types.Rece
 			"evidence": evidence,
 			"removed":  removed,
 		}})
+	case types.TxWASMUpload:
+		bytecode, err := parseWASMUploadPayload(tx.Payload)
+		if err != nil {
+			return types.Receipt{}, err
+		}
+		if err := contracts.ValidateWasmCode(bytecode); err != nil {
+			return types.Receipt{}, err
+		}
+		codeID := types.WASMCodeID(bytecode)
+		working.SetContractCode(types.ContractCode{
+			CodeID:   codeID,
+			Runtime:  "wasm",
+			Creator:  strings.ToLower(tx.From),
+			Bytecode: "0x" + hex.EncodeToString(bytecode),
+		})
+		receipt.CodeID = codeID
+		receipt.Events = append(receipt.Events, types.Event{Type: "wasm.code_uploaded", Attributes: map[string]string{
+			"code_id": codeID,
+			"creator": strings.ToLower(tx.From),
+			"size":    strconv.Itoa(len(bytecode)),
+		}})
 	case types.TxDeploy:
 		codeID := tx.Payload["code_id"]
 		if codeID == "" {
@@ -208,6 +230,8 @@ func EstimateGas(txType types.TxType) (uint64, error) {
 		return 40_000, nil
 	case types.TxValidatorSlash:
 		return 45_000, nil
+	case types.TxWASMUpload:
+		return 120_000, nil
 	case types.TxDeploy:
 		return 80_000, nil
 	case types.TxCall:
@@ -222,6 +246,24 @@ func checkedMul(left uint64, right uint64) (uint64, error) {
 		return 0, errors.New("fee overflow")
 	}
 	return left * right, nil
+}
+
+func parseWASMUploadPayload(payload map[string]string) ([]byte, error) {
+	raw := strings.TrimSpace(payload["bytecode"])
+	if raw == "" {
+		raw = strings.TrimSpace(payload["wasm"])
+	}
+	if raw == "" {
+		return nil, errors.New("wasm upload requires bytecode")
+	}
+	bytecode, err := hex.DecodeString(strings.TrimPrefix(raw, "0x"))
+	if err != nil {
+		return nil, fmt.Errorf("invalid wasm bytecode hex: %w", err)
+	}
+	if len(bytecode) == 0 {
+		return nil, errors.New("wasm bytecode is required")
+	}
+	return bytecode, nil
 }
 
 func parseSlashPayload(payload map[string]string) (string, uint64, string, error) {

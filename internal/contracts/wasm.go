@@ -17,8 +17,34 @@ type WasmContract struct {
 	code []byte
 }
 
+func NewWasmContract(code []byte) (WasmContract, error) {
+	if err := ValidateWasmCode(code); err != nil {
+		return WasmContract{}, err
+	}
+	return WasmContract{code: append([]byte(nil), code...)}, nil
+}
+
 func NewWasmEchoContract() WasmContract {
 	return WasmContract{code: wasmEchoModule()}
+}
+
+func WasmEchoCode() []byte {
+	return wasmEchoModule()
+}
+
+func ValidateWasmCode(code []byte) error {
+	if len(code) == 0 {
+		return errors.New("wasm bytecode is required")
+	}
+	ctx := context.Background()
+	runtime := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().WithMemoryLimitPages(1))
+	defer runtime.Close(ctx)
+	compiled, err := runtime.CompileModule(ctx, code)
+	if err != nil {
+		return fmt.Errorf("invalid wasm bytecode: %w", err)
+	}
+	defer compiled.Close(ctx)
+	return nil
 }
 
 func (w WasmContract) Deploy(ctx Context, args map[string]string) ([]types.Event, error) {

@@ -58,7 +58,7 @@ Phase 1 creates a runnable local blockchain with these capabilities:
 - Byzantine fault tolerant multi-node consensus.
 - P2P networking.
 - Production bridge security.
-- Permissionless arbitrary WASM or EVM bytecode execution.
+- Production-grade arbitrary WASM execution, CosmWasm compatibility, or EVM bytecode execution.
 - Slashing economics tied to real stake.
 - Production-grade wallet UX.
 
@@ -98,9 +98,14 @@ Built-in contracts:
 - `token.v1`: mint, transfer, and read token balances.
 - `wasm.echo.v1`: a sandboxed WASM-backed example contract that reads args through a restricted host ABI, writes contract storage, emits events, and supports read-only return data.
 
-This gives the chain smart-contract behavior now, while leaving a clean slot for EVM or WASM later.
+Uploaded contract code:
+
+- `wasm.upload`: validates a WASM module, stores bytecode in consensus state, commits it into snapshots and state roots, and returns a deterministic `wasm:<keccak>` code id.
+- Deploy can use either a built-in code id or an uploaded WASM code id.
+
+This gives the chain smart-contract behavior now, while leaving a clean slot for EVM, CosmWasm, or a richer WASM ABI later.
 Native contracts expose read-only methods through `eth_call` and CLI `query call`; return data is hex-encoded string data until a full ABI encoder exists.
-The first WASM path is intentionally a fixed built-in module, not permissionless bytecode upload or CosmWasm compatibility.
+The first WASM path is intentionally constrained to the ChainLab host ABI, not CosmWasm compatibility or unrestricted system access.
 
 ### `internal/core`
 
@@ -204,7 +209,8 @@ Phase 2 progress:
 - Devnet faucet support is available through `POST /faucet`, JSON-RPC `chain_faucet`, and CLI `faucet request`. It signs a normal proposer-funded transfer into the mempool and relies on block production for settlement; it is a development utility, not a production issuance or airdrop mechanism.
 - A local block explorer is available at `GET /explorer`; it server-renders head/finality checkpoints, recent blocks, head-block transactions, pending mempool transactions, and validators from node state without adding a separate frontend build.
 - The explorer supports drill-down pages for `GET /explorer/block/{height}`, `GET /explorer/tx/{hash}`, and `GET /explorer/account/{address}`, with overview links for block, transaction, sender, recipient, proposer, and validator navigation.
-- The default contract runtime includes a constrained wazero-backed `wasm.echo.v1` contract. The module can copy transaction args from the host, write contract storage, emit events, and set read return data through ChainLab-specific host functions. This proves the WASM VM boundary without yet allowing arbitrary module upload.
+- The default contract runtime includes a constrained wazero-backed `wasm.echo.v1` contract. The module can copy transaction args from the host, write contract storage, emit events, and set read return data through ChainLab-specific host functions. This proves the WASM VM boundary.
+- Chain state supports uploaded WASM modules through `wasm.upload`; uploaded bytecode is validated, stored in snapshots, included in state roots, and deployable by the returned deterministic code id. CLI `tx wasm-upload` can submit a `.wasm` file, `0x` bytecode, or the built-in `--example echo` module for local E2E testing.
 - Genesis files include a `validators` array, and `chainlab node --private-key` can start a different local validator from the same genesis file.
 - PoA now enforces deterministic proposer rotation and treats repeated imports of already-known canonical blocks as idempotent peer sync events.
 - Staked accounts can submit `validator.join`; accepted joins update the active validator set for subsequent block scheduling, are included in state roots, persist in snapshots, and can be queried over REST, JSON-RPC, and CLI.

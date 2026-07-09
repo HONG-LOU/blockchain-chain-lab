@@ -1,6 +1,7 @@
 package contracts
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -43,9 +44,9 @@ func (r *Runtime) Register(codeID string, contract Contract) {
 }
 
 func (r *Runtime) Deploy(store *state.Store, creator string, codeID string, seed string, args map[string]string) (string, []types.Event, error) {
-	contract, ok := r.registry[codeID]
-	if !ok {
-		return "", nil, fmt.Errorf("unknown contract code id %q", codeID)
+	contract, err := r.contractFor(store, codeID)
+	if err != nil {
+		return "", nil, err
 	}
 	address := contractAddress(creator, codeID, seed)
 	store.SetCodeID(address, codeID)
@@ -70,9 +71,9 @@ func (r *Runtime) Call(store *state.Store, address string, caller string, method
 	if account.CodeID == "" {
 		return nil, errors.New("target account is not a contract")
 	}
-	contract, ok := r.registry[account.CodeID]
-	if !ok {
-		return nil, fmt.Errorf("unknown contract code id %q", account.CodeID)
+	contract, err := r.contractFor(store, account.CodeID)
+	if err != nil {
+		return nil, err
 	}
 	ctx := Context{Store: store, Address: strings.ToLower(address), Caller: strings.ToLower(caller)}
 	return contract.Call(ctx, method, args)
@@ -83,12 +84,30 @@ func (r *Runtime) Read(store *state.Store, address string, caller string, method
 	if account.CodeID == "" {
 		return "", errors.New("target account is not a contract")
 	}
-	contract, ok := r.registry[account.CodeID]
-	if !ok {
-		return "", fmt.Errorf("unknown contract code id %q", account.CodeID)
+	contract, err := r.contractFor(store, account.CodeID)
+	if err != nil {
+		return "", err
 	}
 	ctx := Context{Store: store, Address: strings.ToLower(address), Caller: strings.ToLower(caller)}
 	return contract.Read(ctx, method, args)
+}
+
+func (r *Runtime) contractFor(store *state.Store, codeID string) (Contract, error) {
+	if contract, ok := r.registry[codeID]; ok {
+		return contract, nil
+	}
+	code, ok := store.ContractCode(codeID)
+	if !ok {
+		return nil, fmt.Errorf("unknown contract code id %q", codeID)
+	}
+	if code.Runtime != "wasm" {
+		return nil, fmt.Errorf("unknown contract runtime %q", code.Runtime)
+	}
+	raw, err := hex.DecodeString(strings.TrimPrefix(code.Bytecode, "0x"))
+	if err != nil {
+		return nil, fmt.Errorf("invalid wasm bytecode for %q: %w", codeID, err)
+	}
+	return NewWasmContract(raw)
 }
 
 func contractAddress(creator string, codeID string, seed string) string {

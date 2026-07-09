@@ -1,6 +1,7 @@
 package core_test
 
 import (
+	"encoding/hex"
 	"testing"
 
 	"chainlab/internal/contracts"
@@ -355,5 +356,85 @@ func TestValidatorSlashRequiresActiveReporterAndEvidence(t *testing.T) {
 	})
 	if _, err := executor.Execute(store, missingEvidence); err == nil {
 		t.Fatal("slash without evidence should fail")
+	}
+}
+
+func TestWASMUploadStoresCodeAndDeploysByUploadedCodeID(t *testing.T) {
+	store, executor, key, alice, _ := newExecutorFixture(t)
+	initialRoot := store.Root()
+	bytecode := contracts.WasmEchoCode()
+
+	upload := signedTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxWASMUpload,
+		From:     alice,
+		Nonce:    0,
+		GasLimit: 120_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"bytecode": "0x" + hex.EncodeToString(bytecode),
+		},
+	})
+	uploadReceipt, err := executor.Execute(store, upload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uploadReceipt.CodeID == "" {
+		t.Fatalf("upload receipt missing code id: %+v", uploadReceipt)
+	}
+	stored, ok := store.ContractCode(uploadReceipt.CodeID)
+	if !ok {
+		t.Fatalf("uploaded code %q not found", uploadReceipt.CodeID)
+	}
+	if stored.Runtime != "wasm" || stored.Creator != alice {
+		t.Fatalf("stored code = %+v", stored)
+	}
+	if store.Root() == initialRoot {
+		t.Fatal("uploaded code should affect state root")
+	}
+
+	deploy := signedTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxDeploy,
+		From:     alice,
+		Nonce:    1,
+		GasLimit: 80_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"code_id": uploadReceipt.CodeID,
+			"message": "hello",
+		},
+	})
+	deployReceipt, err := executor.Execute(store, deploy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deployReceipt.ContractAddress == "" {
+		t.Fatalf("deploy receipt = %+v", deployReceipt)
+	}
+
+	call := signedTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxCall,
+		From:     alice,
+		To:       deployReceipt.ContractAddress,
+		Nonce:    2,
+		GasLimit: 50_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"method":  "set",
+			"message": "world",
+		},
+	})
+	if _, err := executor.Execute(store, call); err != nil {
+		t.Fatal(err)
+	}
+
+	value, err := contracts.NewRuntimeWithDefaults().Read(store, deployReceipt.ContractAddress, alice, "get", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value != "world" {
+		t.Fatalf("uploaded wasm read = %q", value)
 	}
 }

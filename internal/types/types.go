@@ -10,6 +10,7 @@ const (
 	TxTransfer       TxType = "transfer"
 	TxDeploy         TxType = "deploy"
 	TxCall           TxType = "call"
+	TxWASMUpload     TxType = "wasm.upload"
 	TxStake          TxType = "stake"
 	TxUnstake        TxType = "unstake"
 	TxVote           TxType = "vote"
@@ -48,6 +49,10 @@ func (tx Transaction) Hash() string {
 	return hash.MustHex(tx)
 }
 
+func WASMCodeID(bytecode []byte) string {
+	return "wasm:" + hash.KeccakHex(bytecode)
+}
+
 type Event struct {
 	Type       string            `json:"type"`
 	Attributes map[string]string `json:"attributes,omitempty"`
@@ -59,7 +64,15 @@ type Receipt struct {
 	Error           string  `json:"error,omitempty"`
 	GasUsed         uint64  `json:"gas_used"`
 	Events          []Event `json:"events,omitempty"`
+	CodeID          string  `json:"code_id,omitempty"`
 	ContractAddress string  `json:"contract_address,omitempty"`
+}
+
+type ContractCode struct {
+	CodeID   string `json:"code_id"`
+	Runtime  string `json:"runtime"`
+	Creator  string `json:"creator"`
+	Bytecode string `json:"bytecode"`
 }
 
 type TransactionRecord struct {

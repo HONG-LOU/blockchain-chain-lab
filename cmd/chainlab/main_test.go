@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"chainlab/internal/contracts"
 	"chainlab/internal/crypto"
 	"chainlab/internal/hash"
 	"chainlab/internal/node"
@@ -703,6 +704,108 @@ func TestDeployAndContractCallCommandsSendSignedTx(t *testing.T) {
 	}
 	if readResult.Result != "7" {
 		t.Fatalf("counter value = %q", readResult.Result)
+	}
+}
+
+func TestWASMUploadCommandDeploysUploadedCode(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := crypto.AddressFromPrivateKey(key)
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	wasmPath := filepath.Join(t.TempDir(), "echo.wasm")
+	if err := os.WriteFile(wasmPath, contracts.WasmEchoCode(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var uploadOut bytes.Buffer
+	if err := wasmUploadCommand([]string{
+		"--rpc", server.URL,
+		"--private-key", crypto.PrivateKeyToHex(key),
+		"--wasm-file", wasmPath,
+	}, &uploadOut); err != nil {
+		t.Fatal(err)
+	}
+	var uploadResponse struct {
+		Hash string `json:"hash"`
+	}
+	if err := json.Unmarshal(uploadOut.Bytes(), &uploadResponse); err != nil {
+		t.Fatal(err)
+	}
+	if uploadResponse.Hash == "" {
+		t.Fatal("wasm upload command should print transaction hash")
+	}
+	uploadBlock, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	codeID := uploadBlock.Receipts[0].CodeID
+	if codeID == "" {
+		t.Fatalf("upload receipt = %+v", uploadBlock.Receipts[0])
+	}
+
+	var deployOut bytes.Buffer
+	if err := deployCommand([]string{
+		"--rpc", server.URL,
+		"--private-key", crypto.PrivateKeyToHex(key),
+		"--code-id", codeID,
+		"--arg", "message=hello",
+	}, &deployOut); err != nil {
+		t.Fatal(err)
+	}
+	deployBlock, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	contract := deployBlock.Receipts[0].ContractAddress
+
+	var callOut bytes.Buffer
+	if err := contractCallCommand([]string{
+		"--rpc", server.URL,
+		"--private-key", crypto.PrivateKeyToHex(key),
+		"--to", contract,
+		"--method", "set",
+		"--arg", "message=world",
+	}, &callOut); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+
+	var readOut bytes.Buffer
+	if err := callCommand([]string{"--rpc", server.URL, "--from", alice, "--to", contract, "--method", "get"}, &readOut); err != nil {
+		t.Fatal(err)
+	}
+	var readResult struct {
+		Result string `json:"result"`
+	}
+	if err := json.Unmarshal(readOut.Bytes(), &readResult); err != nil {
+		t.Fatal(err)
+	}
+	if readResult.Result != "world" {
+		t.Fatalf("uploaded wasm result = %q", readResult.Result)
+	}
+}
+
+func TestReadWASMUploadBytecodeLoadsExample(t *testing.T) {
+	bytecode, err := readWASMUploadBytecode("", "", "echo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(bytecode, contracts.WasmEchoCode()) {
+		t.Fatal("echo example bytecode should match built-in wasm echo module")
 	}
 }
 

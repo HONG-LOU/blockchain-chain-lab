@@ -1,8 +1,10 @@
 package node_test
 
 import (
+	"encoding/hex"
 	"testing"
 
+	"chainlab/internal/contracts"
 	chaincrypto "chainlab/internal/crypto"
 	"chainlab/internal/node"
 	"chainlab/internal/types"
@@ -127,6 +129,86 @@ func TestNodePersistsChainStateAndTransactionIndex(t *testing.T) {
 	}
 	if !record.Receipt.Success {
 		t.Fatalf("receipt should succeed: %+v", record.Receipt)
+	}
+}
+
+func TestNodePersistsUploadedWASMCode(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	dataDir := t.TempDir()
+
+	first, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		DataDir:        dataDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	upload := signedNodeTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxWASMUpload,
+		From:     alice,
+		Nonce:    0,
+		GasLimit: 120_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"bytecode": "0x" + hex.EncodeToString(contracts.WasmEchoCode()),
+		},
+	})
+	if err := first.SubmitTx(upload); err != nil {
+		t.Fatal(err)
+	}
+	uploadBlock, err := first.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	codeID := uploadBlock.Receipts[0].CodeID
+	if codeID == "" {
+		t.Fatalf("upload receipt = %+v", uploadBlock.Receipts[0])
+	}
+
+	deploy := signedNodeTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxDeploy,
+		From:     alice,
+		Nonce:    1,
+		GasLimit: 80_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"code_id": codeID,
+			"message": "persisted",
+		},
+	})
+	if err := first.SubmitTx(deploy); err != nil {
+		t.Fatal(err)
+	}
+	deployBlock, err := first.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	contract := deployBlock.Receipts[0].ContractAddress
+
+	reloaded, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		DataDir:        dataDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := reloaded.ReadContract(alice, contract, "get", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value != "persisted" {
+		t.Fatalf("reloaded wasm read = %q", value)
 	}
 }
 

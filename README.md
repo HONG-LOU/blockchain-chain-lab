@@ -12,7 +12,7 @@ It currently implements:
 - deterministic local `safe` and `finalized` chain checkpoints using conservative block-depth rules
 - transaction, receipt, and state roots
 - native smart-contract runtime with `counter.v1` and `token.v1`
-- sandboxed WASM-backed example contract runtime with `wasm.echo.v1`
+- sandboxed WASM contract runtime with built-in `wasm.echo.v1` and chain-state uploaded modules through `wasm.upload`
 - HTTP REST endpoints and a small JSON-RPC-style endpoint
 - persistent node snapshots with committed blocks, state, and transaction index
 - local fork-choice that stores known branches and reorgs to a longer validated branch
@@ -120,15 +120,20 @@ go run ./cmd/chainlab tx deploy --rpc http://127.0.0.1:8547 --private-key <hex-p
 go run ./cmd/chainlab tx call --rpc http://127.0.0.1:8547 --private-key <hex-private-key> --to <contract-address> --method increment --arg amount=1
 ```
 
-Deploy and write-call the sandboxed WASM echo example:
+Upload, deploy, and write-call a sandboxed WASM module:
 
 ```powershell
-go run ./cmd/chainlab tx deploy --rpc http://127.0.0.1:8547 --private-key <hex-private-key> --code-id wasm.echo.v1 --arg message=hello
+go run ./cmd/chainlab tx wasm-upload --rpc http://127.0.0.1:8547 --private-key <hex-private-key> --example echo
+go run ./cmd/chainlab chain produce --rpc http://127.0.0.1:8547
+go run ./cmd/chainlab query tx --rpc http://127.0.0.1:8547 --hash <upload-tx-hash>
+go run ./cmd/chainlab tx deploy --rpc http://127.0.0.1:8547 --private-key <hex-private-key> --code-id <uploaded-code-id> --arg message=hello
 go run ./cmd/chainlab tx call --rpc http://127.0.0.1:8547 --private-key <hex-private-key> --to <contract-address> --method set --arg message=world
 go run ./cmd/chainlab query call --rpc http://127.0.0.1:8547 --to <contract-address> --method get
 ```
 
-The WASM example runs inside a restricted wazero sandbox and only receives ChainLab host functions for args, contract storage, return data, and events. It is not arbitrary contract upload or CosmWasm compatibility yet.
+The upload receipt contains `receipt.code_id`; use that value in the deploy command. Use `--wasm-file <path>` or `--bytecode <0x...>` to upload your own module instead of the built-in `--example echo` module. The built-in `wasm.echo.v1` code id is still available for quick local tests without an upload transaction.
+
+Uploaded WASM runs inside a restricted wazero sandbox and only receives ChainLab host functions for args, contract storage, return data, and events. The module must implement ChainLab's current `deploy`, `call`, and `read` exports. This is not CosmWasm compatibility yet.
 
 Stake, join, and leave the validator set:
 
@@ -173,7 +178,7 @@ go run ./cmd/chainlab query estimate-gas --rpc http://127.0.0.1:8547 --type call
 - `GET /validators`
 - `GET /tx/{hash}`
 - `GET /txpool`
-- `POST /tx`
+- `POST /tx` for signed transactions, including `transfer`, `deploy`, `call`, `wasm.upload`, staking, validator, and governance transaction types
 - `POST /tx/raw`
 - `POST /faucet`
 - `POST /chain/produce`
@@ -188,6 +193,6 @@ go run ./cmd/chainlab query estimate-gas --rpc http://127.0.0.1:8547 --type call
 Next useful milestones:
 
 - real BFT finality and richer fork-choice safety rules
-- broader WASM ABI with uploaded modules and resource metering
+- broader WASM ABI with deterministic resource metering
 - richer contract explorer views with decoded native contract state and events
 - production-framework migration decision: OP Stack, Cosmos SDK, Avalanche L1, or another appchain stack

@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"chainlab/examples"
+	"chainlab/internal/contracts"
 	"chainlab/internal/crypto"
 	"chainlab/internal/node"
 	chainrpc "chainlab/internal/rpc"
@@ -267,7 +268,7 @@ func faucetRequestCommand(args []string, out io.Writer) error {
 
 func txCommand(args []string, out io.Writer) {
 	if len(args) < 1 {
-		log.Fatal("usage: chainlab tx <transfer|deploy|call|stake|validator-join|validator-leave|validator-slash|raw-submit>")
+		log.Fatal("usage: chainlab tx <transfer|deploy|call|wasm-upload|stake|validator-join|validator-leave|validator-slash|raw-submit>")
 	}
 	switch args[0] {
 	case "transfer":
@@ -280,6 +281,10 @@ func txCommand(args []string, out io.Writer) {
 		}
 	case "call":
 		if err := contractCallCommand(args[1:], out); err != nil {
+			log.Fatal(err)
+		}
+	case "wasm-upload":
+		if err := wasmUploadCommand(args[1:], out); err != nil {
 			log.Fatal(err)
 		}
 	case "stake":
@@ -396,6 +401,78 @@ func rawSubmitCommand(args []string, out io.Writer) error {
 		return err
 	}
 	return writeTo(out, map[string]string{"hash": hash})
+}
+
+func wasmUploadCommand(args []string, out io.Writer) error {
+	flags := flag.NewFlagSet("tx wasm-upload", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
+	privateKeyHex := flags.String("private-key", "", "uploader private key")
+	wasmFile := flags.String("wasm-file", "", "path to a wasm module")
+	bytecodeHex := flags.String("bytecode", "", "0x-prefixed wasm bytecode")
+	example := flags.String("example", "", "built-in example module to upload: echo")
+	gasLimit := flags.Uint64("gas-limit", 120_000, "gas limit")
+	gasPrice := flags.Uint64("gas-price", 1, "gas price")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	bytecode, err := readWASMUploadBytecode(*wasmFile, *bytecodeHex, *example)
+	if err != nil {
+		return err
+	}
+	payload := map[string]string{"bytecode": "0x" + hex.EncodeToString(bytecode)}
+	tx, err := buildSignedTransaction(*rpcURL, *privateKeyHex, types.TxWASMUpload, "", 0, *gasLimit, *gasPrice, payload)
+	if err != nil {
+		return err
+	}
+	response, err := submitTransaction(*rpcURL, tx)
+	if err != nil {
+		return err
+	}
+	return writeTo(out, response)
+}
+
+func readWASMUploadBytecode(wasmFile string, bytecodeHex string, example string) ([]byte, error) {
+	wasmFile = strings.TrimSpace(wasmFile)
+	bytecodeHex = strings.TrimSpace(bytecodeHex)
+	example = strings.TrimSpace(example)
+	sources := 0
+	for _, value := range []string{wasmFile, bytecodeHex, example} {
+		if value != "" {
+			sources++
+		}
+	}
+	if sources == 0 {
+		return nil, fmt.Errorf("wasm file, bytecode, or example is required")
+	}
+	if sources > 1 {
+		return nil, fmt.Errorf("provide only one of wasm file, bytecode, or example")
+	}
+	if wasmFile != "" {
+		bytecode, err := os.ReadFile(wasmFile)
+		if err != nil {
+			return nil, err
+		}
+		if len(bytecode) == 0 {
+			return nil, fmt.Errorf("wasm bytecode is required")
+		}
+		return bytecode, nil
+	}
+	if example != "" {
+		switch example {
+		case "echo":
+			return contracts.WasmEchoCode(), nil
+		default:
+			return nil, fmt.Errorf("unknown wasm example %q", example)
+		}
+	}
+	bytecode, err := hex.DecodeString(strings.TrimPrefix(bytecodeHex, "0x"))
+	if err != nil {
+		return nil, fmt.Errorf("invalid wasm bytecode hex: %w", err)
+	}
+	if len(bytecode) == 0 {
+		return nil, fmt.Errorf("wasm bytecode is required")
+	}
+	return bytecode, nil
 }
 
 func stakeCommand(args []string, out io.Writer) error {

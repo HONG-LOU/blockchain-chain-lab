@@ -1,6 +1,9 @@
 package examples
 
 import (
+	"encoding/hex"
+
+	"chainlab/internal/contracts"
 	"chainlab/internal/crypto"
 	"chainlab/internal/node"
 	"chainlab/internal/types"
@@ -131,15 +134,31 @@ func RunDemo() (Summary, error) {
 		return Summary{}, err
 	}
 
+	wasmUploadBlock, err := submitAndProduce(n, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxWASMUpload,
+		From:     alice,
+		Nonce:    6,
+		GasLimit: 120_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"bytecode": "0x" + hex.EncodeToString(contracts.WasmEchoCode()),
+		},
+	})
+	if err != nil {
+		return Summary{}, err
+	}
+	wasmCodeID := wasmUploadBlock.Receipts[0].CodeID
+
 	wasmBlock, err := submitAndProduce(n, key, types.Transaction{
 		ChainID:  "chainlab-local",
 		Type:     types.TxDeploy,
 		From:     alice,
-		Nonce:    6,
+		Nonce:    7,
 		GasLimit: 80_000,
 		GasPrice: 1,
 		Payload: map[string]string{
-			"code_id": "wasm.echo.v1",
+			"code_id": wasmCodeID,
 			"message": "hello",
 		},
 	})
@@ -153,7 +172,7 @@ func RunDemo() (Summary, error) {
 		Type:     types.TxCall,
 		From:     alice,
 		To:       wasmContract,
-		Nonce:    7,
+		Nonce:    8,
 		GasLimit: 50_000,
 		GasPrice: 1,
 		Payload: map[string]string{
@@ -172,7 +191,7 @@ func RunDemo() (Summary, error) {
 		ChainID:  "chainlab-local",
 		Type:     types.TxStake,
 		From:     alice,
-		Nonce:    8,
+		Nonce:    9,
 		Value:    200,
 		GasLimit: 30_000,
 		GasPrice: 1,
@@ -183,7 +202,7 @@ func RunDemo() (Summary, error) {
 		ChainID:  "chainlab-local",
 		Type:     types.TxVote,
 		From:     alice,
-		Nonce:    9,
+		Nonce:    10,
 		GasLimit: 25_000,
 		GasPrice: 1,
 		Payload: map[string]string{

@@ -11,21 +11,24 @@ import (
 
 type Store struct {
 	accounts   map[string]types.Account
+	codes      map[string]types.ContractCode
 	stakes     map[string]uint64
 	proposals  map[string]types.Proposal
 	validators []string
 }
 
 type Snapshot struct {
-	Accounts   map[string]types.Account  `json:"accounts"`
-	Stakes     map[string]uint64         `json:"stakes"`
-	Proposals  map[string]types.Proposal `json:"proposals"`
-	Validators []string                  `json:"validators,omitempty"`
+	Accounts   map[string]types.Account      `json:"accounts"`
+	Codes      map[string]types.ContractCode `json:"codes,omitempty"`
+	Stakes     map[string]uint64             `json:"stakes"`
+	Proposals  map[string]types.Proposal     `json:"proposals"`
+	Validators []string                      `json:"validators,omitempty"`
 }
 
 func NewStore() *Store {
 	return &Store{
 		accounts:  make(map[string]types.Account),
+		codes:     make(map[string]types.ContractCode),
 		stakes:    make(map[string]uint64),
 		proposals: make(map[string]types.Proposal),
 	}
@@ -40,6 +43,13 @@ func NewStoreFromSnapshot(snapshot Snapshot) *Store {
 		}
 		account.Storage = cloneStringMap(account.Storage)
 		store.accounts[normalize(address)] = account
+	}
+	for codeID, code := range snapshot.Codes {
+		code.CodeID = strings.TrimSpace(code.CodeID)
+		if code.CodeID == "" {
+			code.CodeID = strings.TrimSpace(codeID)
+		}
+		store.codes[code.CodeID] = code
 	}
 	for address, stake := range snapshot.Stakes {
 		store.stakes[normalize(address)] = stake
@@ -59,6 +69,7 @@ func (s *Store) Clone() *Store {
 		account.Storage = cloneStringMap(account.Storage)
 		clone.accounts[address] = account
 	}
+	clone.codes = cloneContractCodeMap(s.codes)
 	for address, stake := range s.stakes {
 		clone.stakes[address] = stake
 	}
@@ -74,6 +85,7 @@ func (s *Store) Clone() *Store {
 func (s *Store) Snapshot() Snapshot {
 	snapshot := Snapshot{
 		Accounts:   make(map[string]types.Account, len(s.accounts)),
+		Codes:      cloneContractCodeMap(s.codes),
 		Stakes:     cloneUint64Map(s.stakes),
 		Proposals:  make(map[string]types.Proposal, len(s.proposals)),
 		Validators: cloneStringSlice(s.validators),
@@ -93,6 +105,7 @@ func (s *Store) Snapshot() Snapshot {
 func (s *Store) ReplaceWith(other *Store) {
 	replacement := other.Clone()
 	s.accounts = replacement.accounts
+	s.codes = replacement.codes
 	s.stakes = replacement.stakes
 	s.proposals = replacement.proposals
 	s.validators = replacement.validators
@@ -165,6 +178,27 @@ func (s *Store) SetStorage(address string, key string, value string) {
 func (s *Store) GetStorage(address string, key string) string {
 	account := s.account(address)
 	return account.Storage[key]
+}
+
+func (s *Store) SetContractCode(code types.ContractCode) {
+	code.CodeID = strings.TrimSpace(code.CodeID)
+	if code.CodeID == "" {
+		return
+	}
+	s.codes[code.CodeID] = code
+}
+
+func (s *Store) ContractCode(codeID string) (types.ContractCode, bool) {
+	code, ok := s.codes[strings.TrimSpace(codeID)]
+	return code, ok
+}
+
+func (s *Store) ContractCodes() []types.ContractCode {
+	codes := make([]types.ContractCode, 0, len(s.codes))
+	for _, code := range s.codes {
+		codes = append(codes, code)
+	}
+	return codes
 }
 
 func (s *Store) AddStake(address string, amount uint64) error {
@@ -253,12 +287,14 @@ func (s *Store) Proposal(id string) types.Proposal {
 
 func (s *Store) Root() string {
 	snapshot := struct {
-		Accounts   map[string]types.Account  `json:"accounts"`
-		Stakes     map[string]uint64         `json:"stakes"`
-		Proposals  map[string]types.Proposal `json:"proposals"`
-		Validators []string                  `json:"validators"`
+		Accounts   map[string]types.Account      `json:"accounts"`
+		Codes      map[string]types.ContractCode `json:"codes"`
+		Stakes     map[string]uint64             `json:"stakes"`
+		Proposals  map[string]types.Proposal     `json:"proposals"`
+		Validators []string                      `json:"validators"`
 	}{
 		Accounts:   make(map[string]types.Account, len(s.accounts)),
+		Codes:      cloneContractCodeMap(s.codes),
 		Stakes:     cloneUint64Map(s.stakes),
 		Proposals:  make(map[string]types.Proposal, len(s.proposals)),
 		Validators: cloneStringSlice(s.validators),
@@ -308,6 +344,14 @@ func normalize(address string) string {
 
 func cloneStringMap(input map[string]string) map[string]string {
 	output := make(map[string]string, len(input))
+	for key, value := range input {
+		output[key] = value
+	}
+	return output
+}
+
+func cloneContractCodeMap(input map[string]types.ContractCode) map[string]types.ContractCode {
+	output := make(map[string]types.ContractCode, len(input))
 	for key, value := range input {
 		output[key] = value
 	}
