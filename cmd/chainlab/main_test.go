@@ -478,6 +478,68 @@ func TestTransferCommandCanBuildSmartAccountTx(t *testing.T) {
 	}
 }
 
+func TestSetCodeCommandDelegatesEOAAndOwnerTransfer(t *testing.T) {
+	eoaKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	eoa := crypto.AddressFromPrivateKey(eoaKey)
+	owner := crypto.AddressFromPrivateKey(ownerKey)
+	receiver := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    eoaKey,
+		GenesisBalance: map[string]uint64{eoa: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	var setCodeOut bytes.Buffer
+	if err := setCodeCommand([]string{
+		"--rpc", server.URL,
+		"--private-key", crypto.PrivateKeyToHex(eoaKey),
+		"--code-id", contracts.AccountCodeID,
+		"--owner", owner,
+	}, &setCodeOut); err != nil {
+		t.Fatal(err)
+	}
+	var blockOut bytes.Buffer
+	if err := produceCommand([]string{"--rpc", server.URL}, &blockOut); err != nil {
+		t.Fatal(err)
+	}
+	if account := n.Account(eoa); account.DelegatedCodeID != contracts.AccountCodeID {
+		t.Fatalf("delegated account = %+v", account)
+	}
+
+	var transferOut bytes.Buffer
+	if err := transferCommand([]string{
+		"--rpc", server.URL,
+		"--from", eoa,
+		"--private-key", crypto.PrivateKeyToHex(ownerKey),
+		"--to", receiver,
+		"--value", "100",
+	}, &transferOut); err != nil {
+		t.Fatal(err)
+	}
+	var transferBlockOut bytes.Buffer
+	if err := produceCommand([]string{"--rpc", server.URL}, &transferBlockOut); err != nil {
+		t.Fatal(err)
+	}
+	if receiverBalance := n.Account(receiver).Balance; receiverBalance != 100 {
+		t.Fatalf("receiver balance = %d", receiverBalance)
+	}
+	if ownerNonce := n.Account(owner).Nonce; ownerNonce != 0 {
+		t.Fatalf("owner nonce = %d", ownerNonce)
+	}
+}
+
 func TestBatchTransferCommandCanBuildSmartAccountTx(t *testing.T) {
 	ownerKey, err := crypto.GenerateKey()
 	if err != nil {

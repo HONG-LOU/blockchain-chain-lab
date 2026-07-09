@@ -270,7 +270,7 @@ func faucetRequestCommand(args []string, out io.Writer) error {
 
 func txCommand(args []string, out io.Writer) {
 	if len(args) < 1 {
-		log.Fatal("usage: chainlab tx <transfer|batch-transfer|deploy|call|wasm-upload|stake|proposal-submit|vote|proposal-execute|validator-join|validator-leave|validator-slash|raw-submit>")
+		log.Fatal("usage: chainlab tx <transfer|batch-transfer|set-code|deploy|call|wasm-upload|stake|proposal-submit|vote|proposal-execute|validator-join|validator-leave|validator-slash|raw-submit>")
 	}
 	switch args[0] {
 	case "transfer":
@@ -279,6 +279,10 @@ func txCommand(args []string, out io.Writer) {
 		}
 	case "batch-transfer":
 		if err := batchTransferCommand(args[1:], out); err != nil {
+			log.Fatal(err)
+		}
+	case "set-code":
+		if err := setCodeCommand(args[1:], out); err != nil {
 			log.Fatal(err)
 		}
 	case "deploy":
@@ -486,6 +490,39 @@ func rawSubmitCommand(args []string, out io.Writer) error {
 		return err
 	}
 	return writeTo(out, map[string]string{"hash": hash})
+}
+
+func setCodeCommand(args []string, out io.Writer) error {
+	flags := flag.NewFlagSet("tx set-code", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
+	privateKeyHex := flags.String("private-key", "", "EOA private key")
+	codeID := flags.String("code-id", contracts.AccountCodeID, "delegated code id")
+	owner := flags.String("owner", "", "delegated owner address")
+	clear := flags.Bool("clear", false, "clear delegated code")
+	gasLimit := flags.Uint64("gas-limit", 45_000, "gas limit")
+	gasPrice := flags.Uint64("gas-price", 1, "gas price")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	payload := map[string]string{}
+	if *clear {
+		payload["code_id"] = ""
+	} else {
+		if strings.TrimSpace(*owner) == "" {
+			return fmt.Errorf("owner is required")
+		}
+		payload["code_id"] = *codeID
+		payload["owner"] = *owner
+	}
+	tx, err := buildSignedTransaction(*rpcURL, *privateKeyHex, types.TxSetCode, "", 0, *gasLimit, *gasPrice, payload)
+	if err != nil {
+		return err
+	}
+	response, err := submitTransaction(*rpcURL, tx)
+	if err != nil {
+		return err
+	}
+	return writeTo(out, response)
 }
 
 func wasmUploadCommand(args []string, out io.Writer) error {
