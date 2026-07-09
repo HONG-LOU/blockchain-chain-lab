@@ -18,6 +18,7 @@ It currently implements:
 - native paymaster-sponsored transactions: the user signs the operation and consumes their own nonce, while a paymaster signs an authorization and pays gas
 - ChainLab-native batched user operations: one signed transaction can atomically execute multiple transfer/call operations with one sender nonce and one fee settlement
 - ChainLab-native smart contract accounts through `account.v1`: a contract account holds the balance and nonce while its stored owner signs with the transaction `signer`
+- ChainLab-native multisig smart accounts through `multisig.v1`: a contract account enforces an owner threshold with multiple transaction authorizations
 - HTTP REST endpoints and a small JSON-RPC-style endpoint
 - persistent node snapshots with committed blocks, state, and transaction index
 - local fork-choice that stores known branches and reorgs to a longer validated branch
@@ -133,6 +134,15 @@ go run ./cmd/chainlab tx transfer --rpc http://127.0.0.1:8547 --from <account-co
 ```
 
 For a smart account transaction, `from` is the contract account that owns the balance, nonce, and fee liability. `signer` is the EOA owner that authorizes the operation. The owner key can also build sponsored smart-account transfers or batches with `--paymaster-private-key`, so the paymaster pays gas while the contract account sends value. This is a native single-owner account model, not full ERC-4337 EntryPoint, EIP-7702 delegation, multisig, or policy-engine compatibility.
+
+Deploy a 2-of-2 multisig smart account and send from it:
+
+```powershell
+go run ./cmd/chainlab tx deploy --rpc http://127.0.0.1:8547 --private-key <owner-a-private-key> --code-id multisig.v1 --arg owners=<owner-a-address>,<owner-b-address> --arg threshold=2
+go run ./cmd/chainlab tx transfer --rpc http://127.0.0.1:8547 --from <multisig-contract-address> --private-key <owner-a-private-key> --auth-private-key <owner-b-private-key> --to <recipient> --value 100
+```
+
+Multisig transactions use `authorizations`, one per owner signature. The transaction still consumes the multisig account nonce, spends the multisig account balance, and can use `--paymaster-private-key` for sponsored gas. This is a native threshold-account model, not Gnosis Safe compatibility, social recovery, session keys, or full ERC-4337 validation.
 
 Build a signed raw ChainLab transaction without broadcasting, then submit it later:
 
@@ -256,7 +266,7 @@ Next useful milestones:
 
 - real BFT finality and richer fork-choice safety rules
 - broader WASM ABI with CPU instruction/fuel metering
-- richer account abstraction, including policy-based paymasters, multisig smart accounts, and ERC-4337/EIP-7702 compatibility experiments
+- richer account abstraction, including policy-based paymasters, social recovery/session-key smart accounts, and ERC-4337/EIP-7702 compatibility experiments
 - richer contract explorer views with decoded native contract state and events
 - richer governance thresholds, quorum rules, deposits, and upgrade proposal handlers
 - production-framework migration decision: OP Stack, Cosmos SDK, Avalanche L1, or another appchain stack

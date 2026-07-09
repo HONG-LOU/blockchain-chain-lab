@@ -56,4 +56,13 @@ func TestRunDemo(t *testing.T) {
 	if summary.SmartAccountNonce != 1 {
 		t.Fatalf("smart account nonce = %d", summary.SmartAccountNonce)
 	}
+	if summary.MultisigReceiverBalance != 33 {
+		t.Fatalf("multisig receiver balance = %d", summary.MultisigReceiverBalance)
+	}
+	if summary.MultisigBalance != 28_967 {
+		t.Fatalf("multisig balance = %d", summary.MultisigBalance)
+	}
+	if summary.MultisigNonce != 1 {
+		t.Fatalf("multisig nonce = %d", summary.MultisigNonce)
+	}
 }

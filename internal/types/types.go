@@ -50,8 +50,14 @@ type Transaction struct {
 	Paymaster            string            `json:"paymaster,omitempty"`
 	Payload              map[string]string `json:"payload,omitempty"`
 	Batch                []BatchOperation  `json:"batch,omitempty"`
+	Authorizations       []Authorization   `json:"authorizations,omitempty"`
 	Signature            string            `json:"signature,omitempty"`
 	PaymasterSignature   string            `json:"paymaster_signature,omitempty"`
+}
+
+type Authorization struct {
+	Signer    string `json:"signer"`
+	Signature string `json:"signature,omitempty"`
 }
 
 type BatchOperation struct {
@@ -64,6 +70,12 @@ type BatchOperation struct {
 func (tx Transaction) SigningBytes() []byte {
 	tx.Signature = ""
 	tx.PaymasterSignature = ""
+	if len(tx.Authorizations) > 0 {
+		tx.Authorizations = append([]Authorization(nil), tx.Authorizations...)
+		for i := range tx.Authorizations {
+			tx.Authorizations[i].Signature = ""
+		}
+	}
 	return hash.MustCanonicalBytes(tx)
 }
 

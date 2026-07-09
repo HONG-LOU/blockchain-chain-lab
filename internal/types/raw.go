@@ -51,8 +51,13 @@ func validateRawTransaction(tx Transaction) error {
 	if tx.GasLimit == 0 {
 		return fmt.Errorf("raw transaction missing gas_limit")
 	}
-	if strings.TrimSpace(tx.Signature) == "" {
+	if strings.TrimSpace(tx.Signature) == "" && len(tx.Authorizations) == 0 {
 		return fmt.Errorf("raw transaction missing signature")
+	}
+	for _, authorization := range tx.Authorizations {
+		if strings.TrimSpace(authorization.Signer) == "" || strings.TrimSpace(authorization.Signature) == "" {
+			return fmt.Errorf("raw transaction missing authorization signature")
+		}
 	}
 	return nil
 }

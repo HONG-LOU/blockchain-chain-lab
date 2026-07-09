@@ -20,6 +20,9 @@ type Summary struct {
 	SmartAccountReceiverBalance uint64
 	SmartAccountBalance         uint64
 	SmartAccountNonce           uint64
+	MultisigReceiverBalance     uint64
+	MultisigBalance             uint64
+	MultisigNonce               uint64
 	CounterValue                string
 	TokenReceiverBalance        string
 	WASMValue                   string
@@ -39,10 +42,16 @@ func RunDemo() (Summary, error) {
 		return Summary{}, err
 	}
 	sponsoredUser := crypto.AddressFromPrivateKey(sponsoredKey)
+	multisigCoOwnerKey, err := crypto.GenerateKey()
+	if err != nil {
+		return Summary{}, err
+	}
+	multisigCoOwner := crypto.AddressFromPrivateKey(multisigCoOwnerKey)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	sponsoredReceiver := "0xdddddddddddddddddddddddddddddddddddddddd"
 	batchReceiver := "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 	smartAccountReceiver := "0xffffffffffffffffffffffffffffffffffffffff"
+	multisigReceiver := "0xabababababababababababababababababababab"
 	n, err := node.New(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
@@ -368,6 +377,53 @@ func RunDemo() (Summary, error) {
 		return Summary{}, err
 	}
 
+	multisigBlock, err := submitAndProduce(n, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxDeploy,
+		From:     alice,
+		Nonce:    17,
+		GasLimit: 80_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"code_id":   contracts.MultisigCodeID,
+			"owners":    alice + "," + multisigCoOwner,
+			"threshold": "2",
+		},
+	})
+	if err != nil {
+		return Summary{}, err
+	}
+	multisig := multisigBlock.Receipts[0].ContractAddress
+
+	if _, err := submitAndProduce(n, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     alice,
+		To:       multisig,
+		Nonce:    18,
+		Value:    50_000,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	}); err != nil {
+		return Summary{}, err
+	}
+
+	if err := authorizeAndSubmit(n, []crypto.PrivateKey{key, multisigCoOwnerKey}, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     multisig,
+		To:       multisigReceiver,
+		Nonce:    0,
+		Value:    33,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	}); err != nil {
+		return Summary{}, err
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		return Summary{}, err
+	}
+
 	return Summary{
 		Height:                      n.Head().Header.Height,
 		TransferReceiverBalance:     n.Account(bob).Balance,
@@ -378,6 +434,9 @@ func RunDemo() (Summary, error) {
 		SmartAccountReceiverBalance: n.Account(smartAccountReceiver).Balance,
 		SmartAccountBalance:         n.Account(smartAccount).Balance,
 		SmartAccountNonce:           n.Account(smartAccount).Nonce,
+		MultisigReceiverBalance:     n.Account(multisigReceiver).Balance,
+		MultisigBalance:             n.Account(multisig).Balance,
+		MultisigNonce:               n.Account(multisig).Nonce,
 		CounterValue:                n.Account(counter).Storage["count"],
 		TokenReceiverBalance:        n.Account(token).Storage["balance:"+bob],
 		WASMValue:                   wasmValue,
@@ -414,5 +473,20 @@ func signSponsoredAndSubmit(n *node.Node, userKey crypto.PrivateKey, paymasterKe
 		return err
 	}
 	tx.PaymasterSignature = paymasterSignature
+	return n.SubmitTx(tx)
+}
+
+func authorizeAndSubmit(n *node.Node, keys []crypto.PrivateKey, tx types.Transaction) error {
+	tx.Authorizations = make([]types.Authorization, len(keys))
+	for i, key := range keys {
+		tx.Authorizations[i].Signer = crypto.AddressFromPrivateKey(key)
+	}
+	for i, key := range keys {
+		signature, err := crypto.Sign(key, tx.SigningBytes())
+		if err != nil {
+			return err
+		}
+		tx.Authorizations[i].Signature = signature
+	}
 	return n.SubmitTx(tx)
 }

@@ -563,6 +563,177 @@ func TestSmartAccountBatchCanUsePaymaster(t *testing.T) {
 	}
 }
 
+func TestMultisigAccountRequiresThresholdAuthorizationsAndContractNonce(t *testing.T) {
+	ownerAKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerBKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerA := chaincrypto.AddressFromPrivateKey(ownerAKey)
+	ownerB := chaincrypto.AddressFromPrivateKey(ownerBKey)
+	multisig := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	receiver := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	store := state.NewStore()
+	store.SetCodeID(multisig, contracts.MultisigCodeID)
+	store.SetStorage(multisig, "owners", ownerA+","+ownerB)
+	store.SetStorage(multisig, "threshold", "2")
+	store.SetBalance(multisig, 50_000)
+	executor := core.NewExecutor("chainlab-local", "0xfee0000000000000000000000000000000000000", contracts.NewRuntimeWithDefaults())
+
+	oneAuth := authorizedTx(t, []chaincrypto.PrivateKey{ownerAKey}, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     multisig,
+		To:       receiver,
+		Nonce:    0,
+		Value:    100,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+	if _, err := executor.Execute(store, oneAuth); err == nil {
+		t.Fatal("multisig transaction below threshold should fail")
+	}
+	if got := store.GetAccount(multisig).Nonce; got != 0 {
+		t.Fatalf("multisig nonce after failed tx = %d", got)
+	}
+
+	tx := authorizedTx(t, []chaincrypto.PrivateKey{ownerAKey, ownerBKey}, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     multisig,
+		To:       receiver,
+		Nonce:    0,
+		Value:    100,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+	receipt, err := executor.Execute(store, tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !receipt.Success {
+		t.Fatalf("receipt should succeed: %+v", receipt)
+	}
+	if got := store.GetAccount(multisig).Nonce; got != 1 {
+		t.Fatalf("multisig nonce = %d", got)
+	}
+	if got := store.GetAccount(multisig).Balance; got != 28_900 {
+		t.Fatalf("multisig balance = %d", got)
+	}
+	if got := store.GetAccount(receiver).Balance; got != 100 {
+		t.Fatalf("receiver balance = %d", got)
+	}
+}
+
+func TestMultisigAccountRejectsDuplicateAuthorizations(t *testing.T) {
+	ownerAKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerBKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerA := chaincrypto.AddressFromPrivateKey(ownerAKey)
+	ownerB := chaincrypto.AddressFromPrivateKey(ownerBKey)
+	multisig := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	store := state.NewStore()
+	store.SetCodeID(multisig, contracts.MultisigCodeID)
+	store.SetStorage(multisig, "owners", ownerA+","+ownerB)
+	store.SetStorage(multisig, "threshold", "2")
+	store.SetBalance(multisig, 50_000)
+	executor := core.NewExecutor("chainlab-local", "0xfee0000000000000000000000000000000000000", contracts.NewRuntimeWithDefaults())
+
+	tx := authorizedTx(t, []chaincrypto.PrivateKey{ownerAKey, ownerAKey}, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     multisig,
+		To:       "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Nonce:    0,
+		Value:    100,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+
+	if _, err := executor.Execute(store, tx); err == nil {
+		t.Fatal("duplicate multisig authorizations should fail")
+	}
+	if got := store.GetAccount(multisig).Nonce; got != 0 {
+		t.Fatalf("multisig nonce = %d", got)
+	}
+}
+
+func TestMultisigAccountBatchCanUsePaymaster(t *testing.T) {
+	ownerAKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerBKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	paymasterKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerA := chaincrypto.AddressFromPrivateKey(ownerAKey)
+	ownerB := chaincrypto.AddressFromPrivateKey(ownerBKey)
+	paymaster := chaincrypto.AddressFromPrivateKey(paymasterKey)
+	multisig := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	feeCollector := "0xfee0000000000000000000000000000000000000"
+	store := state.NewStore()
+	store.SetCodeID(multisig, contracts.MultisigCodeID)
+	store.SetStorage(multisig, "owners", ownerA+","+ownerB)
+	store.SetStorage(multisig, "threshold", "2")
+	store.SetBalance(multisig, 30)
+	store.SetBalance(paymaster, 500_000)
+	executor := core.NewExecutor("chainlab-local", feeCollector, contracts.NewRuntimeWithDefaults())
+
+	tx := authorizedTx(t, []chaincrypto.PrivateKey{ownerAKey, ownerBKey}, types.Transaction{
+		ChainID:   "chainlab-local",
+		Type:      types.TxBatch,
+		From:      multisig,
+		Nonce:     0,
+		GasLimit:  84_000,
+		GasPrice:  1,
+		Paymaster: paymaster,
+		Batch: []types.BatchOperation{
+			{Type: types.TxTransfer, To: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Value: 10},
+			{Type: types.TxTransfer, To: "0xcccccccccccccccccccccccccccccccccccccccc", Value: 20},
+		},
+	})
+	paymasterSignature, err := chaincrypto.Sign(paymasterKey, tx.PaymasterSigningBytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx.PaymasterSignature = paymasterSignature
+
+	receipt, err := executor.Execute(store, tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if receipt.FeePayer != paymaster {
+		t.Fatalf("fee payer = %q", receipt.FeePayer)
+	}
+	if got := store.GetAccount(multisig).Nonce; got != 1 {
+		t.Fatalf("multisig nonce = %d", got)
+	}
+	if got := store.GetAccount(multisig).Balance; got != 0 {
+		t.Fatalf("multisig balance = %d", got)
+	}
+	if got := store.GetAccount(paymaster).Balance; got != 416_000 {
+		t.Fatalf("paymaster balance = %d", got)
+	}
+	if got := store.GetAccount(feeCollector).Balance; got != 84_000 {
+		t.Fatalf("fee collector balance = %d", got)
+	}
+}
+
 func TestRejectsBadSignatureAndBadNonce(t *testing.T) {
 	store, executor, key, alice, bob := newExecutorFixture(t)
 	tx := signedTx(t, key, types.Transaction{
@@ -599,6 +770,22 @@ func sponsoredTx(t *testing.T, userKey chaincrypto.PrivateKey, paymasterKey chai
 		t.Fatal(err)
 	}
 	tx.PaymasterSignature = paymasterSignature
+	return tx
+}
+
+func authorizedTx(t *testing.T, keys []chaincrypto.PrivateKey, tx types.Transaction) types.Transaction {
+	t.Helper()
+	tx.Authorizations = make([]types.Authorization, len(keys))
+	for i, key := range keys {
+		tx.Authorizations[i].Signer = chaincrypto.AddressFromPrivateKey(key)
+	}
+	for i, key := range keys {
+		signature, err := chaincrypto.Sign(key, tx.SigningBytes())
+		if err != nil {
+			t.Fatal(err)
+		}
+		tx.Authorizations[i].Signature = signature
+	}
 	return tx
 }
 

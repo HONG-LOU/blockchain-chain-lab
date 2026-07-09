@@ -372,6 +372,9 @@ func tagBatchEvents(events []types.Event, index int) {
 }
 
 func validateTransactionAuthorization(store *state.Store, tx types.Transaction) error {
+	if len(tx.Authorizations) > 0 {
+		return validateMultisigAuthorization(store, tx)
+	}
 	signer := strings.ToLower(strings.TrimSpace(tx.Signer))
 	if signer == "" {
 		if !chaincrypto.Verify(tx.From, tx.SigningBytes(), tx.Signature) {
@@ -394,6 +397,63 @@ func validateTransactionAuthorization(store *state.Store, tx types.Transaction) 
 		return errors.New("transaction signer is not smart account owner")
 	}
 	return nil
+}
+
+func validateMultisigAuthorization(store *state.Store, tx types.Transaction) error {
+	if strings.TrimSpace(tx.Signer) != "" {
+		return errors.New("multisig transaction cannot include signer")
+	}
+	account := store.GetAccount(tx.From)
+	if account.CodeID != contracts.MultisigCodeID {
+		return errors.New("transaction authorizations require multisig.v1 from account")
+	}
+	owners, err := multisigOwners(store.GetStorage(tx.From, "owners"))
+	if err != nil {
+		return err
+	}
+	threshold, err := strconv.ParseUint(strings.TrimSpace(store.GetStorage(tx.From, "threshold")), 10, 64)
+	if err != nil || threshold == 0 {
+		return errors.New("multisig threshold is not set")
+	}
+	if threshold > uint64(len(owners)) {
+		return errors.New("multisig threshold exceeds owner count")
+	}
+	seen := make(map[string]struct{}, len(tx.Authorizations))
+	for _, authorization := range tx.Authorizations {
+		signer := strings.ToLower(strings.TrimSpace(authorization.Signer))
+		if signer == "" || strings.TrimSpace(authorization.Signature) == "" {
+			return errors.New("multisig authorization requires signer and signature")
+		}
+		if _, ok := seen[signer]; ok {
+			return errors.New("duplicate multisig authorization")
+		}
+		seen[signer] = struct{}{}
+		if _, ok := owners[signer]; !ok {
+			return errors.New("multisig authorization signer is not an owner")
+		}
+		if !chaincrypto.Verify(signer, tx.SigningBytes(), authorization.Signature) {
+			return errors.New("invalid multisig authorization signature")
+		}
+	}
+	if uint64(len(seen)) < threshold {
+		return errors.New("multisig authorization threshold not met")
+	}
+	return nil
+}
+
+func multisigOwners(raw string) (map[string]struct{}, error) {
+	owners := make(map[string]struct{})
+	for _, part := range strings.Split(raw, ",") {
+		owner := strings.ToLower(strings.TrimSpace(part))
+		if owner == "" {
+			continue
+		}
+		owners[owner] = struct{}{}
+	}
+	if len(owners) == 0 {
+		return nil, errors.New("multisig owners are not set")
+	}
+	return owners, nil
 }
 
 func validatePaymasterAuthorization(tx types.Transaction) error {

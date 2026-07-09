@@ -35,6 +35,7 @@ func NewRuntime() *Runtime {
 func NewRuntimeWithDefaults() *Runtime {
 	runtime := NewRuntime()
 	runtime.Register(AccountCodeID, Account{})
+	runtime.Register(MultisigCodeID, Multisig{})
 	runtime.Register("counter.v1", Counter{})
 	runtime.Register("token.v1", Token{})
 	runtime.Register("wasm.echo.v1", NewWasmEchoContract())

@@ -141,3 +141,42 @@ func TestAccountContractStoresOwner(t *testing.T) {
 		t.Fatalf("events = %#v", events)
 	}
 }
+
+func TestMultisigContractStoresOwnersAndThreshold(t *testing.T) {
+	store := state.NewStore()
+	runtime := contracts.NewRuntimeWithDefaults()
+	creator := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	ownerA := "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	ownerB := "0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+
+	addr, events, err := runtime.Deploy(store, creator, contracts.MultisigCodeID, "seed-multisig", map[string]string{
+		"owners":    ownerA + "," + ownerB,
+		"threshold": "2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := store.GetStorage(addr, "owners"); got != "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
+		t.Fatalf("owners storage = %q", got)
+	}
+	if got := store.GetStorage(addr, "threshold"); got != "2" {
+		t.Fatalf("threshold storage = %q", got)
+	}
+	owners, err := runtime.Read(store, addr, creator, "owners", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owners != "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
+		t.Fatalf("owners read = %q", owners)
+	}
+	threshold, err := runtime.Read(store, addr, creator, "threshold", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if threshold != "2" {
+		t.Fatalf("threshold read = %q", threshold)
+	}
+	if len(events) != 2 || events[1].Type != "multisig.configured" {
+		t.Fatalf("events = %#v", events)
+	}
+}

@@ -392,10 +392,12 @@ func transferCommand(args []string, out io.Writer) error {
 	maxPriorityFeePerGas := flags.Uint64("max-priority-fee-per-gas", 0, "EIP-1559-style max priority fee per gas")
 	paymasterPrivateKeyHex := flags.String("paymaster-private-key", "", "optional paymaster private key for sponsored gas")
 	rawOnly := flags.Bool("raw-only", false, "print signed raw transaction without submitting")
+	var authPrivateKeys stringListFlag
+	flags.Var(&authPrivateKeys, "auth-private-key", "additional multisig authorization private key; can be repeated")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	tx, err := buildSignedTransferFromWithFeeCapsAndPaymaster(*rpcURL, *privateKeyHex, *from, *to, *value, *gasLimit, *gasPrice, *maxFeePerGas, *maxPriorityFeePerGas, *paymasterPrivateKeyHex)
+	tx, err := buildSignedTransferFromWithFeeCapsAndPaymaster(*rpcURL, *privateKeyHex, *from, authPrivateKeys.Values(), *to, *value, *gasLimit, *gasPrice, *maxFeePerGas, *maxPriorityFeePerGas, *paymasterPrivateKeyHex)
 	if err != nil {
 		return err
 	}
@@ -425,7 +427,9 @@ func batchTransferCommand(args []string, out io.Writer) error {
 	paymasterPrivateKeyHex := flags.String("paymaster-private-key", "", "optional paymaster private key for sponsored gas")
 	rawOnly := flags.Bool("raw-only", false, "print signed raw transaction without submitting")
 	var transfers stringListFlag
+	var authPrivateKeys stringListFlag
 	flags.Var(&transfers, "to", "recipient:amount transfer; can be repeated")
+	flags.Var(&authPrivateKeys, "auth-private-key", "additional multisig authorization private key; can be repeated")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -440,7 +444,7 @@ func batchTransferCommand(args []string, out io.Writer) error {
 			return err
 		}
 	}
-	tx, err := buildSignedBatchTransactionFromWithFeeCapsAndPaymaster(*rpcURL, *privateKeyHex, *from, batch, limit, *gasPrice, *maxFeePerGas, *maxPriorityFeePerGas, *paymasterPrivateKeyHex)
+	tx, err := buildSignedBatchTransactionFromWithFeeCapsAndPaymaster(*rpcURL, *privateKeyHex, *from, authPrivateKeys.Values(), batch, limit, *gasPrice, *maxFeePerGas, *maxPriorityFeePerGas, *paymasterPrivateKeyHex)
 	if err != nil {
 		return err
 	}
@@ -832,10 +836,10 @@ func buildSignedTransferWithFeeCaps(rpcURL string, privateKeyHex string, to stri
 }
 
 func buildSignedTransferWithFeeCapsAndPaymaster(rpcURL string, privateKeyHex string, to string, value uint64, gasLimit uint64, gasPrice uint64, maxFeePerGas uint64, maxPriorityFeePerGas uint64, paymasterPrivateKeyHex string) (types.Transaction, error) {
-	return buildSignedTransferFromWithFeeCapsAndPaymaster(rpcURL, privateKeyHex, "", to, value, gasLimit, gasPrice, maxFeePerGas, maxPriorityFeePerGas, paymasterPrivateKeyHex)
+	return buildSignedTransferFromWithFeeCapsAndPaymaster(rpcURL, privateKeyHex, "", nil, to, value, gasLimit, gasPrice, maxFeePerGas, maxPriorityFeePerGas, paymasterPrivateKeyHex)
 }
 
-func buildSignedTransferFromWithFeeCapsAndPaymaster(rpcURL string, privateKeyHex string, fromOverride string, to string, value uint64, gasLimit uint64, gasPrice uint64, maxFeePerGas uint64, maxPriorityFeePerGas uint64, paymasterPrivateKeyHex string) (types.Transaction, error) {
+func buildSignedTransferFromWithFeeCapsAndPaymaster(rpcURL string, privateKeyHex string, fromOverride string, authPrivateKeyHexes []string, to string, value uint64, gasLimit uint64, gasPrice uint64, maxFeePerGas uint64, maxPriorityFeePerGas uint64, paymasterPrivateKeyHex string) (types.Transaction, error) {
 	if privateKeyHex == "" {
 		return types.Transaction{}, fmt.Errorf("private key is required")
 	}
@@ -845,6 +849,7 @@ func buildSignedTransferFromWithFeeCapsAndPaymaster(rpcURL string, privateKeyHex
 	return buildSignedTransactionFromSpec(rpcURL, privateKeyHex, signedTransactionSpec{
 		txType:                 types.TxTransfer,
 		fromOverride:           fromOverride,
+		authPrivateKeyHexes:    authPrivateKeyHexes,
 		to:                     to,
 		value:                  value,
 		gasLimit:               gasLimit,
@@ -878,16 +883,17 @@ func buildSignedTransactionWithFeeCapsAndPaymaster(rpcURL string, privateKeyHex 
 }
 
 func buildSignedBatchTransactionWithFeeCapsAndPaymaster(rpcURL string, privateKeyHex string, batch []types.BatchOperation, gasLimit uint64, gasPrice uint64, maxFeePerGas uint64, maxPriorityFeePerGas uint64, paymasterPrivateKeyHex string) (types.Transaction, error) {
-	return buildSignedBatchTransactionFromWithFeeCapsAndPaymaster(rpcURL, privateKeyHex, "", batch, gasLimit, gasPrice, maxFeePerGas, maxPriorityFeePerGas, paymasterPrivateKeyHex)
+	return buildSignedBatchTransactionFromWithFeeCapsAndPaymaster(rpcURL, privateKeyHex, "", nil, batch, gasLimit, gasPrice, maxFeePerGas, maxPriorityFeePerGas, paymasterPrivateKeyHex)
 }
 
-func buildSignedBatchTransactionFromWithFeeCapsAndPaymaster(rpcURL string, privateKeyHex string, fromOverride string, batch []types.BatchOperation, gasLimit uint64, gasPrice uint64, maxFeePerGas uint64, maxPriorityFeePerGas uint64, paymasterPrivateKeyHex string) (types.Transaction, error) {
+func buildSignedBatchTransactionFromWithFeeCapsAndPaymaster(rpcURL string, privateKeyHex string, fromOverride string, authPrivateKeyHexes []string, batch []types.BatchOperation, gasLimit uint64, gasPrice uint64, maxFeePerGas uint64, maxPriorityFeePerGas uint64, paymasterPrivateKeyHex string) (types.Transaction, error) {
 	if len(batch) == 0 {
 		return types.Transaction{}, fmt.Errorf("batch requires at least one operation")
 	}
 	return buildSignedTransactionFromSpec(rpcURL, privateKeyHex, signedTransactionSpec{
 		txType:                 types.TxBatch,
 		fromOverride:           fromOverride,
+		authPrivateKeyHexes:    authPrivateKeyHexes,
 		gasLimit:               gasLimit,
 		gasPrice:               gasPrice,
 		maxFeePerGas:           maxFeePerGas,
@@ -900,6 +906,7 @@ func buildSignedBatchTransactionFromWithFeeCapsAndPaymaster(rpcURL string, priva
 type signedTransactionSpec struct {
 	txType                 types.TxType
 	fromOverride           string
+	authPrivateKeyHexes    []string
 	to                     string
 	value                  uint64
 	gasLimit               uint64
@@ -919,6 +926,14 @@ func buildSignedTransactionFromSpec(rpcURL string, privateKeyHex string, spec si
 	if err != nil {
 		return types.Transaction{}, err
 	}
+	authKeys := []crypto.PrivateKey{key}
+	for _, authPrivateKeyHex := range spec.authPrivateKeyHexes {
+		authKey, err := crypto.PrivateKeyFromHex(authPrivateKeyHex)
+		if err != nil {
+			return types.Transaction{}, err
+		}
+		authKeys = append(authKeys, authKey)
+	}
 	var paymasterKey crypto.PrivateKey
 	var paymaster string
 	if strings.TrimSpace(spec.paymasterPrivateKeyHex) != "" {
@@ -934,7 +949,8 @@ func buildSignedTransactionFromSpec(rpcURL string, privateKeyHex string, spec si
 		from = override
 	}
 	signerField := ""
-	if !strings.EqualFold(from, signer) {
+	useAuthorizations := len(spec.authPrivateKeyHexes) > 0
+	if !useAuthorizations && !strings.EqualFold(from, signer) {
 		signerField = signer
 	}
 	var chainIDHex string
@@ -966,11 +982,28 @@ func buildSignedTransactionFromSpec(rpcURL string, privateKeyHex string, spec si
 		Payload:              spec.payload,
 		Batch:                spec.batch,
 	}
-	signature, err := crypto.Sign(key, tx.SigningBytes())
-	if err != nil {
-		return types.Transaction{}, err
+	if useAuthorizations {
+		if strings.TrimSpace(spec.fromOverride) == "" {
+			return types.Transaction{}, fmt.Errorf("multisig authorizations require --from")
+		}
+		tx.Authorizations = make([]types.Authorization, len(authKeys))
+		for i, authKey := range authKeys {
+			tx.Authorizations[i].Signer = crypto.AddressFromPrivateKey(authKey)
+		}
+		for i, authKey := range authKeys {
+			signature, err := crypto.Sign(authKey, tx.SigningBytes())
+			if err != nil {
+				return types.Transaction{}, err
+			}
+			tx.Authorizations[i].Signature = signature
+		}
+	} else {
+		signature, err := crypto.Sign(key, tx.SigningBytes())
+		if err != nil {
+			return types.Transaction{}, err
+		}
+		tx.Signature = signature
 	}
-	tx.Signature = signature
 	if paymasterKey != nil {
 		paymasterSignature, err := crypto.Sign(paymasterKey, tx.PaymasterSigningBytes())
 		if err != nil {

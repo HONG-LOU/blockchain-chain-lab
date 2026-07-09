@@ -52,6 +52,7 @@ type explorerTransaction struct {
 	GasLimit     uint64
 	GasPrice     uint64
 	BatchCount   int
+	AuthCount    int
 	Paymaster    string
 	PaymasterURL string
 }
@@ -234,6 +235,7 @@ func newExplorerTransaction(tx types.Transaction) explorerTransaction {
 		GasLimit:     tx.GasLimit,
 		GasPrice:     tx.GasPrice,
 		BatchCount:   len(tx.Batch),
+		AuthCount:    len(tx.Authorizations),
 		Paymaster:    tx.Paymaster,
 		PaymasterURL: explorerAccountURL(tx.Paymaster),
 	}
@@ -641,6 +643,7 @@ var explorerTransactionTemplate = template.Must(template.New("explorer-transacti
         <div class="field"><div class="label">Nonce</div><div>{{.Transaction.Nonce}}</div></div>
         <div class="field"><div class="label">Value</div><div>{{.Transaction.Value}}</div></div>
         {{if .Transaction.BatchCount}}<div class="field"><div class="label">Operations</div><div>{{.Transaction.BatchCount}}</div></div>{{end}}
+        {{if .Transaction.AuthCount}}<div class="field"><div class="label">Authorizations</div><div>{{.Transaction.AuthCount}}</div></div>{{end}}
         <div class="field"><div class="label">Gas Limit</div><div>{{.Transaction.GasLimit}}</div></div>
         <div class="field"><div class="label">Gas Price</div><div>{{.Transaction.GasPrice}}</div></div>
         {{if .Transaction.Paymaster}}<div class="field"><div class="label">Paymaster</div><div><a class="hash" href="{{.Transaction.PaymasterURL}}">{{.Transaction.Paymaster}}</a></div></div>{{end}}

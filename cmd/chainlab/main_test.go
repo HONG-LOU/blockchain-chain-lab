@@ -522,6 +522,62 @@ func TestBatchTransferCommandCanBuildSmartAccountTx(t *testing.T) {
 	}
 }
 
+func TestTransferCommandCanBuildMultisigAccountTx(t *testing.T) {
+	ownerAKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerBKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerA := crypto.AddressFromPrivateKey(ownerAKey)
+	ownerB := crypto.AddressFromPrivateKey(ownerBKey)
+	multisig := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	receiver := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    ownerAKey,
+		GenesisBalance: map[string]uint64{ownerA: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	var out bytes.Buffer
+	if err := transferCommand([]string{
+		"--rpc", server.URL,
+		"--from", multisig,
+		"--private-key", crypto.PrivateKeyToHex(ownerAKey),
+		"--auth-private-key", crypto.PrivateKeyToHex(ownerBKey),
+		"--to", receiver,
+		"--value", "100",
+		"--raw-only",
+	}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var response struct {
+		Transaction types.Transaction `json:"transaction"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	tx := response.Transaction
+	if tx.From != multisig || tx.Signer != "" || len(tx.Authorizations) != 2 {
+		t.Fatalf("multisig tx = %+v", tx)
+	}
+	if tx.Authorizations[0].Signer != ownerA || tx.Authorizations[1].Signer != ownerB {
+		t.Fatalf("authorizations = %+v", tx.Authorizations)
+	}
+	for _, authorization := range tx.Authorizations {
+		if !crypto.Verify(authorization.Signer, tx.SigningBytes(), authorization.Signature) {
+			t.Fatalf("authorization should verify: %+v", authorization)
+		}
+	}
+}
+
 func TestTransferCommandUsesPendingNonceAndQueryMempool(t *testing.T) {
 	key, err := crypto.GenerateKey()
 	if err != nil {

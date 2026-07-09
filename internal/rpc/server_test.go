@@ -468,6 +468,95 @@ func TestRPCExposesSmartAccountSigner(t *testing.T) {
 	}
 }
 
+func TestRPCExposesMultisigAuthorizationCount(t *testing.T) {
+	ownerAKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerBKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerA := chaincrypto.AddressFromPrivateKey(ownerAKey)
+	ownerB := chaincrypto.AddressFromPrivateKey(ownerBKey)
+	receiver := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    ownerAKey,
+		GenesisBalance: map[string]uint64{ownerA: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	deploy := signedRPCTransaction(t, ownerAKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxDeploy,
+		From:     ownerA,
+		Nonce:    0,
+		GasLimit: 80_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"code_id":   contracts.MultisigCodeID,
+			"owners":    ownerA + "," + ownerB,
+			"threshold": "2",
+		},
+	})
+	if err := n.SubmitTx(deploy); err != nil {
+		t.Fatal(err)
+	}
+	deployBlock, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	multisig := deployBlock.Receipts[0].ContractAddress
+
+	fund := signedRPCTransaction(t, ownerAKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     ownerA,
+		To:       multisig,
+		Nonce:    1,
+		Value:    50_000,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+	if err := n.SubmitTx(fund); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+
+	tx := authorizedRPCTransaction(t, []chaincrypto.PrivateKey{ownerAKey, ownerBKey}, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     multisig,
+		To:       receiver,
+		Nonce:    0,
+		Value:    100,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+	if err := n.SubmitTx(tx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+
+	txResult := callRPC(t, server.URL, "eth_getTransactionByHash", []any{tx.Hash()})
+	txMap, ok := txResult.(map[string]any)
+	if !ok {
+		t.Fatalf("transaction result type = %T", txResult)
+	}
+	if txMap["authorizationCount"] != "0x2" {
+		t.Fatalf("authorization count = %#v", txMap["authorizationCount"])
+	}
+}
+
 func TestRPCExposesValidatorSet(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {
@@ -1482,6 +1571,22 @@ func sponsoredRPCTransaction(t *testing.T, userKey chaincrypto.PrivateKey, payma
 		t.Fatal(err)
 	}
 	tx.PaymasterSignature = signature
+	return tx
+}
+
+func authorizedRPCTransaction(t *testing.T, keys []chaincrypto.PrivateKey, tx types.Transaction) types.Transaction {
+	t.Helper()
+	tx.Authorizations = make([]types.Authorization, len(keys))
+	for i, key := range keys {
+		tx.Authorizations[i].Signer = chaincrypto.AddressFromPrivateKey(key)
+	}
+	for i, key := range keys {
+		signature, err := chaincrypto.Sign(key, tx.SigningBytes())
+		if err != nil {
+			t.Fatal(err)
+		}
+		tx.Authorizations[i].Signature = signature
+	}
 	return tx
 }
 
