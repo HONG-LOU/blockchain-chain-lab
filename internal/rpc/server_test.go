@@ -361,6 +361,86 @@ func TestWebSocketEthSubscribeNewHeadsPublishesProducedBlocks(t *testing.T) {
 	}
 }
 
+func TestWebSocketEthSubscribeNewPendingTransactionsPublishesAcceptedTransactionHashes(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	bobKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob := chaincrypto.AddressFromPrivateKey(bobKey)
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	conn, reader := openWebSocket(t, server.URL, "/rpc/ws")
+	defer conn.Close()
+	writeWebSocketText(t, conn, `{"jsonrpc":"2.0","id":1,"method":"eth_subscribe","params":["newPendingTransactions"]}`)
+	subscribeRaw := readWebSocketText(t, conn, reader)
+	var subscribeResp struct {
+		ID     int    `json:"id"`
+		Result string `json:"result"`
+		Error  string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(subscribeRaw), &subscribeResp); err != nil {
+		t.Fatal(err)
+	}
+	if subscribeResp.ID != 1 || subscribeResp.Error != "" || subscribeResp.Result == "" {
+		t.Fatalf("subscribe pending response = %#v raw=%s", subscribeResp, subscribeRaw)
+	}
+
+	tx := signedRPCTransaction(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     alice,
+		To:       bob,
+		Nonce:    0,
+		Value:    12,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+	body, err := json.Marshal(tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post(server.URL+"/tx", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("submit status = %d", resp.StatusCode)
+	}
+
+	notificationRaw := readWebSocketText(t, conn, reader)
+	var notification struct {
+		Method string `json:"method"`
+		Params struct {
+			Subscription string `json:"subscription"`
+			Result       string `json:"result"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal([]byte(notificationRaw), &notification); err != nil {
+		t.Fatal(err)
+	}
+	if notification.Method != "eth_subscription" || notification.Params.Subscription != subscribeResp.Result {
+		t.Fatalf("pending notification envelope = %#v raw=%s", notification, notificationRaw)
+	}
+	if notification.Params.Result != tx.Hash() {
+		t.Fatalf("pending notification hash = %s, want %s", notification.Params.Result, tx.Hash())
+	}
+}
+
 func TestWebSocketEthSubscribeLogsPublishesMatchingContractLogs(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {

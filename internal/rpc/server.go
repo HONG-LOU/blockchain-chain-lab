@@ -30,25 +30,27 @@ func NewServer(n *node.Node) http.Handler {
 
 func NewServerWithPeers(n *node.Node, peers []string) http.Handler {
 	server := &Server{
-		node:       n,
-		peers:      append([]string(nil), peers...),
-		client:     &http.Client{Timeout: 5 * time.Second},
-		filters:    newLogFilterStore(),
-		wsNewHeads: make(map[string]chan types.Block),
-		wsLogs:     make(map[string]*wsLogSubscription),
+		node:                  n,
+		peers:                 append([]string(nil), peers...),
+		client:                &http.Client{Timeout: 5 * time.Second},
+		filters:               newLogFilterStore(),
+		wsNewHeads:            make(map[string]chan types.Block),
+		wsLogs:                make(map[string]*wsLogSubscription),
+		wsPendingTransactions: make(map[string]chan string),
 	}
 	return server.routes()
 }
 
 type Server struct {
-	node       *node.Node
-	peers      []string
-	client     *http.Client
-	filters    *logFilterStore
-	wsMu       sync.Mutex
-	nextWSID   uint64
-	wsNewHeads map[string]chan types.Block
-	wsLogs     map[string]*wsLogSubscription
+	node                  *node.Node
+	peers                 []string
+	client                *http.Client
+	filters               *logFilterStore
+	wsMu                  sync.Mutex
+	nextWSID              uint64
+	wsNewHeads            map[string]chan types.Block
+	wsLogs                map[string]*wsLogSubscription
+	wsPendingTransactions map[string]chan string
 }
 
 type wsLogSubscription struct {
@@ -147,6 +149,7 @@ func (s *Server) routes() http.Handler {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
+		s.notifyPendingTransaction(tx)
 		peerErrors := s.broadcastTransaction(tx)
 		writeJSON(w, http.StatusAccepted, map[string]any{"status": "accepted", "hash": tx.Hash(), "peer_errors": peerErrors})
 	})
@@ -160,6 +163,7 @@ func (s *Server) routes() http.Handler {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
+		s.notifyPendingTransaction(tx)
 		peerErrors := s.broadcastTransaction(tx)
 		writeJSON(w, http.StatusAccepted, map[string]any{"status": "accepted", "hash": tx.Hash(), "peer_errors": peerErrors})
 	})
@@ -174,6 +178,7 @@ func (s *Server) routes() http.Handler {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
+		s.notifyPendingTransaction(tx)
 		peerErrors := s.broadcastTransaction(tx)
 		writeJSON(w, http.StatusAccepted, map[string]any{"status": "accepted", "hash": tx.Hash(), "peer_errors": peerErrors})
 	})
@@ -187,6 +192,7 @@ func (s *Server) routes() http.Handler {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
+		s.notifyPendingTransaction(tx)
 		writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted", "hash": tx.Hash()})
 	})
 	mux.HandleFunc("POST /peer/block", func(w http.ResponseWriter, r *http.Request) {
@@ -392,6 +398,11 @@ func (s *Server) handleWebSocketJSONRPC(w http.ResponseWriter, r *http.Request) 
 				localSubscriptions[id] = struct{}{}
 				go s.writeLogNotifications(conn, &writeMu, id, events)
 				writeWebSocketRPCResponse(conn, &writeMu, rpcResponse{ID: request.ID, Result: id})
+			case "newPendingTransactions":
+				id, events := s.registerPendingTransactionSubscription()
+				localSubscriptions[id] = struct{}{}
+				go s.writePendingTransactionNotifications(conn, &writeMu, id, events)
+				writeWebSocketRPCResponse(conn, &writeMu, rpcResponse{ID: request.ID, Result: id})
 			default:
 				writeWebSocketRPCResponse(conn, &writeMu, rpcResponse{ID: request.ID, Error: "unsupported subscription"})
 			}
@@ -559,7 +570,10 @@ func (s *Server) unregisterWebSocketSubscription(id string) bool {
 	if s.unregisterNewHeadSubscription(id) {
 		return true
 	}
-	return s.unregisterLogSubscription(id)
+	if s.unregisterLogSubscription(id) {
+		return true
+	}
+	return s.unregisterPendingTransactionSubscription(id)
 }
 
 func (s *Server) notifyNewHead(block types.Block) {
@@ -586,6 +600,40 @@ func (s *Server) notifyLogs(block types.Block) {
 	}
 }
 
+func (s *Server) registerPendingTransactionSubscription() (string, <-chan string) {
+	s.wsMu.Lock()
+	defer s.wsMu.Unlock()
+	s.nextWSID++
+	id := quantity(s.nextWSID)
+	events := make(chan string, 16)
+	s.wsPendingTransactions[id] = events
+	return id, events
+}
+
+func (s *Server) unregisterPendingTransactionSubscription(id string) bool {
+	s.wsMu.Lock()
+	defer s.wsMu.Unlock()
+	events, ok := s.wsPendingTransactions[id]
+	if !ok {
+		return false
+	}
+	delete(s.wsPendingTransactions, id)
+	close(events)
+	return true
+}
+
+func (s *Server) notifyPendingTransaction(tx types.Transaction) {
+	hash := tx.Hash()
+	s.wsMu.Lock()
+	defer s.wsMu.Unlock()
+	for _, events := range s.wsPendingTransactions {
+		select {
+		case events <- hash:
+		default:
+		}
+	}
+}
+
 func (s *Server) writeNewHeadNotifications(conn net.Conn, writeMu *sync.Mutex, id string, events <-chan types.Block) {
 	for block := range events {
 		writeWebSocketJSON(conn, writeMu, map[string]any{
@@ -607,6 +655,19 @@ func (s *Server) writeLogNotifications(conn net.Conn, writeMu *sync.Mutex, id st
 			"params": map[string]any{
 				"subscription": id,
 				"result":       log,
+			},
+		})
+	}
+}
+
+func (s *Server) writePendingTransactionNotifications(conn net.Conn, writeMu *sync.Mutex, id string, events <-chan string) {
+	for hash := range events {
+		writeWebSocketJSON(conn, writeMu, map[string]any{
+			"jsonrpc": "2.0",
+			"method":  "eth_subscription",
+			"params": map[string]any{
+				"subscription": id,
+				"result":       hash,
 			},
 		})
 	}
@@ -1153,6 +1214,7 @@ func (s *Server) handleSingleJSONRPC(w http.ResponseWriter, request rpcRequest) 
 			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
 			return
 		}
+		s.notifyPendingTransaction(tx)
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: tx.Hash()})
 	case "chain_head":
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: n.Head()})
@@ -1193,6 +1255,7 @@ func (s *Server) handleSingleJSONRPC(w http.ResponseWriter, request rpcRequest) 
 			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
 			return
 		}
+		s.notifyPendingTransaction(tx)
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: map[string]string{"hash": tx.Hash()}})
 	case "chain_sendUserOperation":
 		tx, err := parseRPCTransactionParam(request.Params)
@@ -1208,6 +1271,7 @@ func (s *Server) handleSingleJSONRPC(w http.ResponseWriter, request rpcRequest) 
 			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
 			return
 		}
+		s.notifyPendingTransaction(tx)
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: map[string]string{"hash": tx.Hash()}})
 	case "txpool_status":
 		pool := n.TxPool()
@@ -1267,6 +1331,7 @@ func (s *Server) handleSingleJSONRPC(w http.ResponseWriter, request rpcRequest) 
 			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
 			return
 		}
+		s.notifyPendingTransaction(tx)
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: map[string]string{"hash": tx.Hash()}})
 	default:
 		writeJSON(w, http.StatusNotFound, rpcResponse{ID: request.ID, Error: "unknown method"})
