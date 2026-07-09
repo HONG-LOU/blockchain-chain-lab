@@ -247,6 +247,35 @@ func TestJSONRPCBatchRequestsPreserveOrder(t *testing.T) {
 	}
 }
 
+func TestJSONRPCExposesClientAndNetworkProbeMethods(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := node.New(node.Config{
+		ChainID:     "chainlab-local",
+		ProposerKey: key,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	if got := callRPC(t, server.URL, "web3_clientVersion", []any{}); got != "ChainLab/dev" {
+		t.Fatalf("web3_clientVersion = %#v", got)
+	}
+	if got := callRPC(t, server.URL, "net_version", []any{}); got != "31337" {
+		t.Fatalf("net_version = %#v", got)
+	}
+	if got := callRPC(t, server.URL, "net_listening", []any{}); got != true {
+		t.Fatalf("net_listening = %#v", got)
+	}
+	if got := callRPC(t, server.URL, "eth_syncing", []any{}); got != false {
+		t.Fatalf("eth_syncing = %#v", got)
+	}
+}
+
 func TestEVMBlockHashAndIndexedTransactionReads(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {
@@ -1841,6 +1870,61 @@ func TestEthLogFilterTracksIncrementalChanges(t *testing.T) {
 	}
 	if uninstalled := callRPC(t, server.URL, "eth_uninstallFilter", []any{filterID}); uninstalled != false {
 		t.Fatalf("second uninstall filter = %#v", uninstalled)
+	}
+}
+
+func TestEthBlockFilterTracksNewBlockHashes(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := node.New(node.Config{
+		ChainID:     "chainlab-local",
+		ProposerKey: key,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	filterID, ok := callRPC(t, server.URL, "eth_newBlockFilter", []any{}).(string)
+	if !ok || !strings.HasPrefix(filterID, "0x") {
+		t.Fatalf("filter id = %#v", filterID)
+	}
+
+	firstBlock, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes := callRPC(t, server.URL, "eth_getFilterChanges", []any{filterID})
+	hashes, ok := changes.([]any)
+	if !ok || len(hashes) != 1 || hashes[0] != firstBlock.Hash() {
+		t.Fatalf("first block filter changes = %#v", changes)
+	}
+	if empty := callRPC(t, server.URL, "eth_getFilterChanges", []any{filterID}); len(empty.([]any)) != 0 {
+		t.Fatalf("second block filter changes = %#v", empty)
+	}
+
+	secondBlock, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	thirdBlock, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes = callRPC(t, server.URL, "eth_getFilterChanges", []any{filterID})
+	hashes, ok = changes.([]any)
+	if !ok || len(hashes) != 2 || hashes[0] != secondBlock.Hash() || hashes[1] != thirdBlock.Hash() {
+		t.Fatalf("later block filter changes = %#v", changes)
+	}
+
+	if uninstalled := callRPC(t, server.URL, "eth_uninstallFilter", []any{filterID}); uninstalled != true {
+		t.Fatalf("uninstall block filter = %#v", uninstalled)
+	}
+	if uninstalled := callRPC(t, server.URL, "eth_uninstallFilter", []any{filterID}); uninstalled != false {
+		t.Fatalf("second block uninstall = %#v", uninstalled)
 	}
 }
 

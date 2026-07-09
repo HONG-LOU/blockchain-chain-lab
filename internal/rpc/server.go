@@ -379,8 +379,16 @@ func (r *rpcResponseRecorder) Write(data []byte) (int, error) {
 func (s *Server) handleSingleJSONRPC(w http.ResponseWriter, request rpcRequest) {
 	n := s.node
 	switch request.Method {
+	case "web3_clientVersion":
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: "ChainLab/dev"})
+	case "net_version":
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: strconv.FormatUint(chainNumber(n.ChainID()), 10)})
+	case "net_listening":
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: true})
 	case "eth_chainId":
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: quantity(chainNumber(n.ChainID()))})
+	case "eth_syncing":
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: false})
 	case "eth_blockNumber":
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: quantity(n.Head().Header.Height)})
 	case "eth_gasPrice":
@@ -669,6 +677,8 @@ func (s *Server) handleSingleJSONRPC(w http.ResponseWriter, request rpcRequest) 
 			return
 		}
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: s.registerLogFilter(filter, nextBlock)})
+	case "eth_newBlockFilter":
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: s.registerBlockFilter(n.Finality().HeadHeight + 1)})
 	case "eth_getFilterLogs":
 		params, err := rpcParams(request.Params)
 		if err != nil {
@@ -697,12 +707,12 @@ func (s *Server) handleSingleJSONRPC(w http.ResponseWriter, request rpcRequest) 
 			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
 			return
 		}
-		logs, ok := s.logFilterChanges(filterID)
+		changes, ok := s.filterChanges(filterID)
 		if !ok {
 			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "filter not found"})
 			return
 		}
-		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: logs})
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: changes})
 	case "eth_uninstallFilter":
 		params, err := rpcParams(request.Params)
 		if err != nil {
@@ -714,7 +724,7 @@ func (s *Server) handleSingleJSONRPC(w http.ResponseWriter, request rpcRequest) 
 			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: s.uninstallLogFilter(filterID)})
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: s.uninstallFilter(filterID)})
 	case "eth_call":
 		params, err := rpcParams(request.Params)
 		if err != nil || len(params) < 1 {

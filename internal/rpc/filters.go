@@ -7,9 +7,10 @@ import (
 )
 
 type logFilterStore struct {
-	mu      sync.Mutex
-	next    uint64
-	filters map[string]storedLogFilter
+	mu           sync.Mutex
+	next         uint64
+	filters      map[string]storedLogFilter
+	blockFilters map[string]uint64
 }
 
 type storedLogFilter struct {
@@ -18,7 +19,10 @@ type storedLogFilter struct {
 }
 
 func newLogFilterStore() *logFilterStore {
-	return &logFilterStore{filters: make(map[string]storedLogFilter)}
+	return &logFilterStore{
+		filters:      make(map[string]storedLogFilter),
+		blockFilters: make(map[string]uint64),
+	}
 }
 
 func (s *Server) registerLogFilter(filter logFilter, nextBlock uint64) string {
@@ -31,6 +35,16 @@ func (s *Server) registerLogFilter(filter logFilter, nextBlock uint64) string {
 	return id
 }
 
+func (s *Server) registerBlockFilter(nextBlock uint64) string {
+	s.filters.mu.Lock()
+	defer s.filters.mu.Unlock()
+
+	s.filters.next++
+	id := quantity(s.filters.next)
+	s.filters.blockFilters[id] = nextBlock
+	return id
+}
+
 func (s *Server) logFilterLogs(id string) ([]map[string]any, bool) {
 	latest := s.node.Finality().HeadHeight
 	s.filters.mu.Lock()
@@ -40,6 +54,13 @@ func (s *Server) logFilterLogs(id string) ([]map[string]any, bool) {
 		return nil, false
 	}
 	return evmLogs(s.node, stored.filter.resolvedToBlock(latest)), true
+}
+
+func (s *Server) filterChanges(id string) (any, bool) {
+	if logs, ok := s.logFilterChanges(id); ok {
+		return logs, true
+	}
+	return s.blockFilterChanges(id)
 }
 
 func (s *Server) logFilterChanges(id string) ([]map[string]any, bool) {
@@ -65,14 +86,43 @@ func (s *Server) logFilterChanges(id string) ([]map[string]any, bool) {
 	return evmLogs(s.node, filter), true
 }
 
-func (s *Server) uninstallLogFilter(id string) bool {
+func (s *Server) blockFilterChanges(id string) ([]string, bool) {
+	latest := s.node.Finality().HeadHeight
+	s.filters.mu.Lock()
+	nextBlock, ok := s.filters.blockFilters[id]
+	if !ok {
+		s.filters.mu.Unlock()
+		return nil, false
+	}
+	if nextBlock > latest {
+		s.filters.mu.Unlock()
+		return []string{}, true
+	}
+	s.filters.blockFilters[id] = latest + 1
+	s.filters.mu.Unlock()
+
+	hashes := make([]string, 0, latest-nextBlock+1)
+	for height := nextBlock; height <= latest; height++ {
+		block, ok := s.node.Block(height)
+		if !ok {
+			continue
+		}
+		hashes = append(hashes, block.Hash())
+	}
+	return hashes, true
+}
+
+func (s *Server) uninstallFilter(id string) bool {
 	s.filters.mu.Lock()
 	defer s.filters.mu.Unlock()
 
-	if _, ok := s.filters.filters[id]; !ok {
+	_, logOK := s.filters.filters[id]
+	_, blockOK := s.filters.blockFilters[id]
+	if !logOK && !blockOK {
 		return false
 	}
 	delete(s.filters.filters, id)
+	delete(s.filters.blockFilters, id)
 	return true
 }
 
