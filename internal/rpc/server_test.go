@@ -1234,6 +1234,55 @@ func TestRPCExposesTxPoolAndPendingNonce(t *testing.T) {
 	}
 }
 
+func TestRPCTransactionLookupIncludesPendingTransactions(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	tx := signedTransfer(t, key, alice, bob, 0, 100)
+	if err := n.SubmitTx(tx); err != nil {
+		t.Fatal(err)
+	}
+
+	pending := callRPC(t, server.URL, "eth_getTransactionByHash", []any{tx.Hash()})
+	pendingMap, ok := pending.(map[string]any)
+	if !ok {
+		t.Fatalf("pending transaction type = %T", pending)
+	}
+	if pendingMap["hash"] != tx.Hash() || pendingMap["blockHash"] != nil || pendingMap["blockNumber"] != nil || pendingMap["transactionIndex"] != nil {
+		t.Fatalf("pending transaction = %#v", pendingMap)
+	}
+	if pendingMap["from"] != strings.ToLower(alice) || pendingMap["to"] != bob || pendingMap["nonce"] != "0x0" {
+		t.Fatalf("pending transaction fields = %#v", pendingMap)
+	}
+	if receipt := callRPC(t, server.URL, "eth_getTransactionReceipt", []any{tx.Hash()}); receipt != nil {
+		t.Fatalf("pending receipt = %#v", receipt)
+	}
+
+	block, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mined := callRPC(t, server.URL, "eth_getTransactionByHash", []any{tx.Hash()})
+	minedMap, ok := mined.(map[string]any)
+	if !ok || minedMap["blockHash"] != block.Hash() || minedMap["blockNumber"] != "0x1" || minedMap["transactionIndex"] != "0x0" {
+		t.Fatalf("mined transaction = %#v", mined)
+	}
+}
+
 func TestRPCSendRawTransactionSubmitsSignedTx(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {

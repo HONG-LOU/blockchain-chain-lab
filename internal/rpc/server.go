@@ -491,6 +491,10 @@ func (s *Server) handleSingleJSONRPC(w http.ResponseWriter, request rpcRequest) 
 		}
 		record, ok := n.Transaction(txHash)
 		if !ok {
+			if tx, ok := pendingTransactionByHash(n.TxPool(), txHash); ok {
+				writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: evmPendingTransaction(tx)})
+				return
+			}
 			writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: nil})
 			return
 		}
@@ -1562,6 +1566,19 @@ func evmPendingTransaction(tx types.Transaction) map[string]any {
 		"input":                "0x",
 		"type":                 "0x0",
 	}
+}
+
+func pendingTransactionByHash(pool node.MempoolSnapshot, txHash string) (types.Transaction, bool) {
+	txHash = strings.ToLower(strings.TrimSpace(txHash))
+	if txHash == "" {
+		return types.Transaction{}, false
+	}
+	for _, tx := range pool.Pending {
+		if strings.ToLower(tx.Hash()) == txHash {
+			return tx, true
+		}
+	}
+	return types.Transaction{}, false
 }
 
 func evmTxPool(pool node.MempoolSnapshot) map[string]any {
