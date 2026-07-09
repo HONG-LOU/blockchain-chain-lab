@@ -1722,6 +1722,77 @@ func TestRPCBroadcastsProducedBlocksToPeers(t *testing.T) {
 	}
 }
 
+func TestRPCBroadcastsFinalityVotesToPeers(t *testing.T) {
+	keyA, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyB, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyC, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validatorA := chaincrypto.AddressFromPrivateKey(keyA)
+	validatorB := chaincrypto.AddressFromPrivateKey(keyB)
+	validatorC := chaincrypto.AddressFromPrivateKey(keyC)
+	validators := []string{validatorA, validatorB, validatorC}
+	genesisBalances := map[string]uint64{validatorA: 1_000_000}
+	peerNode, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    keyB,
+		GenesisBalance: genesisBalances,
+		Validators:     validators,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	peerServer := httptest.NewServer(chainrpc.NewServer(peerNode))
+	defer peerServer.Close()
+	localNode, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    keyA,
+		GenesisBalance: genesisBalances,
+		Validators:     validators,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	localServer := httptest.NewServer(chainrpc.NewServerWithPeers(localNode, []string{peerServer.URL}))
+	defer localServer.Close()
+
+	resp, err := http.Post(localServer.URL+"/chain/produce", "application/json", bytes.NewReader([]byte("{}")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("produce status = %d", resp.StatusCode)
+	}
+	block, ok := peerNode.Block(1)
+	if !ok {
+		t.Fatal("peer should import produced block before votes")
+	}
+
+	for _, key := range []chaincrypto.PrivateKey{keyA, keyB, keyC} {
+		vote, err := consensus.SignFinalityVote(key, block)
+		if err != nil {
+			t.Fatal(err)
+		}
+		callRPC(t, localServer.URL, "chain_sendFinalityVote", []any{vote})
+	}
+
+	peerFinality := peerNode.Finality()
+	if peerFinality.FinalizedSource != "bft_certificate" || peerFinality.CertifiedSigners != 3 {
+		t.Fatalf("peer finality after gossiped votes = %+v", peerFinality)
+	}
+	certifiedBlock, ok := peerNode.Block(1)
+	if !ok || certifiedBlock.FinalityCertificate == nil {
+		t.Fatalf("peer certified block = %+v ok=%v", certifiedBlock, ok)
+	}
+}
+
 func signedTransfer(t *testing.T, key chaincrypto.PrivateKey, from string, to string, nonce uint64, value uint64) types.Transaction {
 	t.Helper()
 	tx := types.Transaction{

@@ -175,6 +175,18 @@ func (s *Server) routes() http.Handler {
 		}
 		writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted", "hash": block.Hash()})
 	})
+	mux.HandleFunc("POST /peer/finality-vote", func(w http.ResponseWriter, r *http.Request) {
+		vote, err := decodeFinalityVote(r)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := s.node.SubmitFinalityVote(vote); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted", "validator": vote.Validator})
+	})
 	mux.HandleFunc("POST /rpc", s.handleJSONRPC)
 	return mux
 }
@@ -204,6 +216,14 @@ func decodeRawTransaction(r *http.Request) (types.Transaction, error) {
 	return tx, nil
 }
 
+func decodeFinalityVote(r *http.Request) (types.FinalitySignature, error) {
+	var vote types.FinalitySignature
+	if err := json.NewDecoder(r.Body).Decode(&vote); err != nil {
+		return types.FinalitySignature{}, fmt.Errorf("invalid finality vote json")
+	}
+	return vote, nil
+}
+
 type faucetRequest struct {
 	Address string `json:"address"`
 	To      string `json:"to"`
@@ -231,6 +251,10 @@ func (s *Server) broadcastTransaction(tx types.Transaction) []string {
 
 func (s *Server) broadcastBlock(block types.Block) []string {
 	return s.broadcast("/peer/block", block)
+}
+
+func (s *Server) broadcastFinalityVote(vote types.FinalitySignature) []string {
+	return s.broadcast("/peer/finality-vote", vote)
 }
 
 func (s *Server) broadcast(path string, payload any) []string {
@@ -538,6 +562,7 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
 			return
 		}
+		_ = s.broadcastFinalityVote(vote)
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: n.Finality()})
 	case "chain_feeMarket":
 		feeMarket := n.FeeMarket()
