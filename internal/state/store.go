@@ -199,6 +199,14 @@ func (s *Store) SetStorage(address string, key string, value string) {
 	s.accounts[normalize(address)] = account
 }
 
+func (s *Store) DeleteStorage(address string, key string) {
+	account := s.account(address)
+	if account.Storage != nil {
+		delete(account.Storage, key)
+	}
+	s.accounts[normalize(address)] = account
+}
+
 func (s *Store) GetStorage(address string, key string) string {
 	account := s.account(address)
 	return account.Storage[key]

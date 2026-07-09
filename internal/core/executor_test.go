@@ -641,6 +641,289 @@ func TestDelegatedEOARejectsUnauthorizedSignerAndClearDisablesDelegation(t *test
 	}
 }
 
+func TestAccountSessionKeyCanTransferWithinPolicy(t *testing.T) {
+	ownerKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := chaincrypto.AddressFromPrivateKey(ownerKey)
+	session := chaincrypto.AddressFromPrivateKey(sessionKey)
+	smartAccount := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	receiver := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	store := state.NewStore()
+	store.SetCodeID(smartAccount, contracts.AccountCodeID)
+	store.SetStorage(smartAccount, "owner", owner)
+	store.SetBalance(smartAccount, 200_000)
+	executor := core.NewExecutor("chainlab-local", "0xfee0000000000000000000000000000000000000", contracts.NewRuntimeWithDefaults())
+
+	addSession := signedTx(t, ownerKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxSessionKey,
+		From:     smartAccount,
+		Signer:   owner,
+		Nonce:    0,
+		GasLimit: 45_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"action":  "add",
+			"key":     session,
+			"limit":   "100",
+			"expires": "10",
+			"to":      receiver,
+		},
+	})
+	addReceipt, err := executor.ExecuteWithContext(store, addSession, core.ExecutionContext{BlockHeight: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(addReceipt.Events) == 0 || addReceipt.Events[0].Type != "account.session_key_added" {
+		t.Fatalf("session add events = %#v", addReceipt.Events)
+	}
+	if got := store.GetStorage(smartAccount, "session:"+session+":limit"); got != "100" {
+		t.Fatalf("session limit = %q", got)
+	}
+	if got := store.GetStorage(smartAccount, "session:"+session+":spent"); got != "0" {
+		t.Fatalf("session spent = %q", got)
+	}
+
+	transfer := signedTx(t, sessionKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     smartAccount,
+		Signer:   session,
+		To:       receiver,
+		Nonce:    1,
+		Value:    40,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+	transferReceipt, err := executor.ExecuteWithContext(store, transfer, core.ExecutionContext{BlockHeight: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := store.GetAccount(smartAccount).Nonce; got != 2 {
+		t.Fatalf("smart account nonce = %d", got)
+	}
+	if got := store.GetAccount(receiver).Balance; got != 40 {
+		t.Fatalf("receiver balance = %d", got)
+	}
+	if got := store.GetAccount(session).Nonce; got != 0 {
+		t.Fatalf("session nonce = %d", got)
+	}
+	if got := store.GetStorage(smartAccount, "session:"+session+":spent"); got != "40" {
+		t.Fatalf("session spent after transfer = %q", got)
+	}
+	if len(transferReceipt.Events) < 2 || transferReceipt.Events[1].Type != "account.session_key_used" {
+		t.Fatalf("session transfer events = %#v", transferReceipt.Events)
+	}
+}
+
+func TestDelegatedEOASessionKeyCanTransferWithinPolicy(t *testing.T) {
+	eoaKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	eoa := chaincrypto.AddressFromPrivateKey(eoaKey)
+	owner := chaincrypto.AddressFromPrivateKey(ownerKey)
+	session := chaincrypto.AddressFromPrivateKey(sessionKey)
+	receiver := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	store := state.NewStore()
+	store.SetDelegatedCodeID(eoa, contracts.AccountCodeID)
+	store.SetStorage(eoa, "owner", owner)
+	store.SetBalance(eoa, 200_000)
+	executor := core.NewExecutor("chainlab-local", "0xfee0000000000000000000000000000000000000", contracts.NewRuntimeWithDefaults())
+
+	addSession := signedTx(t, ownerKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxSessionKey,
+		From:     eoa,
+		Signer:   owner,
+		Nonce:    0,
+		GasLimit: 45_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"action": "add",
+			"key":    session,
+			"limit":  "50",
+			"to":     receiver,
+		},
+	})
+	if _, err := executor.ExecuteWithContext(store, addSession, core.ExecutionContext{BlockHeight: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	transfer := signedTx(t, sessionKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     eoa,
+		Signer:   session,
+		To:       receiver,
+		Nonce:    1,
+		Value:    25,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+	if _, err := executor.ExecuteWithContext(store, transfer, core.ExecutionContext{BlockHeight: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.GetAccount(receiver).Balance; got != 25 {
+		t.Fatalf("receiver balance = %d", got)
+	}
+	if got := store.GetStorage(eoa, "session:"+session+":spent"); got != "25" {
+		t.Fatalf("session spent = %q", got)
+	}
+	if got := store.GetAccount(session).Nonce; got != 0 {
+		t.Fatalf("session nonce = %d", got)
+	}
+}
+
+func TestAccountSessionKeyRejectsInvalidPolicyUseAndRevocation(t *testing.T) {
+	ownerKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	intruderKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := chaincrypto.AddressFromPrivateKey(ownerKey)
+	session := chaincrypto.AddressFromPrivateKey(sessionKey)
+	intruder := chaincrypto.AddressFromPrivateKey(intruderKey)
+	smartAccount := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	receiver := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	otherReceiver := "0xcccccccccccccccccccccccccccccccccccccccc"
+	store := state.NewStore()
+	store.SetCodeID(smartAccount, contracts.AccountCodeID)
+	store.SetStorage(smartAccount, "owner", owner)
+	store.SetStorage(smartAccount, "session:"+session+":limit", "50")
+	store.SetStorage(smartAccount, "session:"+session+":spent", "20")
+	store.SetStorage(smartAccount, "session:"+session+":expires", "5")
+	store.SetStorage(smartAccount, "session:"+session+":to", receiver)
+	store.SetBalance(smartAccount, 300_000)
+	executor := core.NewExecutor("chainlab-local", "0xfee0000000000000000000000000000000000000", contracts.NewRuntimeWithDefaults())
+
+	nonOwnerAdd := signedTx(t, intruderKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxSessionKey,
+		From:     smartAccount,
+		Signer:   intruder,
+		Nonce:    0,
+		GasLimit: 45_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"action": "add",
+			"key":    intruder,
+			"limit":  "10",
+		},
+	})
+	if _, err := executor.ExecuteWithContext(store, nonOwnerAdd, core.ExecutionContext{BlockHeight: 1}); err == nil {
+		t.Fatal("non-owner should not add session key")
+	}
+
+	overLimit := signedTx(t, sessionKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     smartAccount,
+		Signer:   session,
+		To:       receiver,
+		Nonce:    0,
+		Value:    31,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+	if _, err := executor.ExecuteWithContext(store, overLimit, core.ExecutionContext{BlockHeight: 1}); err == nil {
+		t.Fatal("session key should not exceed remaining limit")
+	}
+
+	wrongRecipient := signedTx(t, sessionKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     smartAccount,
+		Signer:   session,
+		To:       otherReceiver,
+		Nonce:    0,
+		Value:    10,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+	if _, err := executor.ExecuteWithContext(store, wrongRecipient, core.ExecutionContext{BlockHeight: 1}); err == nil {
+		t.Fatal("session key should not transfer to a disallowed recipient")
+	}
+
+	expired := signedTx(t, sessionKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     smartAccount,
+		Signer:   session,
+		To:       receiver,
+		Nonce:    0,
+		Value:    10,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+	if _, err := executor.ExecuteWithContext(store, expired, core.ExecutionContext{BlockHeight: 6}); err == nil {
+		t.Fatal("session key should expire after configured block height")
+	}
+	if got := store.GetAccount(smartAccount).Nonce; got != 0 {
+		t.Fatalf("nonce after rejected session attempts = %d", got)
+	}
+
+	revoke := signedTx(t, ownerKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxSessionKey,
+		From:     smartAccount,
+		Signer:   owner,
+		Nonce:    0,
+		GasLimit: 45_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"action": "revoke",
+			"key":    session,
+		},
+	})
+	revokeReceipt, err := executor.ExecuteWithContext(store, revoke, core.ExecutionContext{BlockHeight: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(revokeReceipt.Events) == 0 || revokeReceipt.Events[0].Type != "account.session_key_revoked" {
+		t.Fatalf("session revoke events = %#v", revokeReceipt.Events)
+	}
+	if got := store.GetStorage(smartAccount, "session:"+session+":limit"); got != "" {
+		t.Fatalf("revoked session limit = %q", got)
+	}
+
+	afterRevoke := signedTx(t, sessionKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     smartAccount,
+		Signer:   session,
+		To:       receiver,
+		Nonce:    1,
+		Value:    10,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+	if _, err := executor.ExecuteWithContext(store, afterRevoke, core.ExecutionContext{BlockHeight: 1}); err == nil {
+		t.Fatal("revoked session key should not authorize transfer")
+	}
+}
+
 func TestSmartAccountRejectsUnauthorizedSigner(t *testing.T) {
 	ownerKey, err := chaincrypto.GenerateKey()
 	if err != nil {

@@ -540,6 +540,96 @@ func TestSetCodeCommandDelegatesEOAAndOwnerTransfer(t *testing.T) {
 	}
 }
 
+func TestSessionKeyCommandInstallsKeyAndSessionTransferWorks(t *testing.T) {
+	ownerKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := crypto.AddressFromPrivateKey(ownerKey)
+	session := crypto.AddressFromPrivateKey(sessionKey)
+	receiver := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    ownerKey,
+		GenesisBalance: map[string]uint64{owner: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	var deployOut bytes.Buffer
+	if err := deployCommand([]string{
+		"--rpc", server.URL,
+		"--private-key", crypto.PrivateKeyToHex(ownerKey),
+		"--code-id", contracts.AccountCodeID,
+		"--arg", "owner=" + owner,
+	}, &deployOut); err != nil {
+		t.Fatal(err)
+	}
+	deployBlock, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	account := deployBlock.Receipts[0].ContractAddress
+
+	var fundOut bytes.Buffer
+	if err := transferCommand([]string{
+		"--rpc", server.URL,
+		"--private-key", crypto.PrivateKeyToHex(ownerKey),
+		"--to", account,
+		"--value", "200000",
+	}, &fundOut); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+
+	var sessionOut bytes.Buffer
+	if err := sessionKeyCommand([]string{
+		"--rpc", server.URL,
+		"--from", account,
+		"--private-key", crypto.PrivateKeyToHex(ownerKey),
+		"--key", session,
+		"--limit", "100",
+		"--to", receiver,
+	}, &sessionOut); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+	if got := n.Account(account).Storage["session:"+session+":limit"]; got != "100" {
+		t.Fatalf("session limit = %q", got)
+	}
+
+	var transferOut bytes.Buffer
+	if err := transferCommand([]string{
+		"--rpc", server.URL,
+		"--from", account,
+		"--private-key", crypto.PrivateKeyToHex(sessionKey),
+		"--to", receiver,
+		"--value", "40",
+	}, &transferOut); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+	if receiverBalance := n.Account(receiver).Balance; receiverBalance != 40 {
+		t.Fatalf("receiver balance = %d", receiverBalance)
+	}
+	if got := n.Account(account).Storage["session:"+session+":spent"]; got != "40" {
+		t.Fatalf("session spent = %q", got)
+	}
+}
+
 func TestBatchTransferCommandCanBuildSmartAccountTx(t *testing.T) {
 	ownerKey, err := crypto.GenerateKey()
 	if err != nil {

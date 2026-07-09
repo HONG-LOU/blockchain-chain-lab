@@ -270,7 +270,7 @@ func faucetRequestCommand(args []string, out io.Writer) error {
 
 func txCommand(args []string, out io.Writer) {
 	if len(args) < 1 {
-		log.Fatal("usage: chainlab tx <transfer|batch-transfer|set-code|deploy|call|wasm-upload|stake|proposal-submit|vote|proposal-execute|validator-join|validator-leave|validator-slash|raw-submit>")
+		log.Fatal("usage: chainlab tx <transfer|batch-transfer|set-code|session-key|deploy|call|wasm-upload|stake|proposal-submit|vote|proposal-execute|validator-join|validator-leave|validator-slash|raw-submit>")
 	}
 	switch args[0] {
 	case "transfer":
@@ -283,6 +283,10 @@ func txCommand(args []string, out io.Writer) {
 		}
 	case "set-code":
 		if err := setCodeCommand(args[1:], out); err != nil {
+			log.Fatal(err)
+		}
+	case "session-key":
+		if err := sessionKeyCommand(args[1:], out); err != nil {
 			log.Fatal(err)
 		}
 	case "deploy":
@@ -515,6 +519,62 @@ func setCodeCommand(args []string, out io.Writer) error {
 		payload["owner"] = *owner
 	}
 	tx, err := buildSignedTransaction(*rpcURL, *privateKeyHex, types.TxSetCode, "", 0, *gasLimit, *gasPrice, payload)
+	if err != nil {
+		return err
+	}
+	response, err := submitTransaction(*rpcURL, tx)
+	if err != nil {
+		return err
+	}
+	return writeTo(out, response)
+}
+
+func sessionKeyCommand(args []string, out io.Writer) error {
+	flags := flag.NewFlagSet("tx session-key", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
+	from := flags.String("from", "", "account or delegated EOA address")
+	privateKeyHex := flags.String("private-key", "", "owner private key")
+	key := flags.String("key", "", "session key address")
+	limit := flags.Uint64("limit", 0, "session transfer value limit")
+	expires := flags.Uint64("expires", 0, "optional expiration block height")
+	to := flags.String("to", "", "optional allowed recipient address")
+	revoke := flags.Bool("revoke", false, "revoke the session key")
+	gasLimit := flags.Uint64("gas-limit", 45_000, "gas limit")
+	gasPrice := flags.Uint64("gas-price", 1, "gas price")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*from) == "" {
+		return fmt.Errorf("from account is required")
+	}
+	if strings.TrimSpace(*key) == "" {
+		return fmt.Errorf("session key is required")
+	}
+	payload := map[string]string{
+		"key": *key,
+	}
+	if *revoke {
+		payload["action"] = "revoke"
+	} else {
+		if *limit == 0 {
+			return fmt.Errorf("limit must be positive")
+		}
+		payload["action"] = "add"
+		payload["limit"] = strconv.FormatUint(*limit, 10)
+		if *expires != 0 {
+			payload["expires"] = strconv.FormatUint(*expires, 10)
+		}
+		if strings.TrimSpace(*to) != "" {
+			payload["to"] = *to
+		}
+	}
+	tx, err := buildSignedTransactionFromSpec(*rpcURL, *privateKeyHex, signedTransactionSpec{
+		txType:       types.TxSessionKey,
+		fromOverride: *from,
+		gasLimit:     *gasLimit,
+		gasPrice:     *gasPrice,
+		payload:      payload,
+	})
 	if err != nil {
 		return err
 	}

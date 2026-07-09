@@ -21,6 +21,7 @@ It currently implements:
 - ChainLab-native smart contract accounts through `account.v1`: a contract account holds the balance and nonce while its stored owner signs with the transaction `signer`
 - ChainLab-native multisig smart accounts through `multisig.v1`: a contract account enforces an owner threshold with multiple transaction authorizations
 - ChainLab-native EIP-7702-style delegated EOAs through `set_code`: an EOA keeps its address, balance, and nonce while delegating authorization to `account.v1`
+- ChainLab-native transfer session keys for `account.v1` and delegated EOAs: an owner installs a limited key with value cap, optional recipient allowlist, and optional block-height expiry
 - HTTP REST endpoints and a small JSON-RPC-style endpoint with single-request and batch-request bodies
 - persistent node snapshots with committed blocks, state, transaction index, and a canonical event index rebuilt on restart or reorg
 - local fork-choice that stores known branches and reorgs to a longer validated branch
@@ -146,7 +147,7 @@ go run ./cmd/chainlab tx deploy --rpc http://127.0.0.1:8547 --private-key <owner
 go run ./cmd/chainlab tx transfer --rpc http://127.0.0.1:8547 --from <multisig-contract-address> --private-key <owner-a-private-key> --auth-private-key <owner-b-private-key> --to <recipient> --value 100
 ```
 
-Multisig transactions use `authorizations`, one per owner signature. The transaction still consumes the multisig account nonce, spends the multisig account balance, and can use `--paymaster-private-key` for sponsored gas. This is a native threshold-account model, not Gnosis Safe compatibility, social recovery, session keys, or full ERC-4337 validation.
+Multisig transactions use `authorizations`, one per owner signature. The transaction still consumes the multisig account nonce, spends the multisig account balance, and can use `--paymaster-private-key` for sponsored gas. This is a native threshold-account model, not Gnosis Safe compatibility, social recovery, or full ERC-4337 validation. Session keys are a separate `account.v1` / delegated EOA slice.
 
 Delegate an EOA to `account.v1` and then transfer from that same EOA address with the owner key:
 
@@ -157,6 +158,17 @@ go run ./cmd/chainlab tx transfer --rpc http://127.0.0.1:8547 --from <delegated-
 ```
 
 The `set_code` transaction must be signed directly by the EOA being delegated. After inclusion, the EOA keeps its address, balance, and nonce, while `DelegatedCodeID=account.v1` makes the stored `owner` authorize future transfers through the transaction `signer`. `tx set-code --clear` removes the delegation. This is a ChainLab-native EIP-7702-style experiment, not Ethereum type-4 raw transaction decoding, authorization tuple RLP compatibility, arbitrary uploaded delegation code, or ERC-4337 EntryPoint support.
+
+Install a transfer-scoped session key on an `account.v1` account or delegated EOA, then spend with that temporary key:
+
+```powershell
+go run ./cmd/chainlab tx session-key --rpc http://127.0.0.1:8547 --from <account-or-delegated-eoa> --private-key <owner-private-key> --key <session-key-address> --limit 100 --expires 50 --to <recipient>
+go run ./cmd/chainlab chain produce --rpc http://127.0.0.1:8547
+go run ./cmd/chainlab tx transfer --rpc http://127.0.0.1:8547 --from <account-or-delegated-eoa> --private-key <session-private-key> --to <recipient> --value 25
+go run ./cmd/chainlab tx session-key --rpc http://127.0.0.1:8547 --from <account-or-delegated-eoa> --private-key <owner-private-key> --key <session-key-address> --revoke
+```
+
+Session key policy is stored in account storage under `session:<key>:...` keys and is committed into state roots and snapshots. This first slice only authorizes value transfers, tracks transferred value against `limit`, optionally restricts the recipient with `--to`, and optionally expires after a block height. It does not implement ERC-4337 `UserOperation`, ERC-7579 modules, social recovery, contract-call session policies, or a general policy engine.
 
 Build a signed raw ChainLab transaction without broadcasting, then submit it later:
 
@@ -279,7 +291,7 @@ go run ./cmd/chainlab query estimate-gas --rpc http://127.0.0.1:8547 --type call
 - `GET /param/{key}`
 - `GET /tx/{hash}`
 - `GET /txpool`
-- `POST /tx` for signed transactions, including `transfer`, `batch`, `set_code`, `deploy`, `call`, `wasm.upload`, staking, validator, and governance transaction types. Future-nonce transactions are accepted into a node-local queued pool and promoted when earlier nonces arrive. If a pending or queued transaction already has the same sender and nonce, ChainLab accepts a replacement only when the new legacy gas price or both EIP-1559 fee caps are bumped by at least 10 percent.
+- `POST /tx` for signed transactions, including `transfer`, `batch`, `set_code`, `account.session_key`, `deploy`, `call`, `wasm.upload`, staking, validator, and governance transaction types. Future-nonce transactions are accepted into a node-local queued pool and promoted when earlier nonces arrive. If a pending or queued transaction already has the same sender and nonce, ChainLab accepts a replacement only when the new legacy gas price or both EIP-1559 fee caps are bumped by at least 10 percent.
 - `POST /tx/raw`
 - `POST /faucet`
 - `POST /chain/produce`
@@ -298,7 +310,7 @@ Next useful milestones:
 
 - BFT timeout/round handling, richer fork-choice safety rules, and production-grade slashing economics
 - broader WASM ABI with deterministic runtime step limits, full calldata ABI parsing, and richer host functions
-- richer account abstraction, including policy-based paymasters, social recovery/session-key smart accounts, ERC-4337 compatibility, and fuller Ethereum EIP-7702 type-4 raw transaction compatibility
+- richer account abstraction, including policy-based paymasters, social recovery, broader session-key policies, ERC-4337 compatibility, and fuller Ethereum EIP-7702 type-4 raw transaction compatibility
 - richer contract explorer views with decoded native contract state and longer-lived external indexer support
 - richer governance thresholds, quorum rules, deposits, and upgrade proposal handlers
 - production-framework migration decision: OP Stack, Cosmos SDK, Avalanche L1, or another appchain stack

@@ -17,6 +17,7 @@ const (
 	TxDeploy          TxType = "deploy"
 	TxCall            TxType = "call"
 	TxSetCode         TxType = "set_code"
+	TxSessionKey      TxType = "account.session_key"
 	TxWASMUpload      TxType = "wasm.upload"
 	TxStake           TxType = "stake"
 	TxUnstake         TxType = "unstake"

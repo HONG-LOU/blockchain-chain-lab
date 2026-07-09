@@ -48,7 +48,7 @@ func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, 
 	if tx.ChainID != e.chainID {
 		return types.Receipt{}, fmt.Errorf("wrong chain id %q", tx.ChainID)
 	}
-	if err := validateTransactionAuthorization(store, tx); err != nil {
+	if err := validateTransactionAuthorization(store, tx, context.BlockHeight); err != nil {
 		return types.Receipt{}, err
 	}
 	if err := validatePaymasterAuthorization(tx); err != nil {
@@ -79,6 +79,13 @@ func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, 
 			return types.Receipt{}, err
 		}
 		receipt.Events = append(receipt.Events, types.Event{Type: "transfer", Attributes: map[string]string{"from": tx.From, "to": tx.To}})
+		sessionEvent, err := applySessionKeySpend(working, tx)
+		if err != nil {
+			return types.Receipt{}, err
+		}
+		if sessionEvent.Type != "" {
+			receipt.Events = append(receipt.Events, sessionEvent)
+		}
 	case types.TxBatch:
 		if len(tx.Batch) == 0 {
 			return types.Receipt{}, errors.New("batch requires at least one operation")
@@ -240,6 +247,12 @@ func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, 
 			return types.Receipt{}, err
 		}
 		receipt.Events = append(receipt.Events, types.Event{Type: eventType, Attributes: attributes})
+	case types.TxSessionKey:
+		event, err := executeSessionKey(working, tx)
+		if err != nil {
+			return types.Receipt{}, err
+		}
+		receipt.Events = append(receipt.Events, event)
 	case types.TxWASMUpload:
 		bytecode, err := parseWASMUploadPayload(tx.Payload)
 		if err != nil {
@@ -377,7 +390,7 @@ func tagBatchEvents(events []types.Event, index int) {
 	}
 }
 
-func validateTransactionAuthorization(store *state.Store, tx types.Transaction) error {
+func validateTransactionAuthorization(store *state.Store, tx types.Transaction, blockHeight uint64) error {
 	if tx.Type == types.TxSetCode {
 		if strings.TrimSpace(tx.Signer) != "" || len(tx.Authorizations) > 0 || tx.SignatureKind != "" {
 			return errors.New("set_code must be signed directly by from")
@@ -404,27 +417,17 @@ func validateTransactionAuthorization(store *state.Store, tx types.Transaction) 
 		return errors.New("invalid transaction signature")
 	}
 	account := store.GetAccount(tx.From)
-	if account.CodeID == "" && account.DelegatedCodeID == contracts.AccountCodeID {
-		owner := strings.ToLower(strings.TrimSpace(store.GetStorage(tx.From, "owner")))
-		if owner == "" {
-			return errors.New("delegated account owner is not set")
-		}
-		if signer != owner {
-			return errors.New("transaction signer is not delegated account owner")
-		}
-		return nil
-	}
-	if account.CodeID != contracts.AccountCodeID {
+	if !isAccountV1Authority(account) {
 		return errors.New("transaction signer requires account.v1 from account")
 	}
 	owner := strings.ToLower(strings.TrimSpace(store.GetStorage(tx.From, "owner")))
 	if owner == "" {
 		return errors.New("smart account owner is not set")
 	}
-	if signer != owner {
-		return errors.New("transaction signer is not smart account owner")
+	if signer == owner {
+		return nil
 	}
-	return nil
+	return validateSessionKeyAuthorization(store, tx, signer, blockHeight)
 }
 
 func validateEthereumType2Authorization(tx types.Transaction) error {
@@ -593,6 +596,8 @@ func EstimateGas(txType types.TxType) (uint64, error) {
 		return 45_000, nil
 	case types.TxSetCode:
 		return 45_000, nil
+	case types.TxSessionKey:
+		return 45_000, nil
 	case types.TxWASMUpload:
 		return 120_000, nil
 	case types.TxDeploy:
@@ -760,6 +765,177 @@ func executeSetCode(store *state.Store, tx types.Transaction) (string, map[strin
 	attributes["code_id"] = codeID
 	attributes["owner"] = owner
 	return "account.delegation_set", attributes, nil
+}
+
+type sessionKeyPolicy struct {
+	Key     string
+	Limit   uint64
+	Spent   uint64
+	Expires uint64
+	To      string
+}
+
+func executeSessionKey(store *state.Store, tx types.Transaction) (types.Event, error) {
+	account := store.GetAccount(tx.From)
+	if !isAccountV1Authority(account) {
+		return types.Event{}, errors.New("session key requires account.v1 from account")
+	}
+	owner := strings.ToLower(strings.TrimSpace(store.GetStorage(tx.From, "owner")))
+	if owner == "" || strings.ToLower(strings.TrimSpace(tx.Signer)) != owner {
+		return types.Event{}, errors.New("session key changes require account owner")
+	}
+	action := strings.ToLower(strings.TrimSpace(tx.Payload["action"]))
+	key := strings.ToLower(strings.TrimSpace(tx.Payload["key"]))
+	if key == "" {
+		return types.Event{}, errors.New("session key address is required")
+	}
+	prefix := sessionKeyStoragePrefix(key)
+	attributes := map[string]string{
+		"account": strings.ToLower(tx.From),
+		"key":     key,
+	}
+	switch action {
+	case "add":
+		limit, err := parsePositiveUint(tx.Payload["limit"], "session key limit")
+		if err != nil {
+			return types.Event{}, err
+		}
+		expires, err := parseOptionalUint(tx.Payload["expires"], "session key expires")
+		if err != nil {
+			return types.Event{}, err
+		}
+		allowedTo := strings.ToLower(strings.TrimSpace(tx.Payload["to"]))
+		store.SetStorage(tx.From, prefix+"limit", strconv.FormatUint(limit, 10))
+		store.SetStorage(tx.From, prefix+"spent", "0")
+		if expires == 0 {
+			store.DeleteStorage(tx.From, prefix+"expires")
+		} else {
+			store.SetStorage(tx.From, prefix+"expires", strconv.FormatUint(expires, 10))
+			attributes["expires"] = strconv.FormatUint(expires, 10)
+		}
+		if allowedTo == "" {
+			store.DeleteStorage(tx.From, prefix+"to")
+		} else {
+			store.SetStorage(tx.From, prefix+"to", allowedTo)
+			attributes["to"] = allowedTo
+		}
+		attributes["limit"] = strconv.FormatUint(limit, 10)
+		return types.Event{Type: "account.session_key_added", Attributes: attributes}, nil
+	case "revoke":
+		store.DeleteStorage(tx.From, prefix+"limit")
+		store.DeleteStorage(tx.From, prefix+"spent")
+		store.DeleteStorage(tx.From, prefix+"expires")
+		store.DeleteStorage(tx.From, prefix+"to")
+		return types.Event{Type: "account.session_key_revoked", Attributes: attributes}, nil
+	default:
+		return types.Event{}, errors.New("session key action must be add or revoke")
+	}
+}
+
+func validateSessionKeyAuthorization(store *state.Store, tx types.Transaction, signer string, blockHeight uint64) error {
+	if tx.Type != types.TxTransfer {
+		return errors.New("session key can only authorize transfer")
+	}
+	policy, err := parseSessionKeyPolicy(store, tx.From, signer)
+	if err != nil {
+		return err
+	}
+	if policy.Expires != 0 && blockHeight > policy.Expires {
+		return errors.New("session key expired")
+	}
+	if policy.To != "" && !strings.EqualFold(policy.To, tx.To) {
+		return errors.New("session key recipient not allowed")
+	}
+	if policy.Spent > policy.Limit {
+		return errors.New("session key spent exceeds limit")
+	}
+	remaining := policy.Limit - policy.Spent
+	if tx.Value > remaining {
+		return errors.New("session key transfer exceeds remaining limit")
+	}
+	return nil
+}
+
+func applySessionKeySpend(store *state.Store, tx types.Transaction) (types.Event, error) {
+	signer := strings.ToLower(strings.TrimSpace(tx.Signer))
+	if signer == "" {
+		return types.Event{}, nil
+	}
+	account := store.GetAccount(tx.From)
+	if !isAccountV1Authority(account) {
+		return types.Event{}, nil
+	}
+	owner := strings.ToLower(strings.TrimSpace(store.GetStorage(tx.From, "owner")))
+	if signer == owner {
+		return types.Event{}, nil
+	}
+	policy, err := parseSessionKeyPolicy(store, tx.From, signer)
+	if err != nil {
+		return types.Event{}, err
+	}
+	spent, err := checkedAdd(policy.Spent, tx.Value)
+	if err != nil {
+		return types.Event{}, err
+	}
+	store.SetStorage(tx.From, sessionKeyStoragePrefix(signer)+"spent", strconv.FormatUint(spent, 10))
+	return types.Event{Type: "account.session_key_used", Attributes: map[string]string{
+		"account": strings.ToLower(tx.From),
+		"key":     signer,
+		"spent":   strconv.FormatUint(spent, 10),
+		"value":   strconv.FormatUint(tx.Value, 10),
+	}}, nil
+}
+
+func parseSessionKeyPolicy(store *state.Store, account string, key string) (sessionKeyPolicy, error) {
+	key = strings.ToLower(strings.TrimSpace(key))
+	prefix := sessionKeyStoragePrefix(key)
+	limit, err := parsePositiveUint(store.GetStorage(account, prefix+"limit"), "session key limit")
+	if err != nil {
+		return sessionKeyPolicy{}, errors.New("session key is not authorized")
+	}
+	spent, err := parseOptionalUint(store.GetStorage(account, prefix+"spent"), "session key spent")
+	if err != nil {
+		return sessionKeyPolicy{}, err
+	}
+	expires, err := parseOptionalUint(store.GetStorage(account, prefix+"expires"), "session key expires")
+	if err != nil {
+		return sessionKeyPolicy{}, err
+	}
+	return sessionKeyPolicy{
+		Key:     key,
+		Limit:   limit,
+		Spent:   spent,
+		Expires: expires,
+		To:      strings.ToLower(strings.TrimSpace(store.GetStorage(account, prefix+"to"))),
+	}, nil
+}
+
+func sessionKeyStoragePrefix(key string) string {
+	return "session:" + strings.ToLower(strings.TrimSpace(key)) + ":"
+}
+
+func isAccountV1Authority(account types.Account) bool {
+	return account.CodeID == contracts.AccountCodeID || (account.CodeID == "" && account.DelegatedCodeID == contracts.AccountCodeID)
+}
+
+func parsePositiveUint(raw string, field string) (uint64, error) {
+	value, err := strconv.ParseUint(strings.TrimSpace(raw), 10, 64)
+	if err != nil || value == 0 {
+		return 0, fmt.Errorf("%s must be positive", field)
+	}
+	return value, nil
+}
+
+func parseOptionalUint(raw string, field string) (uint64, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, nil
+	}
+	value, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an unsigned integer", field)
+	}
+	return value, nil
 }
 
 func parseSlashPayload(payload map[string]string) (string, uint64, string, error) {

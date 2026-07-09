@@ -49,6 +49,26 @@ func TestCloneIsIsolated(t *testing.T) {
 	}
 }
 
+func TestDeleteStorageRemovesKeyFromSnapshotAndRoot(t *testing.T) {
+	store := state.NewStore()
+	account := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	key := "session:0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:limit"
+	store.SetStorage(account, key, "100")
+	rootWithKey := store.Root()
+
+	store.DeleteStorage(account, key)
+	if got := store.GetStorage(account, key); got != "" {
+		t.Fatalf("deleted storage = %q", got)
+	}
+	if store.Root() == rootWithKey {
+		t.Fatal("root did not change after deleting storage")
+	}
+	restored := state.NewStoreFromSnapshot(store.Snapshot())
+	if got := restored.GetStorage(account, key); got != "" {
+		t.Fatalf("restored deleted storage = %q", got)
+	}
+}
+
 func TestRootIsDeterministic(t *testing.T) {
 	alice := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
