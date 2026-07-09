@@ -1283,6 +1283,64 @@ func TestRPCTransactionLookupIncludesPendingTransactions(t *testing.T) {
 	}
 }
 
+func TestRPCGetBlockReceiptsReturnsReceiptsForBlock(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	first := signedTransfer(t, key, alice, bob, 0, 100)
+	second := signedTransfer(t, key, alice, bob, 1, 50)
+	if err := n.SubmitTx(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.SubmitTx(second); err != nil {
+		t.Fatal(err)
+	}
+	block, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result := callRPC(t, server.URL, "eth_getBlockReceipts", []any{"0x1"})
+	receipts, ok := result.([]any)
+	if !ok || len(receipts) != 2 {
+		t.Fatalf("block receipts = %#v", result)
+	}
+	firstReceipt, ok := receipts[0].(map[string]any)
+	if !ok || firstReceipt["transactionHash"] != first.Hash() || firstReceipt["blockHash"] != block.Hash() || firstReceipt["blockNumber"] != "0x1" || firstReceipt["transactionIndex"] != "0x0" {
+		t.Fatalf("first receipt = %#v", receipts[0])
+	}
+	if firstReceipt["from"] != strings.ToLower(alice) || firstReceipt["to"] != bob || firstReceipt["status"] != "0x1" {
+		t.Fatalf("first receipt fields = %#v", firstReceipt)
+	}
+	secondReceipt, ok := receipts[1].(map[string]any)
+	if !ok || secondReceipt["transactionHash"] != second.Hash() || secondReceipt["transactionIndex"] != "0x1" {
+		t.Fatalf("second receipt = %#v", receipts[1])
+	}
+
+	byHash := callRPC(t, server.URL, "eth_getBlockReceipts", []any{block.Hash()})
+	byHashReceipts, ok := byHash.([]any)
+	if !ok || len(byHashReceipts) != 2 {
+		t.Fatalf("block hash receipts = %#v", byHash)
+	}
+	if missing := callRPC(t, server.URL, "eth_getBlockReceipts", []any{"0xff"}); missing != nil {
+		t.Fatalf("missing block receipts = %#v", missing)
+	}
+}
+
 func TestRPCSendRawTransactionSubmitsSignedTx(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {

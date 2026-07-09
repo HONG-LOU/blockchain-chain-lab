@@ -517,6 +517,22 @@ func (s *Server) handleSingleJSONRPC(w http.ResponseWriter, request rpcRequest) 
 		}
 		block, _ := n.Block(record.BlockHeight)
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: evmReceipt(record, block)})
+	case "eth_getBlockReceipts":
+		params, err := rpcParams(request.Params)
+		if err != nil || len(params) < 1 {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "block number or hash is required"})
+			return
+		}
+		block, ok, err := blockByNumberOrHash(n, params[0])
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
+			return
+		}
+		if !ok {
+			writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: nil})
+			return
+		}
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: evmBlockReceipts(block)})
 	case "eth_getBlockByNumber":
 		params, err := rpcParams(request.Params)
 		if err != nil || len(params) < 1 {
@@ -1034,6 +1050,35 @@ func parseRPCBlockNumber(n *node.Node, value any) (uint64, error) {
 		safe:      finality.SafeHeight,
 		finalized: finality.FinalizedHeight,
 	})
+}
+
+func blockByNumberOrHash(n *node.Node, value any) (types.Block, bool, error) {
+	raw, ok := value.(string)
+	if !ok {
+		return types.Block{}, false, fmt.Errorf("block number or hash must be a string")
+	}
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	if raw == "" {
+		return types.Block{}, false, fmt.Errorf("block number or hash is required")
+	}
+	if looksLikeBlockHash(raw) {
+		block, ok := n.BlockByHash(raw)
+		return block, ok, nil
+	}
+	height, err := parseRPCBlockNumber(n, raw)
+	if err != nil {
+		return types.Block{}, false, err
+	}
+	block, ok := n.Block(height)
+	return block, ok, nil
+}
+
+func looksLikeBlockHash(value string) bool {
+	if len(value) != 66 || !strings.HasPrefix(value, "0x") {
+		return false
+	}
+	_, err := hex.DecodeString(strings.TrimPrefix(value, "0x"))
+	return err == nil
 }
 
 func feeHistory(n *node.Node, params []any) (map[string]any, error) {
@@ -1620,6 +1665,25 @@ func evmReceipt(record types.TransactionRecord, block types.Block) map[string]an
 		"status":            quantity(status),
 		"logs":              evmTransactionLogs(block, record.Transaction.Hash()),
 	}
+}
+
+func evmBlockReceipts(block types.Block) []map[string]any {
+	receipts := make([]map[string]any, 0, len(block.Transactions))
+	blockHash := block.Hash()
+	for i, tx := range block.Transactions {
+		receipt := types.Receipt{TxHash: tx.Hash()}
+		if i < len(block.Receipts) {
+			receipt = block.Receipts[i]
+		}
+		receipts = append(receipts, evmReceipt(types.TransactionRecord{
+			Transaction: tx,
+			Receipt:     receipt,
+			BlockHeight: block.Header.Height,
+			BlockHash:   blockHash,
+			Index:       i,
+		}, block))
+	}
+	return receipts
 }
 
 func evmBlock(block types.Block, fullTransactions bool) map[string]any {
