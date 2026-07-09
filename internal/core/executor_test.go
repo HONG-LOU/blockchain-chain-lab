@@ -789,6 +789,206 @@ func TestDelegatedEOASessionKeyCanTransferWithinPolicy(t *testing.T) {
 	}
 }
 
+func TestAccountSessionKeyCanCallAllowedContractMethod(t *testing.T) {
+	ownerKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := chaincrypto.AddressFromPrivateKey(ownerKey)
+	session := chaincrypto.AddressFromPrivateKey(sessionKey)
+	smartAccount := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	store := state.NewStore()
+	store.SetCodeID(smartAccount, contracts.AccountCodeID)
+	store.SetStorage(smartAccount, "owner", owner)
+	store.SetBalance(smartAccount, 300_000)
+	store.SetBalance(owner, 500_000)
+	executor := core.NewExecutor("chainlab-local", "0xfee0000000000000000000000000000000000000", contracts.NewRuntimeWithDefaults())
+
+	deploy := signedTx(t, ownerKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxDeploy,
+		From:     owner,
+		Nonce:    0,
+		GasLimit: 80_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"code_id": "counter.v1",
+			"initial": "0",
+		},
+	})
+	deployReceipt, err := executor.ExecuteWithContext(store, deploy, core.ExecutionContext{BlockHeight: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	counter := deployReceipt.ContractAddress
+
+	addSession := signedTx(t, ownerKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxSessionKey,
+		From:     smartAccount,
+		Signer:   owner,
+		Nonce:    0,
+		GasLimit: 45_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"action":      "add",
+			"key":         session,
+			"expires":     "10",
+			"call_to":     counter,
+			"call_method": "increment",
+		},
+	})
+	addReceipt, err := executor.ExecuteWithContext(store, addSession, core.ExecutionContext{BlockHeight: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(addReceipt.Events) == 0 || addReceipt.Events[0].Attributes["call_to"] != counter || addReceipt.Events[0].Attributes["call_method"] != "increment" {
+		t.Fatalf("session add events = %#v", addReceipt.Events)
+	}
+	if got := store.GetStorage(smartAccount, "session:"+session+":call_to"); got != counter {
+		t.Fatalf("session call_to = %q", got)
+	}
+
+	call := signedTx(t, sessionKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxCall,
+		From:     smartAccount,
+		Signer:   session,
+		To:       counter,
+		Nonce:    1,
+		GasLimit: 60_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"method": "increment",
+			"amount": "4",
+		},
+	})
+	callReceipt, err := executor.ExecuteWithContext(store, call, core.ExecutionContext{BlockHeight: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := store.GetStorage(counter, "count"); got != "4" {
+		t.Fatalf("counter value = %q", got)
+	}
+	if got := store.GetAccount(smartAccount).Nonce; got != 2 {
+		t.Fatalf("smart account nonce = %d", got)
+	}
+	if got := store.GetAccount(session).Nonce; got != 0 {
+		t.Fatalf("session nonce = %d", got)
+	}
+	if len(callReceipt.Events) < 2 || callReceipt.Events[len(callReceipt.Events)-1].Type != "account.session_key_used" || callReceipt.Events[len(callReceipt.Events)-1].Attributes["type"] != "call" {
+		t.Fatalf("session call events = %#v", callReceipt.Events)
+	}
+}
+
+func TestAccountSessionKeyRejectsInvalidContractCallPolicyUse(t *testing.T) {
+	ownerKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := chaincrypto.AddressFromPrivateKey(ownerKey)
+	session := chaincrypto.AddressFromPrivateKey(sessionKey)
+	smartAccount := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	counter := "0xcccccccccccccccccccccccccccccccccccccccc"
+	otherCounter := "0xdddddddddddddddddddddddddddddddddddddddd"
+	store := state.NewStore()
+	store.SetCodeID(smartAccount, contracts.AccountCodeID)
+	store.SetStorage(smartAccount, "owner", owner)
+	store.SetStorage(smartAccount, "session:"+session+":call_to", counter)
+	store.SetStorage(smartAccount, "session:"+session+":call_method", "increment")
+	store.SetStorage(smartAccount, "session:"+session+":expires", "5")
+	store.SetBalance(smartAccount, 300_000)
+	executor := core.NewExecutor("chainlab-local", "0xfee0000000000000000000000000000000000000", contracts.NewRuntimeWithDefaults())
+
+	wrongTarget := signedTx(t, sessionKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxCall,
+		From:     smartAccount,
+		Signer:   session,
+		To:       otherCounter,
+		Nonce:    0,
+		GasLimit: 60_000,
+		GasPrice: 1,
+		Payload:  map[string]string{"method": "increment"},
+	})
+	if _, err := executor.ExecuteWithContext(store, wrongTarget, core.ExecutionContext{BlockHeight: 1}); err == nil {
+		t.Fatal("session key should not call a disallowed target")
+	}
+
+	wrongMethod := signedTx(t, sessionKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxCall,
+		From:     smartAccount,
+		Signer:   session,
+		To:       counter,
+		Nonce:    0,
+		GasLimit: 60_000,
+		GasPrice: 1,
+		Payload:  map[string]string{"method": "reset"},
+	})
+	if _, err := executor.ExecuteWithContext(store, wrongMethod, core.ExecutionContext{BlockHeight: 1}); err == nil {
+		t.Fatal("session key should not call a disallowed method")
+	}
+
+	expired := signedTx(t, sessionKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxCall,
+		From:     smartAccount,
+		Signer:   session,
+		To:       counter,
+		Nonce:    0,
+		GasLimit: 60_000,
+		GasPrice: 1,
+		Payload:  map[string]string{"method": "increment"},
+	})
+	if _, err := executor.ExecuteWithContext(store, expired, core.ExecutionContext{BlockHeight: 6}); err == nil {
+		t.Fatal("session key should expire for calls")
+	}
+
+	transfer := signedTx(t, sessionKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     smartAccount,
+		Signer:   session,
+		To:       otherCounter,
+		Nonce:    0,
+		Value:    1,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+	if _, err := executor.ExecuteWithContext(store, transfer, core.ExecutionContext{BlockHeight: 1}); err == nil {
+		t.Fatal("call-only session key should not authorize transfer")
+	}
+
+	revoke := signedTx(t, ownerKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxSessionKey,
+		From:     smartAccount,
+		Signer:   owner,
+		Nonce:    0,
+		GasLimit: 45_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"action": "revoke",
+			"key":    session,
+		},
+	})
+	if _, err := executor.ExecuteWithContext(store, revoke, core.ExecutionContext{BlockHeight: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.GetStorage(smartAccount, "session:"+session+":call_to"); got != "" {
+		t.Fatalf("revoked call_to = %q", got)
+	}
+}
+
 func TestAccountSessionKeyRejectsInvalidPolicyUseAndRevocation(t *testing.T) {
 	ownerKey, err := chaincrypto.GenerateKey()
 	if err != nil {

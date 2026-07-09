@@ -79,7 +79,7 @@ func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, 
 			return types.Receipt{}, err
 		}
 		receipt.Events = append(receipt.Events, types.Event{Type: "transfer", Attributes: map[string]string{"from": tx.From, "to": tx.To}})
-		sessionEvent, err := applySessionKeySpend(working, tx)
+		sessionEvent, err := applySessionKeyUsage(working, tx)
 		if err != nil {
 			return types.Receipt{}, err
 		}
@@ -304,6 +304,13 @@ func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, 
 			return types.Receipt{}, err
 		}
 		receipt.Events = append(receipt.Events, events...)
+		sessionEvent, err := applySessionKeyUsage(working, tx)
+		if err != nil {
+			return types.Receipt{}, err
+		}
+		if sessionEvent.Type != "" {
+			receipt.Events = append(receipt.Events, sessionEvent)
+		}
 	default:
 		return types.Receipt{}, fmt.Errorf("unsupported transaction type %q", tx.Type)
 	}
@@ -768,11 +775,13 @@ func executeSetCode(store *state.Store, tx types.Transaction) (string, map[strin
 }
 
 type sessionKeyPolicy struct {
-	Key     string
-	Limit   uint64
-	Spent   uint64
-	Expires uint64
-	To      string
+	Key        string
+	Limit      uint64
+	Spent      uint64
+	Expires    uint64
+	To         string
+	CallTo     string
+	CallMethod string
 }
 
 func executeSessionKey(store *state.Store, tx types.Transaction) (types.Event, error) {
@@ -796,17 +805,36 @@ func executeSessionKey(store *state.Store, tx types.Transaction) (types.Event, e
 	}
 	switch action {
 	case "add":
-		limit, err := parsePositiveUint(tx.Payload["limit"], "session key limit")
-		if err != nil {
-			return types.Event{}, err
+		limitRaw := strings.TrimSpace(tx.Payload["limit"])
+		limit := uint64(0)
+		if limitRaw != "" {
+			var err error
+			limit, err = parsePositiveUint(limitRaw, "session key limit")
+			if err != nil {
+				return types.Event{}, err
+			}
 		}
 		expires, err := parseOptionalUint(tx.Payload["expires"], "session key expires")
 		if err != nil {
 			return types.Event{}, err
 		}
 		allowedTo := strings.ToLower(strings.TrimSpace(tx.Payload["to"]))
-		store.SetStorage(tx.From, prefix+"limit", strconv.FormatUint(limit, 10))
-		store.SetStorage(tx.From, prefix+"spent", "0")
+		callTo := strings.ToLower(strings.TrimSpace(tx.Payload["call_to"]))
+		callMethod := strings.TrimSpace(tx.Payload["call_method"])
+		if (callTo == "") != (callMethod == "") {
+			return types.Event{}, errors.New("session key call policy requires call_to and call_method")
+		}
+		if limit == 0 && callTo == "" {
+			return types.Event{}, errors.New("session key requires transfer limit or call policy")
+		}
+		if limit == 0 {
+			store.DeleteStorage(tx.From, prefix+"limit")
+			store.DeleteStorage(tx.From, prefix+"spent")
+		} else {
+			store.SetStorage(tx.From, prefix+"limit", strconv.FormatUint(limit, 10))
+			store.SetStorage(tx.From, prefix+"spent", "0")
+			attributes["limit"] = strconv.FormatUint(limit, 10)
+		}
 		if expires == 0 {
 			store.DeleteStorage(tx.From, prefix+"expires")
 		} else {
@@ -819,13 +847,23 @@ func executeSessionKey(store *state.Store, tx types.Transaction) (types.Event, e
 			store.SetStorage(tx.From, prefix+"to", allowedTo)
 			attributes["to"] = allowedTo
 		}
-		attributes["limit"] = strconv.FormatUint(limit, 10)
+		if callTo == "" {
+			store.DeleteStorage(tx.From, prefix+"call_to")
+			store.DeleteStorage(tx.From, prefix+"call_method")
+		} else {
+			store.SetStorage(tx.From, prefix+"call_to", callTo)
+			store.SetStorage(tx.From, prefix+"call_method", callMethod)
+			attributes["call_to"] = callTo
+			attributes["call_method"] = callMethod
+		}
 		return types.Event{Type: "account.session_key_added", Attributes: attributes}, nil
 	case "revoke":
 		store.DeleteStorage(tx.From, prefix+"limit")
 		store.DeleteStorage(tx.From, prefix+"spent")
 		store.DeleteStorage(tx.From, prefix+"expires")
 		store.DeleteStorage(tx.From, prefix+"to")
+		store.DeleteStorage(tx.From, prefix+"call_to")
+		store.DeleteStorage(tx.From, prefix+"call_method")
 		return types.Event{Type: "account.session_key_revoked", Attributes: attributes}, nil
 	default:
 		return types.Event{}, errors.New("session key action must be add or revoke")
@@ -833,15 +871,26 @@ func executeSessionKey(store *state.Store, tx types.Transaction) (types.Event, e
 }
 
 func validateSessionKeyAuthorization(store *state.Store, tx types.Transaction, signer string, blockHeight uint64) error {
-	if tx.Type != types.TxTransfer {
-		return errors.New("session key can only authorize transfer")
-	}
 	policy, err := parseSessionKeyPolicy(store, tx.From, signer)
 	if err != nil {
 		return err
 	}
 	if policy.Expires != 0 && blockHeight > policy.Expires {
 		return errors.New("session key expired")
+	}
+	switch tx.Type {
+	case types.TxTransfer:
+		return validateSessionKeyTransfer(tx, policy)
+	case types.TxCall:
+		return validateSessionKeyCall(tx, policy)
+	default:
+		return errors.New("session key can only authorize transfer or call")
+	}
+}
+
+func validateSessionKeyTransfer(tx types.Transaction, policy sessionKeyPolicy) error {
+	if policy.Limit == 0 {
+		return errors.New("session key is not authorized for transfer")
 	}
 	if policy.To != "" && !strings.EqualFold(policy.To, tx.To) {
 		return errors.New("session key recipient not allowed")
@@ -856,7 +905,20 @@ func validateSessionKeyAuthorization(store *state.Store, tx types.Transaction, s
 	return nil
 }
 
-func applySessionKeySpend(store *state.Store, tx types.Transaction) (types.Event, error) {
+func validateSessionKeyCall(tx types.Transaction, policy sessionKeyPolicy) error {
+	if policy.CallTo == "" || policy.CallMethod == "" {
+		return errors.New("session key is not authorized for call")
+	}
+	if !strings.EqualFold(policy.CallTo, tx.To) {
+		return errors.New("session key call target not allowed")
+	}
+	if strings.TrimSpace(tx.Payload["method"]) != policy.CallMethod {
+		return errors.New("session key call method not allowed")
+	}
+	return nil
+}
+
+func applySessionKeyUsage(store *state.Store, tx types.Transaction) (types.Event, error) {
 	signer := strings.ToLower(strings.TrimSpace(tx.Signer))
 	if signer == "" {
 		return types.Event{}, nil
@@ -872,6 +934,15 @@ func applySessionKeySpend(store *state.Store, tx types.Transaction) (types.Event
 	policy, err := parseSessionKeyPolicy(store, tx.From, signer)
 	if err != nil {
 		return types.Event{}, err
+	}
+	if tx.Type == types.TxCall {
+		return types.Event{Type: "account.session_key_used", Attributes: map[string]string{
+			"account": strings.ToLower(tx.From),
+			"key":     signer,
+			"type":    "call",
+			"to":      strings.ToLower(tx.To),
+			"method":  strings.TrimSpace(tx.Payload["method"]),
+		}}, nil
 	}
 	spent, err := checkedAdd(policy.Spent, tx.Value)
 	if err != nil {
@@ -889,9 +960,14 @@ func applySessionKeySpend(store *state.Store, tx types.Transaction) (types.Event
 func parseSessionKeyPolicy(store *state.Store, account string, key string) (sessionKeyPolicy, error) {
 	key = strings.ToLower(strings.TrimSpace(key))
 	prefix := sessionKeyStoragePrefix(key)
-	limit, err := parsePositiveUint(store.GetStorage(account, prefix+"limit"), "session key limit")
-	if err != nil {
-		return sessionKeyPolicy{}, errors.New("session key is not authorized")
+	limit := uint64(0)
+	limitRaw := strings.TrimSpace(store.GetStorage(account, prefix+"limit"))
+	if limitRaw != "" {
+		var err error
+		limit, err = parsePositiveUint(limitRaw, "session key limit")
+		if err != nil {
+			return sessionKeyPolicy{}, errors.New("session key is not authorized")
+		}
 	}
 	spent, err := parseOptionalUint(store.GetStorage(account, prefix+"spent"), "session key spent")
 	if err != nil {
@@ -901,12 +977,22 @@ func parseSessionKeyPolicy(store *state.Store, account string, key string) (sess
 	if err != nil {
 		return sessionKeyPolicy{}, err
 	}
+	callTo := strings.ToLower(strings.TrimSpace(store.GetStorage(account, prefix+"call_to")))
+	callMethod := strings.TrimSpace(store.GetStorage(account, prefix+"call_method"))
+	if (callTo == "") != (callMethod == "") {
+		return sessionKeyPolicy{}, errors.New("session key call policy is incomplete")
+	}
+	if limit == 0 && callTo == "" {
+		return sessionKeyPolicy{}, errors.New("session key is not authorized")
+	}
 	return sessionKeyPolicy{
-		Key:     key,
-		Limit:   limit,
-		Spent:   spent,
-		Expires: expires,
-		To:      strings.ToLower(strings.TrimSpace(store.GetStorage(account, prefix+"to"))),
+		Key:        key,
+		Limit:      limit,
+		Spent:      spent,
+		Expires:    expires,
+		To:         strings.ToLower(strings.TrimSpace(store.GetStorage(account, prefix+"to"))),
+		CallTo:     callTo,
+		CallMethod: callMethod,
 	}, nil
 }
 
