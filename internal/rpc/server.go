@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -33,6 +34,14 @@ func NewServer(n *node.Node) http.Handler {
 	})
 	mux.HandleFunc("GET /account/{address}", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, n.Account(r.PathValue("address")))
+	})
+	mux.HandleFunc("GET /tx/{hash}", func(w http.ResponseWriter, r *http.Request) {
+		record, ok := n.Transaction(r.PathValue("hash"))
+		if !ok {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "transaction not found"})
+			return
+		}
+		writeJSON(w, http.StatusOK, record)
 	})
 	mux.HandleFunc("POST /tx", func(w http.ResponseWriter, r *http.Request) {
 		var tx types.Transaction
@@ -71,6 +80,91 @@ func handleJSONRPC(w http.ResponseWriter, r *http.Request, n *node.Node) {
 		return
 	}
 	switch request.Method {
+	case "eth_chainId":
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: quantity(chainNumber(n.ChainID()))})
+	case "eth_blockNumber":
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: quantity(n.Head().Header.Height)})
+	case "eth_getBalance":
+		params, err := rpcParams(request.Params)
+		if err != nil || len(params) < 1 {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "address is required"})
+			return
+		}
+		address, ok := params[0].(string)
+		if !ok || strings.TrimSpace(address) == "" {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "address is required"})
+			return
+		}
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: quantity(n.Account(address).Balance)})
+	case "eth_getTransactionCount":
+		params, err := rpcParams(request.Params)
+		if err != nil || len(params) < 1 {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "address is required"})
+			return
+		}
+		address, ok := params[0].(string)
+		if !ok || strings.TrimSpace(address) == "" {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "address is required"})
+			return
+		}
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: quantity(n.Account(address).Nonce)})
+	case "eth_getTransactionByHash":
+		params, err := rpcParams(request.Params)
+		if err != nil || len(params) < 1 {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "transaction hash is required"})
+			return
+		}
+		txHash, ok := params[0].(string)
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "transaction hash must be a string"})
+			return
+		}
+		record, ok := n.Transaction(txHash)
+		if !ok {
+			writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: nil})
+			return
+		}
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: evmTransaction(record)})
+	case "eth_getTransactionReceipt":
+		params, err := rpcParams(request.Params)
+		if err != nil || len(params) < 1 {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "transaction hash is required"})
+			return
+		}
+		txHash, ok := params[0].(string)
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "transaction hash must be a string"})
+			return
+		}
+		record, ok := n.Transaction(txHash)
+		if !ok {
+			writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: nil})
+			return
+		}
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: evmReceipt(record)})
+	case "eth_getBlockByNumber":
+		params, err := rpcParams(request.Params)
+		if err != nil || len(params) < 1 {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "block number is required"})
+			return
+		}
+		height, err := parseBlockNumber(params[0], n.Head().Header.Height)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
+			return
+		}
+		block, ok := n.Block(height)
+		if !ok {
+			writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: nil})
+			return
+		}
+		fullTx := false
+		if len(params) > 1 {
+			if value, ok := params[1].(bool); ok {
+				fullTx = value
+			}
+		}
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: evmBlock(block, fullTx)})
 	case "chain_head":
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: n.Head()})
 	case "chain_getAccount":
@@ -96,6 +190,137 @@ func handleJSONRPC(w http.ResponseWriter, r *http.Request, n *node.Node) {
 	default:
 		writeJSON(w, http.StatusNotFound, rpcResponse{ID: request.ID, Error: "unknown method"})
 	}
+}
+
+func rpcParams(raw json.RawMessage) ([]any, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var params []any
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return nil, err
+	}
+	return params, nil
+}
+
+func quantity(value uint64) string {
+	return fmt.Sprintf("0x%x", value)
+}
+
+func chainNumber(chainID string) uint64 {
+	if chainID == "chainlab-local" {
+		return 31337
+	}
+	var value uint64
+	for _, b := range []byte(chainID) {
+		value = value*33 + uint64(b)
+	}
+	if value == 0 {
+		return 1
+	}
+	return value
+}
+
+func parseBlockNumber(value any, latest uint64) (uint64, error) {
+	raw, ok := value.(string)
+	if !ok {
+		return 0, fmt.Errorf("block number must be a string")
+	}
+	switch raw {
+	case "latest":
+		return latest, nil
+	case "earliest":
+		return 0, nil
+	default:
+		if !strings.HasPrefix(raw, "0x") {
+			return 0, fmt.Errorf("block number must be hex quantity")
+		}
+		parsed, err := strconv.ParseUint(strings.TrimPrefix(raw, "0x"), 16, 64)
+		if err != nil {
+			return 0, fmt.Errorf("invalid block number")
+		}
+		return parsed, nil
+	}
+}
+
+func evmTransaction(record types.TransactionRecord) map[string]any {
+	tx := record.Transaction
+	return map[string]any{
+		"hash":             tx.Hash(),
+		"blockHash":        record.BlockHash,
+		"blockNumber":      quantity(record.BlockHeight),
+		"transactionIndex": quantity(uint64(record.Index)),
+		"from":             strings.ToLower(tx.From),
+		"to":               nullableAddress(tx.To),
+		"nonce":            quantity(tx.Nonce),
+		"value":            quantity(tx.Value),
+		"gas":              quantity(tx.GasLimit),
+		"gasPrice":         quantity(tx.GasPrice),
+		"input":            "0x",
+		"type":             "0x0",
+	}
+}
+
+func evmReceipt(record types.TransactionRecord) map[string]any {
+	status := uint64(0)
+	if record.Receipt.Success {
+		status = 1
+	}
+	return map[string]any{
+		"transactionHash":   record.Transaction.Hash(),
+		"transactionIndex":  quantity(uint64(record.Index)),
+		"blockHash":         record.BlockHash,
+		"blockNumber":       quantity(record.BlockHeight),
+		"from":              strings.ToLower(record.Transaction.From),
+		"to":                nullableAddress(record.Transaction.To),
+		"contractAddress":   nullableAddress(record.Receipt.ContractAddress),
+		"cumulativeGasUsed": quantity(record.Receipt.GasUsed),
+		"gasUsed":           quantity(record.Receipt.GasUsed),
+		"status":            quantity(status),
+		"logs":              record.Receipt.Events,
+	}
+}
+
+func evmBlock(block types.Block, fullTransactions bool) map[string]any {
+	transactions := make([]any, len(block.Transactions))
+	for i, tx := range block.Transactions {
+		if fullTransactions {
+			transactions[i] = map[string]any{
+				"hash":             tx.Hash(),
+				"blockHash":        block.Hash(),
+				"blockNumber":      quantity(block.Header.Height),
+				"transactionIndex": quantity(uint64(i)),
+				"from":             strings.ToLower(tx.From),
+				"to":               nullableAddress(tx.To),
+				"nonce":            quantity(tx.Nonce),
+				"value":            quantity(tx.Value),
+				"gas":              quantity(tx.GasLimit),
+				"gasPrice":         quantity(tx.GasPrice),
+				"input":            "0x",
+				"type":             "0x0",
+			}
+		} else {
+			transactions[i] = tx.Hash()
+		}
+	}
+	return map[string]any{
+		"number":           quantity(block.Header.Height),
+		"hash":             block.Hash(),
+		"parentHash":       block.Header.ParentHash,
+		"timestamp":        quantity(uint64(block.Header.TimeUnix)),
+		"transactionsRoot": block.Header.TxRoot,
+		"receiptsRoot":     block.Header.ReceiptRoot,
+		"stateRoot":        block.Header.StateRoot,
+		"miner":            strings.ToLower(block.Header.Proposer),
+		"transactions":     transactions,
+	}
+}
+
+func nullableAddress(address string) any {
+	if address == "" {
+		return nil
+	}
+	return strings.ToLower(address)
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

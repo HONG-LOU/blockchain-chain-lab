@@ -1,7 +1,10 @@
 package node
 
 import (
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -19,6 +22,7 @@ type Config struct {
 	Validators     []string
 	GenesisBalance map[string]uint64
 	FeeCollector   string
+	DataDir        string
 }
 
 type Node struct {
@@ -31,6 +35,14 @@ type Node struct {
 	consensus   *consensus.POA
 	blocks      []types.Block
 	mempool     []types.Transaction
+	txIndex     map[string]types.TransactionRecord
+	dataDir     string
+}
+
+type diskSnapshot struct {
+	ChainID string         `json:"chain_id"`
+	State   state.Snapshot `json:"state"`
+	Blocks  []types.Block  `json:"blocks"`
 }
 
 func New(config Config) (*Node, error) {
@@ -50,21 +62,46 @@ func New(config Config) (*Node, error) {
 		feeCollector = proposer
 	}
 
+	n := &Node{
+		chainID:     config.ChainID,
+		proposerKey: config.ProposerKey,
+		proposer:    proposer,
+		executor:    core.NewExecutor(config.ChainID, feeCollector, contracts.NewRuntimeWithDefaults()),
+		consensus:   consensus.NewPOA(validators),
+		txIndex:     make(map[string]types.TransactionRecord),
+		dataDir:     config.DataDir,
+	}
+
+	if config.DataDir != "" {
+		loaded, err := loadDiskSnapshot(config.DataDir)
+		if err != nil {
+			return nil, err
+		}
+		if loaded != nil {
+			if loaded.ChainID != config.ChainID {
+				return nil, errors.New("persisted chain id does not match config")
+			}
+			n.state = state.NewStoreFromSnapshot(loaded.State)
+			n.blocks = append([]types.Block(nil), loaded.Blocks...)
+			if len(n.blocks) == 0 {
+				return nil, errors.New("persisted chain has no blocks")
+			}
+			n.rebuildTxIndex()
+			return n, nil
+		}
+	}
+
 	store := state.NewStore()
 	for address, balance := range config.GenesisBalance {
 		store.SetBalance(address, balance)
 	}
 	genesis := types.GenesisBlock(config.ChainID, store.Root())
-
-	return &Node{
-		chainID:     config.ChainID,
-		proposerKey: config.ProposerKey,
-		proposer:    proposer,
-		state:       store,
-		executor:    core.NewExecutor(config.ChainID, feeCollector, contracts.NewRuntimeWithDefaults()),
-		consensus:   consensus.NewPOA(validators),
-		blocks:      []types.Block{genesis},
-	}, nil
+	n.state = store
+	n.blocks = []types.Block{genesis}
+	if err := n.persistLocked(); err != nil {
+		return nil, err
+	}
+	return n, nil
 }
 
 func (n *Node) SubmitTx(tx types.Transaction) error {
@@ -122,7 +159,11 @@ func (n *Node) ProduceBlock() (types.Block, error) {
 
 	n.state.ReplaceWith(working)
 	n.blocks = append(n.blocks, block)
+	n.indexBlock(block)
 	n.mempool = nil
+	if err := n.persistLocked(); err != nil {
+		return types.Block{}, err
+	}
 	return block, nil
 }
 
@@ -139,6 +180,19 @@ func (n *Node) Block(height uint64) (types.Block, bool) {
 		return types.Block{}, false
 	}
 	return n.blocks[height], true
+}
+
+func (n *Node) Transaction(hash string) (types.TransactionRecord, bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	record, ok := n.txIndex[hash]
+	return record, ok
+}
+
+func (n *Node) ChainID() string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.chainID
 }
 
 func (n *Node) Account(address string) types.Account {
@@ -163,4 +217,72 @@ func (n *Node) Proposal(id string) types.Proposal {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return n.state.Proposal(id)
+}
+
+func (n *Node) rebuildTxIndex() {
+	n.txIndex = make(map[string]types.TransactionRecord)
+	for _, block := range n.blocks {
+		n.indexBlock(block)
+	}
+}
+
+func (n *Node) indexBlock(block types.Block) {
+	blockHash := block.Hash()
+	for i, tx := range block.Transactions {
+		receipt := types.Receipt{TxHash: tx.Hash()}
+		if i < len(block.Receipts) {
+			receipt = block.Receipts[i]
+		}
+		n.txIndex[tx.Hash()] = types.TransactionRecord{
+			Transaction: tx,
+			Receipt:     receipt,
+			BlockHeight: block.Header.Height,
+			BlockHash:   blockHash,
+			Index:       i,
+		}
+	}
+}
+
+func (n *Node) persistLocked() error {
+	if n.dataDir == "" {
+		return nil
+	}
+	if err := os.MkdirAll(n.dataDir, 0o755); err != nil {
+		return err
+	}
+	snapshot := diskSnapshot{
+		ChainID: n.chainID,
+		State:   n.state.Snapshot(),
+		Blocks:  n.blocks,
+	}
+	raw, err := json.MarshalIndent(snapshot, "", "  ")
+	if err != nil {
+		return err
+	}
+	path := chainPath(n.dataDir)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(raw, '\n'), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+func loadDiskSnapshot(dataDir string) (*diskSnapshot, error) {
+	path := chainPath(dataDir)
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var snapshot diskSnapshot
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		return nil, err
+	}
+	return &snapshot, nil
+}
+
+func chainPath(dataDir string) string {
+	return filepath.Join(dataDir, "chain.json")
 }

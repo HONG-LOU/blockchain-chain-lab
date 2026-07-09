@@ -22,6 +22,13 @@ type GenesisFile struct {
 	Balances   map[string]uint64 `json:"balances"`
 }
 
+type nodeOptions struct {
+	Listen        string
+	PrivateKeyHex string
+	GenesisPath   string
+	DataDir       string
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -87,44 +94,61 @@ func nodeCommand(args []string) {
 	listen := flags.String("listen", ":8547", "HTTP listen address")
 	privateKeyHex := flags.String("private-key", "", "proposer private key")
 	genesisPath := flags.String("genesis", "", "genesis file path")
+	dataDir := flags.String("data-dir", "", "persistent chain data directory")
 	if err := flags.Parse(args); err != nil {
 		log.Fatal(err)
 	}
-	var key crypto.PrivateKey
-	chainID := "chainlab-local"
-	balances := make(map[string]uint64)
-	var err error
-	if *genesisPath != "" {
-		genesis, err := readGenesisFile(*genesisPath)
-		if err != nil {
-			log.Fatal(err)
-		}
-		chainID = genesis.ChainID
-		*privateKeyHex = genesis.PrivateKey
-		balances = genesis.Balances
-	}
-	if *privateKeyHex == "" {
-		key, err = crypto.GenerateKey()
-	} else {
-		key, err = crypto.PrivateKeyFromHex(*privateKeyHex)
-	}
+	config, err := buildNodeConfig(nodeOptions{
+		Listen:        *listen,
+		PrivateKeyHex: *privateKeyHex,
+		GenesisPath:   *genesisPath,
+		DataDir:       *dataDir,
+	})
 	if err != nil {
 		log.Fatal(err)
 	}
-	addr := crypto.AddressFromPrivateKey(key)
-	if len(balances) == 0 {
-		balances[addr] = 1_000_000_000
-	}
-	n, err := node.New(node.Config{
-		ChainID:        chainID,
-		ProposerKey:    key,
-		GenesisBalance: balances,
-	})
+	addr := crypto.AddressFromPrivateKey(config.ProposerKey)
+	n, err := node.New(config)
 	if err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("chainlab node listening on %s proposer=%s\n", *listen, addr)
 	log.Fatal(http.ListenAndServe(*listen, chainrpc.NewServer(n)))
+}
+
+func buildNodeConfig(options nodeOptions) (node.Config, error) {
+	chainID := "chainlab-local"
+	balances := make(map[string]uint64)
+	privateKeyHex := options.PrivateKeyHex
+	if options.GenesisPath != "" {
+		genesis, err := readGenesisFile(options.GenesisPath)
+		if err != nil {
+			return node.Config{}, err
+		}
+		chainID = genesis.ChainID
+		privateKeyHex = genesis.PrivateKey
+		balances = genesis.Balances
+	}
+	var key crypto.PrivateKey
+	var err error
+	if privateKeyHex == "" {
+		key, err = crypto.GenerateKey()
+	} else {
+		key, err = crypto.PrivateKeyFromHex(privateKeyHex)
+	}
+	if err != nil {
+		return node.Config{}, err
+	}
+	addr := crypto.AddressFromPrivateKey(key)
+	if len(balances) == 0 {
+		balances[addr] = 1_000_000_000
+	}
+	return node.Config{
+		ChainID:        chainID,
+		ProposerKey:    key,
+		GenesisBalance: balances,
+		DataDir:        options.DataDir,
+	}, nil
 }
 
 func usage() {

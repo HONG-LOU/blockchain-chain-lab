@@ -59,6 +59,14 @@ type Receipt struct {
 	ContractAddress string  `json:"contract_address,omitempty"`
 }
 
+type TransactionRecord struct {
+	Transaction Transaction `json:"transaction"`
+	Receipt     Receipt     `json:"receipt"`
+	BlockHeight uint64      `json:"block_height"`
+	BlockHash   string      `json:"block_hash"`
+	Index       int         `json:"index"`
+}
+
 type Proposal struct {
 	ID     string            `json:"id"`
 	Votes  map[string]uint64 `json:"votes"`

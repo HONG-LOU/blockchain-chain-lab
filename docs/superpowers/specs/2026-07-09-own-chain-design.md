@@ -64,7 +64,7 @@ These are intentionally deferred because getting them wrong is more dangerous th
 
 ### `internal/crypto`
 
-Owns secp256k1 key generation, signing, verification, address derivation, and hex encoding helpers. It uses `github.com/ethereum/go-ethereum/crypto` to avoid custom elliptic-curve code.
+Owns secp256k1 key generation, signing, verification, address derivation, and hex encoding helpers. It uses pure-Go `github.com/decred/dcrd/dcrec/secp256k1/v4` and `golang.org/x/crypto/sha3` so the project builds without a C toolchain.
 
 ### `internal/types`
 
@@ -170,15 +170,21 @@ The phase 1 suite must prove:
 
 Phase 2:
 
-- persistent storage
+- persistent storage for blocks, committed state, and transaction lookup
 - multi-node devnet
 - EVM-compatible transaction and JSON-RPC subset
 - WASM runtime experiment
 - faucet and explorer page
+
+Phase 2 progress:
+
+- Node snapshots can be persisted under `--data-dir` and reloaded on restart.
+- Committed transactions are indexed by hash with receipt, block hash, height, and index.
+- REST adds `GET /tx/{hash}`.
+- JSON-RPC adds an EVM-compatible read subset: `eth_chainId`, `eth_blockNumber`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, and `eth_getBlockByNumber`.
 
 Phase 3:
 
 - choose OP Stack, Cosmos SDK, Avalanche L1, or another production base
 - bridge from phase 1 concepts into that framework
 - validator operations, monitoring, snapshots, and upgrade governance
-

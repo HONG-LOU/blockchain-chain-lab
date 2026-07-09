@@ -15,12 +15,39 @@ type Store struct {
 	proposals map[string]types.Proposal
 }
 
+type Snapshot struct {
+	Accounts  map[string]types.Account  `json:"accounts"`
+	Stakes    map[string]uint64         `json:"stakes"`
+	Proposals map[string]types.Proposal `json:"proposals"`
+}
+
 func NewStore() *Store {
 	return &Store{
 		accounts:  make(map[string]types.Account),
 		stakes:    make(map[string]uint64),
 		proposals: make(map[string]types.Proposal),
 	}
+}
+
+func NewStoreFromSnapshot(snapshot Snapshot) *Store {
+	store := NewStore()
+	for address, account := range snapshot.Accounts {
+		account.Address = normalize(account.Address)
+		if account.Address == "" {
+			account.Address = normalize(address)
+		}
+		account.Storage = cloneStringMap(account.Storage)
+		store.accounts[normalize(address)] = account
+	}
+	for address, stake := range snapshot.Stakes {
+		store.stakes[normalize(address)] = stake
+	}
+	for id, proposal := range snapshot.Proposals {
+		proposal.Votes = cloneUint64Map(proposal.Votes)
+		proposal.Voters = cloneStringMap(proposal.Voters)
+		store.proposals[id] = proposal
+	}
+	return store
 }
 
 func (s *Store) Clone() *Store {
@@ -38,6 +65,24 @@ func (s *Store) Clone() *Store {
 		clone.proposals[id] = proposal
 	}
 	return clone
+}
+
+func (s *Store) Snapshot() Snapshot {
+	snapshot := Snapshot{
+		Accounts:  make(map[string]types.Account, len(s.accounts)),
+		Stakes:    cloneUint64Map(s.stakes),
+		Proposals: make(map[string]types.Proposal, len(s.proposals)),
+	}
+	for address, account := range s.accounts {
+		account.Storage = cloneStringMap(account.Storage)
+		snapshot.Accounts[address] = account
+	}
+	for id, proposal := range s.proposals {
+		proposal.Votes = cloneUint64Map(proposal.Votes)
+		proposal.Voters = cloneStringMap(proposal.Voters)
+		snapshot.Proposals[id] = proposal
+	}
+	return snapshot
 }
 
 func (s *Store) ReplaceWith(other *Store) {

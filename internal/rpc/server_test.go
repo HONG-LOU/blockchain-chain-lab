@@ -98,3 +98,121 @@ func TestRPCHealthHeadAccountAndTx(t *testing.T) {
 		t.Fatalf("json-rpc head height = %d", rpcResp.Result.Header.Height)
 	}
 }
+
+func TestEVMCompatibleJSONRPCSubset(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	tx := types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     alice,
+		To:       bob,
+		Nonce:    0,
+		Value:    100,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	}
+	sig, err := chaincrypto.Sign(key, tx.SigningBytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx.Signature = sig
+	if err := n.SubmitTx(tx); err != nil {
+		t.Fatal(err)
+	}
+	block, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertRPCResult(t, server.URL, "eth_chainId", []any{}, "0x7a69")
+	assertRPCResult(t, server.URL, "eth_blockNumber", []any{}, "0x1")
+	assertRPCResult(t, server.URL, "eth_getBalance", []any{bob, "latest"}, "0x64")
+	assertRPCResult(t, server.URL, "eth_getTransactionCount", []any{alice, "latest"}, "0x1")
+
+	txResult := callRPC(t, server.URL, "eth_getTransactionByHash", []any{tx.Hash()})
+	txMap, ok := txResult.(map[string]any)
+	if !ok {
+		t.Fatalf("transaction result type = %T", txResult)
+	}
+	if txMap["hash"] != tx.Hash() {
+		t.Fatalf("transaction hash = %v", txMap["hash"])
+	}
+	if txMap["blockNumber"] != "0x1" {
+		t.Fatalf("transaction block number = %v", txMap["blockNumber"])
+	}
+
+	receiptResult := callRPC(t, server.URL, "eth_getTransactionReceipt", []any{tx.Hash()})
+	receiptMap, ok := receiptResult.(map[string]any)
+	if !ok {
+		t.Fatalf("receipt result type = %T", receiptResult)
+	}
+	if receiptMap["status"] != "0x1" {
+		t.Fatalf("receipt status = %v", receiptMap["status"])
+	}
+	if receiptMap["blockHash"] != block.Hash() {
+		t.Fatalf("receipt block hash = %v", receiptMap["blockHash"])
+	}
+
+	blockResult := callRPC(t, server.URL, "eth_getBlockByNumber", []any{"0x1", true})
+	blockMap, ok := blockResult.(map[string]any)
+	if !ok {
+		t.Fatalf("block result type = %T", blockResult)
+	}
+	if blockMap["number"] != "0x1" {
+		t.Fatalf("block number = %v", blockMap["number"])
+	}
+}
+
+func assertRPCResult(t *testing.T, url string, method string, params []any, expected any) {
+	t.Helper()
+	if got := callRPC(t, url, method, params); got != expected {
+		t.Fatalf("%s result = %v, want %v", method, got, expected)
+	}
+}
+
+func callRPC(t *testing.T, url string, method string, params []any) any {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  method,
+		"params":  params,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post(url+"/rpc", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("%s status = %d", method, resp.StatusCode)
+	}
+	var rpcResp struct {
+		Result any    `json:"result"`
+		Error  string `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+		t.Fatal(err)
+	}
+	if rpcResp.Error != "" {
+		t.Fatalf("%s error = %s", method, rpcResp.Error)
+	}
+	return rpcResp.Result
+}
