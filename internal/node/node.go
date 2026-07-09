@@ -395,6 +395,13 @@ func (n *Node) Block(height uint64) (types.Block, bool) {
 	return n.blocks[height], true
 }
 
+func (n *Node) BlockByHash(hash string) (types.Block, bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	block, ok := n.knownBlocks[strings.ToLower(strings.TrimSpace(hash))]
+	return block, ok
+}
+
 func (n *Node) SubmitFinalityVote(vote types.FinalitySignature) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()

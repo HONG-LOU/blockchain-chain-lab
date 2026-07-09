@@ -187,6 +187,88 @@ func TestEVMCompatibleJSONRPCSubset(t *testing.T) {
 	}
 }
 
+func TestEVMBlockHashAndIndexedTransactionReads(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	txA := signedRPCTransaction(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     alice,
+		To:       bob,
+		Nonce:    0,
+		Value:    10,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+	txB := signedRPCTransaction(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     alice,
+		To:       carol,
+		Nonce:    1,
+		Value:    20,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+	if err := n.SubmitTx(txA); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.SubmitTx(txB); err != nil {
+		t.Fatal(err)
+	}
+	block, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockHash := block.Hash()
+
+	blockResult := callRPC(t, server.URL, "eth_getBlockByHash", []any{blockHash, false})
+	blockMap, ok := blockResult.(map[string]any)
+	if !ok {
+		t.Fatalf("block result type = %T", blockResult)
+	}
+	if blockMap["hash"] != blockHash || blockMap["number"] != "0x1" {
+		t.Fatalf("block lookup = %#v", blockMap)
+	}
+	txs, ok := blockMap["transactions"].([]any)
+	if !ok || len(txs) != 2 || txs[0] != txA.Hash() || txs[1] != txB.Hash() {
+		t.Fatalf("block transactions = %#v", blockMap["transactions"])
+	}
+
+	assertRPCResult(t, server.URL, "eth_getBlockTransactionCountByHash", []any{blockHash}, "0x2")
+	assertRPCResult(t, server.URL, "eth_getBlockTransactionCountByNumber", []any{"0x1"}, "0x2")
+
+	byHash := callRPC(t, server.URL, "eth_getTransactionByBlockHashAndIndex", []any{blockHash, "0x0"})
+	byHashMap, ok := byHash.(map[string]any)
+	if !ok || byHashMap["hash"] != txA.Hash() || byHashMap["blockHash"] != blockHash || byHashMap["transactionIndex"] != "0x0" {
+		t.Fatalf("transaction by block hash/index = %#v", byHash)
+	}
+	byNumber := callRPC(t, server.URL, "eth_getTransactionByBlockNumberAndIndex", []any{"0x1", "0x1"})
+	byNumberMap, ok := byNumber.(map[string]any)
+	if !ok || byNumberMap["hash"] != txB.Hash() || byNumberMap["blockHash"] != blockHash || byNumberMap["transactionIndex"] != "0x1" {
+		t.Fatalf("transaction by block number/index = %#v", byNumber)
+	}
+	if missing := callRPC(t, server.URL, "eth_getTransactionByBlockHashAndIndex", []any{blockHash, "0x2"}); missing != nil {
+		t.Fatalf("out-of-range transaction = %#v", missing)
+	}
+}
+
 func TestRPCExposesFeeMarketFields(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {

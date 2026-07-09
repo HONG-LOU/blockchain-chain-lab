@@ -450,6 +450,107 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: evmBlock(block, fullTx)})
+	case "eth_getBlockByHash":
+		params, err := rpcParams(request.Params)
+		if err != nil || len(params) < 1 {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "block hash is required"})
+			return
+		}
+		blockHash, ok := params[0].(string)
+		if !ok || strings.TrimSpace(blockHash) == "" {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "block hash is required"})
+			return
+		}
+		block, ok := n.BlockByHash(blockHash)
+		if !ok {
+			writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: nil})
+			return
+		}
+		fullTx := false
+		if len(params) > 1 {
+			if value, ok := params[1].(bool); ok {
+				fullTx = value
+			}
+		}
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: evmBlock(block, fullTx)})
+	case "eth_getBlockTransactionCountByHash":
+		params, err := rpcParams(request.Params)
+		if err != nil || len(params) < 1 {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "block hash is required"})
+			return
+		}
+		blockHash, ok := params[0].(string)
+		if !ok || strings.TrimSpace(blockHash) == "" {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "block hash is required"})
+			return
+		}
+		block, ok := n.BlockByHash(blockHash)
+		if !ok {
+			writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: nil})
+			return
+		}
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: quantity(uint64(len(block.Transactions)))})
+	case "eth_getBlockTransactionCountByNumber":
+		params, err := rpcParams(request.Params)
+		if err != nil || len(params) < 1 {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "block number is required"})
+			return
+		}
+		height, err := parseRPCBlockNumber(n, params[0])
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
+			return
+		}
+		block, ok := n.Block(height)
+		if !ok {
+			writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: nil})
+			return
+		}
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: quantity(uint64(len(block.Transactions)))})
+	case "eth_getTransactionByBlockHashAndIndex":
+		params, err := rpcParams(request.Params)
+		if err != nil || len(params) < 2 {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "block hash and transaction index are required"})
+			return
+		}
+		blockHash, ok := params[0].(string)
+		if !ok || strings.TrimSpace(blockHash) == "" {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "block hash is required"})
+			return
+		}
+		index, err := uint64RPCValue(params[1], "transaction index")
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
+			return
+		}
+		block, ok := n.BlockByHash(blockHash)
+		if !ok || index >= uint64(len(block.Transactions)) {
+			writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: nil})
+			return
+		}
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: evmBlockTransaction(block, int(index))})
+	case "eth_getTransactionByBlockNumberAndIndex":
+		params, err := rpcParams(request.Params)
+		if err != nil || len(params) < 2 {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "block number and transaction index are required"})
+			return
+		}
+		height, err := parseRPCBlockNumber(n, params[0])
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
+			return
+		}
+		index, err := uint64RPCValue(params[1], "transaction index")
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
+			return
+		}
+		block, ok := n.Block(height)
+		if !ok || index >= uint64(len(block.Transactions)) {
+			writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: nil})
+			return
+		}
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: evmBlockTransaction(block, int(index))})
 	case "eth_getLogs":
 		params, err := rpcParams(request.Params)
 		if err != nil || len(params) < 1 {
@@ -823,13 +924,17 @@ func validateOptionalBlockTag(n *node.Node, params []any, index int) error {
 	if len(params) <= index {
 		return nil
 	}
+	_, err := parseRPCBlockNumber(n, params[index])
+	return err
+}
+
+func parseRPCBlockNumber(n *node.Node, value any) (uint64, error) {
 	finality := n.Finality()
-	_, err := parseBlockNumber(params[index], blockTags{
+	return parseBlockNumber(value, blockTags{
 		latest:    finality.HeadHeight,
 		safe:      finality.SafeHeight,
 		finalized: finality.FinalizedHeight,
 	})
-	return err
 }
 
 func codeIDHex(codeID string) string {
@@ -1133,12 +1238,19 @@ func abiStringHex(value string) string {
 }
 
 func evmTransaction(record types.TransactionRecord) map[string]any {
-	tx := record.Transaction
+	return evmTransactionObject(record.Transaction, record.BlockHash, record.BlockHeight, record.Index)
+}
+
+func evmBlockTransaction(block types.Block, index int) map[string]any {
+	return evmTransactionObject(block.Transactions[index], block.Hash(), block.Header.Height, index)
+}
+
+func evmTransactionObject(tx types.Transaction, blockHash string, blockHeight uint64, index int) map[string]any {
 	return map[string]any{
 		"hash":                 tx.Hash(),
-		"blockHash":            record.BlockHash,
-		"blockNumber":          quantity(record.BlockHeight),
-		"transactionIndex":     quantity(uint64(record.Index)),
+		"blockHash":            blockHash,
+		"blockNumber":          quantity(blockHeight),
+		"transactionIndex":     quantity(uint64(index)),
 		"from":                 strings.ToLower(tx.From),
 		"signer":               nullableAddress(tx.Signer),
 		"to":                   nullableAddress(tx.To),
