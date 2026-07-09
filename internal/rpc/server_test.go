@@ -301,6 +301,62 @@ func TestRPCExposesSafeAndFinalizedHeads(t *testing.T) {
 	}
 }
 
+func TestRPCExposesTxPoolAndPendingNonce(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	tx := signedTransfer(t, key, alice, bob, 0, 100)
+	if err := n.SubmitTx(tx); err != nil {
+		t.Fatal(err)
+	}
+
+	assertRPCResult(t, server.URL, "eth_getTransactionCount", []any{alice, "latest"}, "0x0")
+	assertRPCResult(t, server.URL, "eth_getTransactionCount", []any{alice, "pending"}, "0x1")
+	status := callRPC(t, server.URL, "txpool_status", []any{})
+	statusMap, ok := status.(map[string]any)
+	if !ok {
+		t.Fatalf("txpool_status type = %T", status)
+	}
+	if statusMap["pending"] != "0x1" || statusMap["queued"] != "0x0" {
+		t.Fatalf("txpool_status = %#v", statusMap)
+	}
+
+	content := callRPC(t, server.URL, "txpool_content", []any{})
+	contentMap, ok := content.(map[string]any)
+	if !ok {
+		t.Fatalf("txpool_content type = %T", content)
+	}
+	pending, ok := contentMap["pending"].(map[string]any)
+	if !ok {
+		t.Fatalf("pending content = %#v", contentMap["pending"])
+	}
+	byNonce, ok := pending[strings.ToLower(alice)].(map[string]any)
+	if !ok {
+		t.Fatalf("pending sender content = %#v", pending)
+	}
+	txMap, ok := byNonce["0x0"].(map[string]any)
+	if !ok {
+		t.Fatalf("pending nonce content = %#v", byNonce)
+	}
+	if txMap["hash"] != tx.Hash() || txMap["blockHash"] != nil || txMap["blockNumber"] != nil {
+		t.Fatalf("pending tx = %#v", txMap)
+	}
+}
+
 func TestEthGetLogsFiltersContractEvents(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {

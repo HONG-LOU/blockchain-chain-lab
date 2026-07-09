@@ -252,7 +252,7 @@ func txCommand(args []string, out io.Writer) {
 
 func queryCommand(args []string, out io.Writer) {
 	if len(args) < 1 {
-		log.Fatal("usage: chainlab query <account|tx|head|finality|logs|validators|call|estimate-gas>")
+		log.Fatal("usage: chainlab query <account|tx|head|finality|mempool|logs|validators|call|estimate-gas>")
 	}
 	var err error
 	switch args[0] {
@@ -264,6 +264,8 @@ func queryCommand(args []string, out io.Writer) {
 		err = headCommand(args[1:], out)
 	case "finality":
 		err = finalityCommand(args[1:], out)
+	case "mempool":
+		err = mempoolCommand(args[1:], out)
 	case "logs":
 		err = logsCommand(args[1:], out)
 	case "validators":
@@ -503,7 +505,7 @@ func buildSignedTransaction(rpcURL string, privateKeyHex string, txType types.Tx
 	}
 	chainID := chainIDFromHex(chainIDHex)
 	var nonceHex string
-	if err := rpcCall(rpcURL, "eth_getTransactionCount", []any{from, "latest"}, &nonceHex); err != nil {
+	if err := rpcCall(rpcURL, "eth_getTransactionCount", []any{from, "pending"}, &nonceHex); err != nil {
 		return types.Transaction{}, err
 	}
 	nonce, err := parseQuantity(nonceHex)
@@ -644,6 +646,28 @@ func finalityCommand(args []string, out io.Writer) error {
 		return err
 	}
 	return writeTo(out, finality)
+}
+
+func mempoolCommand(args []string, out io.Writer) error {
+	flags := flag.NewFlagSet("query mempool", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	resp, err := http.Get(trimSlash(*rpcURL) + "/txpool")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("mempool query failed: status %d: %s", resp.StatusCode, string(body))
+	}
+	var pool node.MempoolSnapshot
+	if err := json.NewDecoder(resp.Body).Decode(&pool); err != nil {
+		return err
+	}
+	return writeTo(out, pool)
 }
 
 func logsCommand(args []string, out io.Writer) error {

@@ -55,6 +55,12 @@ type FinalityCheckpoint struct {
 	FinalizedDepth  uint64 `json:"finalized_depth"`
 }
 
+type MempoolSnapshot struct {
+	Pending      []types.Transaction `json:"pending"`
+	PendingCount int                 `json:"pending_count"`
+	QueuedCount  int                 `json:"queued_count"`
+}
+
 type diskSnapshot struct {
 	ChainID string         `json:"chain_id"`
 	State   state.Snapshot `json:"state"`
@@ -286,6 +292,17 @@ func (n *Node) Account(address string) types.Account {
 	return n.state.GetAccount(address)
 }
 
+func (n *Node) PendingAccount(address string) (types.Account, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	working, err := n.pendingStateLocked()
+	if err != nil {
+		return types.Account{}, err
+	}
+	return working.GetAccount(address), nil
+}
+
 func (n *Node) StateRoot() string {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -302,6 +319,21 @@ func (n *Node) Validators() []string {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return n.state.Validators()
+}
+
+func (n *Node) Mempool() []types.Transaction {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return append([]types.Transaction(nil), n.mempool...)
+}
+
+func (n *Node) TxPool() MempoolSnapshot {
+	pending := n.Mempool()
+	return MempoolSnapshot{
+		Pending:      pending,
+		PendingCount: len(pending),
+		QueuedCount:  0,
+	}
 }
 
 func (n *Node) ReadContract(from string, to string, method string, args map[string]string) (string, error) {
@@ -323,6 +355,16 @@ func (n *Node) blockAtDepthLocked(depth uint64) types.Block {
 		return n.blocks[0]
 	}
 	return n.blocks[headHeight-depth]
+}
+
+func (n *Node) pendingStateLocked() (*state.Store, error) {
+	working := n.state.Clone()
+	for _, pending := range n.mempool {
+		if _, err := n.executor.Execute(working, pending); err != nil {
+			return nil, err
+		}
+	}
+	return working, nil
 }
 
 func (n *Node) refreshConsensusLocked() {

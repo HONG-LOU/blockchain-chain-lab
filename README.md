@@ -16,6 +16,7 @@ It currently implements:
 - persistent node snapshots with committed blocks, state, and transaction index
 - EVM-compatible JSON-RPC read subset: `eth_chainId`, `eth_blockNumber`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`, `eth_getLogs`, `eth_call`, `eth_estimateGas`
 - EVM-style `safe` and `finalized` block tags for block and log reads
+- pending nonce calculation and txpool inspection for uncommitted transactions
 - EVM-style contract event logs projected from native receipts, with block range, address, and topic filtering
 - local multi-node devnet sync over HTTP peers: transaction relay, block import, and produced-block broadcast
 - CLI commands for keys, genesis, nodes, signed transfers, block production, queries, and demos
@@ -114,6 +115,7 @@ Query chain state:
 ```powershell
 go run ./cmd/chainlab query head --rpc http://127.0.0.1:8547
 go run ./cmd/chainlab query finality --rpc http://127.0.0.1:8547
+go run ./cmd/chainlab query mempool --rpc http://127.0.0.1:8547
 go run ./cmd/chainlab query account --rpc http://127.0.0.1:8547 --address <address>
 go run ./cmd/chainlab query tx --rpc http://127.0.0.1:8547 --hash <tx-hash>
 go run ./cmd/chainlab query logs --rpc http://127.0.0.1:8547 --from-block 0x1 --to-block latest --address <contract-address> --topic <topic0>
@@ -131,12 +133,14 @@ go run ./cmd/chainlab query estimate-gas --rpc http://127.0.0.1:8547 --type call
 - `GET /account/{address}`
 - `GET /validators`
 - `GET /tx/{hash}`
+- `GET /txpool`
 - `POST /tx`
 - `POST /chain/produce`
 - `POST /peer/tx`
 - `POST /peer/block`
 - `POST /rpc` with methods `chain_head`, `chain_finality`, `chain_getAccount`, `chain_validators`, and `chain_sendTx`
-- `POST /rpc` with EVM-style methods `eth_chainId`, `eth_blockNumber`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`, `eth_getLogs`, `eth_call`, and `eth_estimateGas`. Block range tags support `earliest`, `latest`, `safe`, `finalized`, and hex quantities.
+- `POST /rpc` with EVM-style methods `eth_chainId`, `eth_blockNumber`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`, `eth_getLogs`, `eth_call`, and `eth_estimateGas`. Block range tags support `earliest`, `latest`, `safe`, `finalized`, and hex quantities. `eth_getTransactionCount` also supports `pending` for mempool-aware nonce calculation.
+- `POST /rpc` with txpool-style methods `txpool_status` and `txpool_content`
 
 ## Roadmap
 

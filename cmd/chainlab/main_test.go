@@ -265,6 +265,64 @@ func TestSubmitTransferCommandSendsSignedTx(t *testing.T) {
 	}
 }
 
+func TestTransferCommandUsesPendingNonceAndQueryMempool(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := crypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	for i := 0; i < 2; i++ {
+		var out bytes.Buffer
+		if err := transferCommand([]string{
+			"--rpc", server.URL,
+			"--private-key", crypto.PrivateKeyToHex(key),
+			"--to", bob,
+			"--value", "100",
+		}, &out); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var poolOut bytes.Buffer
+	if err := mempoolCommand([]string{"--rpc", server.URL}, &poolOut); err != nil {
+		t.Fatal(err)
+	}
+	var pool struct {
+		PendingCount int                 `json:"pending_count"`
+		QueuedCount  int                 `json:"queued_count"`
+		Pending      []types.Transaction `json:"pending"`
+	}
+	if err := json.Unmarshal(poolOut.Bytes(), &pool); err != nil {
+		t.Fatal(err)
+	}
+	if pool.PendingCount != 2 || pool.QueuedCount != 0 || len(pool.Pending) != 2 {
+		t.Fatalf("mempool = %+v", pool)
+	}
+
+	block, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(block.Transactions) != 2 {
+		t.Fatalf("block transactions = %d", len(block.Transactions))
+	}
+	if block.Transactions[0].Nonce != 0 || block.Transactions[1].Nonce != 1 {
+		t.Fatalf("transaction nonces = %d, %d", block.Transactions[0].Nonce, block.Transactions[1].Nonce)
+	}
+}
+
 func TestStakeAndValidatorJoinCommandsSendSignedTx(t *testing.T) {
 	proposerKey, err := crypto.GenerateKey()
 	if err != nil {

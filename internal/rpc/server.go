@@ -85,6 +85,9 @@ func (s *Server) routes() http.Handler {
 		}
 		writeJSON(w, http.StatusOK, record)
 	})
+	mux.HandleFunc("GET /txpool", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, s.node.TxPool())
+	})
 	mux.HandleFunc("POST /tx", func(w http.ResponseWriter, r *http.Request) {
 		tx, err := decodeTransaction(r)
 		if err != nil {
@@ -216,6 +219,15 @@ func handleJSONRPC(w http.ResponseWriter, r *http.Request, n *node.Node) {
 			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "address is required"})
 			return
 		}
+		if len(params) > 1 && params[1] == "pending" {
+			account, err := n.PendingAccount(address)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: quantity(account.Nonce)})
+			return
+		}
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: quantity(n.Account(address).Nonce)})
 	case "eth_getTransactionByHash":
 		params, err := rpcParams(request.Params)
@@ -336,6 +348,14 @@ func handleJSONRPC(w http.ResponseWriter, r *http.Request, n *node.Node) {
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: n.Head()})
 	case "chain_finality":
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: n.Finality()})
+	case "txpool_status":
+		pool := n.TxPool()
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: map[string]string{
+			"pending": quantity(uint64(pool.PendingCount)),
+			"queued":  quantity(uint64(pool.QueuedCount)),
+		}})
+	case "txpool_content":
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: evmTxPool(n.TxPool())})
 	case "chain_getAccount":
 		var params struct {
 			Address string `json:"address"`
@@ -502,6 +522,40 @@ func evmTransaction(record types.TransactionRecord) map[string]any {
 		"gasPrice":         quantity(tx.GasPrice),
 		"input":            "0x",
 		"type":             "0x0",
+	}
+}
+
+func evmPendingTransaction(tx types.Transaction) map[string]any {
+	return map[string]any{
+		"hash":             tx.Hash(),
+		"blockHash":        nil,
+		"blockNumber":      nil,
+		"transactionIndex": nil,
+		"from":             strings.ToLower(tx.From),
+		"to":               nullableAddress(tx.To),
+		"nonce":            quantity(tx.Nonce),
+		"value":            quantity(tx.Value),
+		"gas":              quantity(tx.GasLimit),
+		"gasPrice":         quantity(tx.GasPrice),
+		"input":            "0x",
+		"type":             "0x0",
+	}
+}
+
+func evmTxPool(pool node.MempoolSnapshot) map[string]any {
+	pending := make(map[string]map[string]any)
+	for _, tx := range pool.Pending {
+		from := strings.ToLower(tx.From)
+		byNonce, ok := pending[from]
+		if !ok {
+			byNonce = make(map[string]any)
+			pending[from] = byNonce
+		}
+		byNonce[quantity(tx.Nonce)] = evmPendingTransaction(tx)
+	}
+	return map[string]any{
+		"pending": pending,
+		"queued":  map[string]any{},
 	}
 }
 

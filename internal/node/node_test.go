@@ -610,6 +610,53 @@ func TestNodeFinalityUsesConservativeBlockDepths(t *testing.T) {
 	}
 }
 
+func TestNodePendingAccountIncludesMempoolTransactions(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tx := signedNodeTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     alice,
+		To:       bob,
+		Nonce:    0,
+		Value:    100,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+	if err := n.SubmitTx(tx); err != nil {
+		t.Fatal(err)
+	}
+
+	latest := n.Account(alice)
+	if latest.Nonce != 0 {
+		t.Fatalf("latest nonce = %d", latest.Nonce)
+	}
+	pending, err := n.PendingAccount(alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Nonce != 1 {
+		t.Fatalf("pending nonce = %d", pending.Nonce)
+	}
+	pool := n.Mempool()
+	if len(pool) != 1 || pool[0].Hash() != tx.Hash() {
+		t.Fatalf("mempool = %#v", pool)
+	}
+}
+
 func signedNodeTx(t *testing.T, key chaincrypto.PrivateKey, tx types.Transaction) types.Transaction {
 	t.Helper()
 	sig, err := chaincrypto.Sign(key, tx.SigningBytes())
