@@ -129,3 +129,37 @@ func TestRemoveValidatorUpdatesSnapshotAndRoot(t *testing.T) {
 		t.Fatal("removing the last validator should fail")
 	}
 }
+
+func TestDelegatedCodeIDPersistsThroughCloneSnapshotAndRoot(t *testing.T) {
+	store := state.NewStore()
+	alice := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	owner := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	store.SetBalance(alice, 100)
+	store.SetDelegatedCodeID(alice, "account.v1")
+	store.SetStorage(alice, "owner", owner)
+	root := store.Root()
+
+	clone := store.Clone()
+	if got := clone.GetAccount(alice).DelegatedCodeID; got != "account.v1" {
+		t.Fatalf("clone delegated code id = %q", got)
+	}
+	if got := clone.GetStorage(alice, "owner"); got != owner {
+		t.Fatalf("clone owner = %q", got)
+	}
+
+	restored := state.NewStoreFromSnapshot(store.Snapshot())
+	if got := restored.GetAccount(alice).DelegatedCodeID; got != "account.v1" {
+		t.Fatalf("snapshot delegated code id = %q", got)
+	}
+	if restored.Root() != root {
+		t.Fatalf("restored root = %s, want %s", restored.Root(), root)
+	}
+
+	restored.ClearDelegation(alice)
+	if got := restored.GetAccount(alice).DelegatedCodeID; got != "" {
+		t.Fatalf("cleared delegated code id = %q", got)
+	}
+	if got := restored.GetStorage(alice, "owner"); got != "" {
+		t.Fatalf("cleared owner = %q", got)
+	}
+}

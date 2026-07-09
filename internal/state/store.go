@@ -175,6 +175,21 @@ func (s *Store) SetCodeID(address string, codeID string) {
 	s.accounts[normalize(address)] = account
 }
 
+func (s *Store) SetDelegatedCodeID(address string, codeID string) {
+	account := s.account(address)
+	account.DelegatedCodeID = strings.TrimSpace(codeID)
+	s.accounts[normalize(address)] = account
+}
+
+func (s *Store) ClearDelegation(address string) {
+	account := s.account(address)
+	account.DelegatedCodeID = ""
+	if account.Storage != nil {
+		delete(account.Storage, "owner")
+	}
+	s.accounts[normalize(address)] = account
+}
+
 func (s *Store) SetStorage(address string, key string, value string) {
 	account := s.account(address)
 	if account.Storage == nil {

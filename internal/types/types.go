@@ -30,11 +30,12 @@ const (
 const SignatureKindEthereumType2 = "ethereum.type2"
 
 type Account struct {
-	Address string            `json:"address"`
-	Balance uint64            `json:"balance"`
-	Nonce   uint64            `json:"nonce"`
-	CodeID  string            `json:"code_id,omitempty"`
-	Storage map[string]string `json:"storage,omitempty"`
+	Address         string            `json:"address"`
+	Balance         uint64            `json:"balance"`
+	Nonce           uint64            `json:"nonce"`
+	CodeID          string            `json:"code_id,omitempty"`
+	DelegatedCodeID string            `json:"delegated_code_id,omitempty"`
+	Storage         map[string]string `json:"storage,omitempty"`
 }
 
 type Transaction struct {
