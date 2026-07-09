@@ -11,6 +11,7 @@ type Summary struct {
 	TransferReceiverBalance uint64
 	CounterValue            string
 	TokenReceiverBalance    string
+	WASMValue               string
 	Stake                   uint64
 	YesVotes                uint64
 }
@@ -130,11 +131,48 @@ func RunDemo() (Summary, error) {
 		return Summary{}, err
 	}
 
+	wasmBlock, err := submitAndProduce(n, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxDeploy,
+		From:     alice,
+		Nonce:    6,
+		GasLimit: 80_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"code_id": "wasm.echo.v1",
+			"message": "hello",
+		},
+	})
+	if err != nil {
+		return Summary{}, err
+	}
+	wasmContract := wasmBlock.Receipts[0].ContractAddress
+
+	if _, err := submitAndProduce(n, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxCall,
+		From:     alice,
+		To:       wasmContract,
+		Nonce:    7,
+		GasLimit: 50_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"method":  "set",
+			"message": "world",
+		},
+	}); err != nil {
+		return Summary{}, err
+	}
+	wasmValue, err := n.ReadContract(alice, wasmContract, "get", nil)
+	if err != nil {
+		return Summary{}, err
+	}
+
 	if err := signAndSubmit(n, key, types.Transaction{
 		ChainID:  "chainlab-local",
 		Type:     types.TxStake,
 		From:     alice,
-		Nonce:    6,
+		Nonce:    8,
 		Value:    200,
 		GasLimit: 30_000,
 		GasPrice: 1,
@@ -145,7 +183,7 @@ func RunDemo() (Summary, error) {
 		ChainID:  "chainlab-local",
 		Type:     types.TxVote,
 		From:     alice,
-		Nonce:    7,
+		Nonce:    9,
 		GasLimit: 25_000,
 		GasPrice: 1,
 		Payload: map[string]string{
@@ -164,6 +202,7 @@ func RunDemo() (Summary, error) {
 		TransferReceiverBalance: n.Account(bob).Balance,
 		CounterValue:            n.Account(counter).Storage["count"],
 		TokenReceiverBalance:    n.Account(token).Storage["balance:"+bob],
+		WASMValue:               wasmValue,
 		Stake:                   n.StakeOf(alice),
 		YesVotes:                n.Proposal("upgrade-1").Votes["yes"],
 	}, nil

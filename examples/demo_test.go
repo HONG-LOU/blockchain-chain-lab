@@ -23,6 +23,9 @@ func TestRunDemo(t *testing.T) {
 	if summary.TokenReceiverBalance != "25" {
 		t.Fatalf("token receiver balance = %q", summary.TokenReceiverBalance)
 	}
+	if summary.WASMValue != "world" {
+		t.Fatalf("wasm value = %q", summary.WASMValue)
+	}
 	if summary.Stake != 200 {
 		t.Fatalf("stake = %d", summary.Stake)
 	}

@@ -34,6 +34,7 @@ func NewRuntimeWithDefaults() *Runtime {
 	runtime := NewRuntime()
 	runtime.Register("counter.v1", Counter{})
 	runtime.Register("token.v1", Token{})
+	runtime.Register("wasm.echo.v1", NewWasmEchoContract())
 	return runtime
 }
 

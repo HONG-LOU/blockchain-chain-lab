@@ -75,3 +75,44 @@ func TestTokenContract(t *testing.T) {
 		t.Fatalf("token symbol = %q", symbol)
 	}
 }
+
+func TestWASMContractEchoLifecycle(t *testing.T) {
+	store := state.NewStore()
+	runtime := contracts.NewRuntimeWithDefaults()
+	creator := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	addr, events, err := runtime.Deploy(store, creator, "wasm.echo.v1", "seed-wasm", map[string]string{"message": "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := events[len(events)-1].Type; got != "wasm.echo.initialized" {
+		t.Fatalf("deploy event = %q", got)
+	}
+
+	value, err := runtime.Read(store, addr, creator, "get", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value != "hello" {
+		t.Fatalf("initial wasm read = %q", value)
+	}
+
+	events, err = runtime.Call(store, addr, creator, "set", map[string]string{"message": "world"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := events[0].Type; got != "wasm.echoed" {
+		t.Fatalf("call event = %q", got)
+	}
+	if got := store.GetStorage(addr, "last"); got != "world" {
+		t.Fatalf("wasm storage = %q", got)
+	}
+
+	value, err = runtime.Read(store, addr, creator, "get", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value != "world" {
+		t.Fatalf("updated wasm read = %q", value)
+	}
+}

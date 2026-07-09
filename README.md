@@ -12,6 +12,7 @@ It currently implements:
 - deterministic local `safe` and `finalized` chain checkpoints using conservative block-depth rules
 - transaction, receipt, and state roots
 - native smart-contract runtime with `counter.v1` and `token.v1`
+- sandboxed WASM-backed example contract runtime with `wasm.echo.v1`
 - HTTP REST endpoints and a small JSON-RPC-style endpoint
 - persistent node snapshots with committed blocks, state, and transaction index
 - local fork-choice that stores known branches and reorgs to a longer validated branch
@@ -119,6 +120,16 @@ go run ./cmd/chainlab tx deploy --rpc http://127.0.0.1:8547 --private-key <hex-p
 go run ./cmd/chainlab tx call --rpc http://127.0.0.1:8547 --private-key <hex-private-key> --to <contract-address> --method increment --arg amount=1
 ```
 
+Deploy and write-call the sandboxed WASM echo example:
+
+```powershell
+go run ./cmd/chainlab tx deploy --rpc http://127.0.0.1:8547 --private-key <hex-private-key> --code-id wasm.echo.v1 --arg message=hello
+go run ./cmd/chainlab tx call --rpc http://127.0.0.1:8547 --private-key <hex-private-key> --to <contract-address> --method set --arg message=world
+go run ./cmd/chainlab query call --rpc http://127.0.0.1:8547 --to <contract-address> --method get
+```
+
+The WASM example runs inside a restricted wazero sandbox and only receives ChainLab host functions for args, contract storage, return data, and events. It is not arbitrary contract upload or CosmWasm compatibility yet.
+
 Stake, join, and leave the validator set:
 
 ```powershell
@@ -177,6 +188,6 @@ go run ./cmd/chainlab query estimate-gas --rpc http://127.0.0.1:8547 --type call
 Next useful milestones:
 
 - real BFT finality and richer fork-choice safety rules
-- WASM contract runtime
+- broader WASM ABI with uploaded modules and resource metering
 - richer contract explorer views with decoded native contract state and events
 - production-framework migration decision: OP Stack, Cosmos SDK, Avalanche L1, or another appchain stack
