@@ -461,6 +461,83 @@ func TestQueryLogsCommand(t *testing.T) {
 	}
 }
 
+func TestQueryCallAndEstimateGasCommands(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := crypto.AddressFromPrivateKey(key)
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	deploy := signedCLITx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxDeploy,
+		From:     alice,
+		Nonce:    0,
+		GasLimit: 80_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"code_id": "counter.v1",
+			"initial": "7",
+		},
+	})
+	if err := n.SubmitTx(deploy); err != nil {
+		t.Fatal(err)
+	}
+	block, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	counter := block.Receipts[0].ContractAddress
+
+	var callOut bytes.Buffer
+	if err := callCommand([]string{
+		"--rpc", server.URL,
+		"--from", alice,
+		"--to", counter,
+		"--method", "get",
+	}, &callOut); err != nil {
+		t.Fatal(err)
+	}
+	var callResult struct {
+		Raw    string `json:"raw"`
+		Result string `json:"result"`
+	}
+	if err := json.Unmarshal(callOut.Bytes(), &callResult); err != nil {
+		t.Fatal(err)
+	}
+	if callResult.Result != "7" || callResult.Raw == "" {
+		t.Fatalf("call result = %+v", callResult)
+	}
+
+	var gasOut bytes.Buffer
+	if err := estimateGasCommand([]string{
+		"--rpc", server.URL,
+		"--type", "call",
+		"--to", counter,
+	}, &gasOut); err != nil {
+		t.Fatal(err)
+	}
+	var gasResult struct {
+		Gas string `json:"gas"`
+	}
+	if err := json.Unmarshal(gasOut.Bytes(), &gasResult); err != nil {
+		t.Fatal(err)
+	}
+	if gasResult.Gas != "0xc350" {
+		t.Fatalf("gas result = %+v", gasResult)
+	}
+}
+
 func TestRPCJSONCall(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request map[string]any

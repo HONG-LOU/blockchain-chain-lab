@@ -269,6 +269,13 @@ func (n *Node) Validators() []string {
 	return n.state.Validators()
 }
 
+func (n *Node) ReadContract(from string, to string, method string, args map[string]string) (string, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	runtime := contracts.NewRuntimeWithDefaults()
+	return runtime.Read(n.state.Clone(), to, from, method, args)
+}
+
 func (n *Node) Proposal(id string) types.Proposal {
 	n.mu.Lock()
 	defer n.mu.Unlock()

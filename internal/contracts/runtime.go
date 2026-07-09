@@ -13,6 +13,7 @@ import (
 type Contract interface {
 	Deploy(ctx Context, args map[string]string) ([]types.Event, error)
 	Call(ctx Context, method string, args map[string]string) ([]types.Event, error)
+	Read(ctx Context, method string, args map[string]string) (string, error)
 }
 
 type Context struct {
@@ -74,6 +75,19 @@ func (r *Runtime) Call(store *state.Store, address string, caller string, method
 	}
 	ctx := Context{Store: store, Address: strings.ToLower(address), Caller: strings.ToLower(caller)}
 	return contract.Call(ctx, method, args)
+}
+
+func (r *Runtime) Read(store *state.Store, address string, caller string, method string, args map[string]string) (string, error) {
+	account := store.GetAccount(address)
+	if account.CodeID == "" {
+		return "", errors.New("target account is not a contract")
+	}
+	contract, ok := r.registry[account.CodeID]
+	if !ok {
+		return "", fmt.Errorf("unknown contract code id %q", account.CodeID)
+	}
+	ctx := Context{Store: store, Address: strings.ToLower(address), Caller: strings.ToLower(caller)}
+	return contract.Read(ctx, method, args)
 }
 
 func contractAddress(creator string, codeID string, seed string) string {

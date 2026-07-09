@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"chainlab/internal/core"
 	"chainlab/internal/node"
 	"chainlab/internal/types"
 )
@@ -283,6 +285,40 @@ func handleJSONRPC(w http.ResponseWriter, r *http.Request, n *node.Node) {
 		}
 		logs := evmLogs(n, filter)
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: logs})
+	case "eth_call":
+		params, err := rpcParams(request.Params)
+		if err != nil || len(params) < 1 {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "call object is required"})
+			return
+		}
+		call, err := parseCallObject(params[0])
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
+			return
+		}
+		result, err := n.ReadContract(call.from, call.to, call.method, call.payload)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: dataHex(result)})
+	case "eth_estimateGas":
+		params, err := rpcParams(request.Params)
+		if err != nil || len(params) < 1 {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "call object is required"})
+			return
+		}
+		call, err := parseCallObject(params[0])
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
+			return
+		}
+		gas, err := core.EstimateGas(call.txType)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: quantity(gas)})
 	case "chain_head":
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: n.Head()})
 	case "chain_getAccount":
@@ -361,6 +397,69 @@ func parseBlockNumber(value any, latest uint64) (uint64, error) {
 		}
 		return parsed, nil
 	}
+}
+
+type callObject struct {
+	from    string
+	to      string
+	txType  types.TxType
+	method  string
+	payload map[string]string
+}
+
+func parseCallObject(value any) (callObject, error) {
+	raw, ok := value.(map[string]any)
+	if !ok {
+		return callObject{}, fmt.Errorf("call object must be an object")
+	}
+	call := callObject{txType: types.TxCall, payload: make(map[string]string)}
+	if from, ok := raw["from"].(string); ok {
+		call.from = from
+	}
+	if to, ok := raw["to"].(string); ok {
+		call.to = to
+	}
+	if txType, ok := raw["type"].(string); ok && txType != "" {
+		call.txType = types.TxType(txType)
+	} else if call.to == "" {
+		call.txType = types.TxTransfer
+	}
+	if payloadRaw, ok := raw["payload"]; ok {
+		payload, err := stringMap(payloadRaw)
+		if err != nil {
+			return callObject{}, err
+		}
+		call.payload = payload
+	}
+	call.method = call.payload["method"]
+	if method, ok := raw["method"].(string); ok && method != "" {
+		call.method = method
+		call.payload["method"] = method
+	}
+	return call, nil
+}
+
+func stringMap(value any) (map[string]string, error) {
+	raw, ok := value.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("payload must be an object")
+	}
+	output := make(map[string]string, len(raw))
+	for key, value := range raw {
+		switch typed := value.(type) {
+		case string:
+			output[key] = typed
+		case float64:
+			output[key] = strconv.FormatUint(uint64(typed), 10)
+		default:
+			return nil, fmt.Errorf("payload values must be strings or numbers")
+		}
+	}
+	return output, nil
+}
+
+func dataHex(value string) string {
+	return "0x" + hex.EncodeToString([]byte(value))
 }
 
 func evmTransaction(record types.TransactionRecord) map[string]any {

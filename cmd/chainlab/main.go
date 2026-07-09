@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"chainlab/examples"
 	"chainlab/internal/crypto"
@@ -234,7 +236,7 @@ func txCommand(args []string, out io.Writer) {
 
 func queryCommand(args []string, out io.Writer) {
 	if len(args) < 1 {
-		log.Fatal("usage: chainlab query <account|tx|head|logs|validators>")
+		log.Fatal("usage: chainlab query <account|tx|head|logs|validators|call|estimate-gas>")
 	}
 	var err error
 	switch args[0] {
@@ -248,6 +250,10 @@ func queryCommand(args []string, out io.Writer) {
 		err = logsCommand(args[1:], out)
 	case "validators":
 		err = validatorsCommand(args[1:], out)
+	case "call":
+		err = callCommand(args[1:], out)
+	case "estimate-gas":
+		err = estimateGasCommand(args[1:], out)
 	default:
 		log.Fatalf("unknown query command %q", args[0])
 	}
@@ -525,6 +531,85 @@ func validatorsCommand(args []string, out io.Writer) error {
 		return err
 	}
 	return writeTo(out, validators)
+}
+
+func callCommand(args []string, out io.Writer) error {
+	flags := flag.NewFlagSet("query call", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
+	from := flags.String("from", "", "caller address")
+	to := flags.String("to", "", "contract address")
+	method := flags.String("method", "", "read method")
+	var callArgs stringListFlag
+	flags.Var(&callArgs, "arg", "method argument key=value; can be repeated")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *to == "" {
+		return fmt.Errorf("contract address is required")
+	}
+	if *method == "" {
+		return fmt.Errorf("method is required")
+	}
+	payload, err := parseKeyValueArgs(callArgs.Values())
+	if err != nil {
+		return err
+	}
+	payload["method"] = *method
+	request := map[string]any{
+		"from":    *from,
+		"to":      *to,
+		"payload": payload,
+	}
+	var raw string
+	if err := rpcCall(*rpcURL, "eth_call", []any{request, "latest"}, &raw); err != nil {
+		return err
+	}
+	decoded, err := decodeDataHex(raw)
+	if err != nil {
+		return err
+	}
+	return writeTo(out, map[string]string{"raw": raw, "result": decoded})
+}
+
+func estimateGasCommand(args []string, out io.Writer) error {
+	flags := flag.NewFlagSet("query estimate-gas", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
+	txType := flags.String("type", "call", "transaction type")
+	from := flags.String("from", "", "sender address")
+	to := flags.String("to", "", "recipient or contract address")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	request := map[string]any{
+		"type": *txType,
+		"from": *from,
+		"to":   *to,
+	}
+	var gas string
+	if err := rpcCall(*rpcURL, "eth_estimateGas", []any{request}, &gas); err != nil {
+		return err
+	}
+	return writeTo(out, map[string]string{"gas": gas})
+}
+
+func parseKeyValueArgs(values []string) (map[string]string, error) {
+	output := make(map[string]string, len(values))
+	for _, value := range values {
+		key, raw, ok := strings.Cut(value, "=")
+		if !ok || key == "" {
+			return nil, fmt.Errorf("argument must be key=value")
+		}
+		output[key] = raw
+	}
+	return output, nil
+}
+
+func decodeDataHex(value string) (string, error) {
+	raw, err := hex.DecodeString(strings.TrimPrefix(value, "0x"))
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
 }
 
 func produceCommand(args []string, out io.Writer) error {

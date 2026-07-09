@@ -95,6 +95,7 @@ Built-in contracts:
 - `token.v1`: mint, transfer, and read token balances.
 
 This gives the chain smart-contract behavior now, while leaving a clean slot for EVM or WASM later.
+Native contracts expose read-only methods through `eth_call` and CLI `query call`; return data is hex-encoded string data until a full ABI encoder exists.
 
 ### `internal/core`
 
@@ -185,8 +186,9 @@ Phase 2 progress:
 - Node snapshots can be persisted under `--data-dir` and reloaded on restart.
 - Committed transactions are indexed by hash with receipt, block hash, height, and index.
 - REST adds `GET /tx/{hash}`.
-- JSON-RPC adds an EVM-compatible read subset: `eth_chainId`, `eth_blockNumber`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`, and `eth_getLogs`.
+- JSON-RPC adds an EVM-compatible read subset: `eth_chainId`, `eth_blockNumber`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`, `eth_getLogs`, `eth_call`, and `eth_estimateGas`.
 - Contract receipt events are projected into EVM-style logs with block range, contract address, and topic filtering. `topic[0]` is the Keccak hash of the native event type string, not a full Solidity ABI signature.
+- `eth_call` supports native contract read methods such as `counter.get`, `token.balanceOf`, `token.symbol`, and `token.owner`; `eth_estimateGas` returns the deterministic gas schedule for supported transaction types.
 - Local devnet peers can relay submitted transactions, produce a block through `POST /chain/produce`, broadcast produced blocks, and import peer blocks after replaying transactions and checking receipt root, state root, PoA signature, height, and parent hash.
 - CLI nodes accept repeated `--peer` URLs for HTTP peer sync.
 - CLI wallet-style commands can fetch nonce over RPC, sign and submit transfers, produce blocks, and query head/account/transaction records.

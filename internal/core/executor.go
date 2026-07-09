@@ -40,7 +40,7 @@ func (e *Executor) Execute(store *state.Store, tx types.Transaction) (types.Rece
 		return types.Receipt{}, fmt.Errorf("bad nonce: got %d want %d", tx.Nonce, account.Nonce)
 	}
 
-	gasUsed, err := requiredGas(tx.Type)
+	gasUsed, err := EstimateGas(tx.Type)
 	if err != nil {
 		return types.Receipt{}, err
 	}
@@ -154,7 +154,7 @@ func (e *Executor) chargeFee(store *state.Store, from string, fee uint64) error 
 	return store.AddBalance(e.feeCollector, fee)
 }
 
-func requiredGas(txType types.TxType) (uint64, error) {
+func EstimateGas(txType types.TxType) (uint64, error) {
 	switch txType {
 	case types.TxTransfer:
 		return 21_000, nil

@@ -48,3 +48,16 @@ func (Counter) Call(ctx Context, method string, args map[string]string) ([]types
 		return nil, fmt.Errorf("unknown counter method %q", method)
 	}
 }
+
+func (Counter) Read(ctx Context, method string, args map[string]string) (string, error) {
+	switch method {
+	case "get":
+		current := ctx.Store.GetStorage(ctx.Address, "count")
+		if current == "" {
+			return "0", nil
+		}
+		return current, nil
+	default:
+		return "", fmt.Errorf("unknown counter read method %q", method)
+	}
+}

@@ -26,6 +26,14 @@ func TestCounterContract(t *testing.T) {
 	if got := store.GetStorage(addr, "count"); got != "5" {
 		t.Fatalf("counter storage = %q", got)
 	}
+
+	value, err := runtime.Read(store, addr, creator, "get", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value != "5" {
+		t.Fatalf("counter read = %q", value)
+	}
 }
 
 func TestTokenContract(t *testing.T) {
@@ -50,5 +58,20 @@ func TestTokenContract(t *testing.T) {
 	}
 	if got := store.GetStorage(token, "balance:"+bob); got != "250" {
 		t.Fatalf("bob token balance = %q", got)
+	}
+
+	bobBalance, err := runtime.Read(store, token, owner, "balanceOf", map[string]string{"address": bob})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bobBalance != "250" {
+		t.Fatalf("bob token read balance = %q", bobBalance)
+	}
+	symbol, err := runtime.Read(store, token, owner, "symbol", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if symbol != "LAB" {
+		t.Fatalf("token symbol = %q", symbol)
 	}
 }

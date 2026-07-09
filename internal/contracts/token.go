@@ -55,6 +55,26 @@ func (Token) Call(ctx Context, method string, args map[string]string) ([]types.E
 	}
 }
 
+func (Token) Read(ctx Context, method string, args map[string]string) (string, error) {
+	switch method {
+	case "balanceOf":
+		address := args["address"]
+		if address == "" {
+			address = args["owner"]
+		}
+		if address == "" {
+			return "", errors.New("address is required")
+		}
+		return strconv.FormatUint(tokenBalance(ctx, address), 10), nil
+	case "symbol":
+		return ctx.Store.GetStorage(ctx.Address, "symbol"), nil
+	case "owner":
+		return ctx.Store.GetStorage(ctx.Address, "owner"), nil
+	default:
+		return "", fmt.Errorf("unknown token read method %q", method)
+	}
+}
+
 func parseAmount(raw string) (uint64, error) {
 	if raw == "" {
 		return 0, errors.New("amount is required")

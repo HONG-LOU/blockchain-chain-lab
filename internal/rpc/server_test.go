@@ -2,6 +2,7 @@ package rpc_test
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -343,6 +344,98 @@ func TestEthGetLogsFiltersContractEvents(t *testing.T) {
 	}
 }
 
+func TestEthCallAndEstimateGas(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	deploy := signedRPCTransaction(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxDeploy,
+		From:     alice,
+		Nonce:    0,
+		GasLimit: 80_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"code_id": "counter.v1",
+			"initial": "1",
+		},
+	})
+	if err := n.SubmitTx(deploy); err != nil {
+		t.Fatal(err)
+	}
+	deployBlock, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	counter := deployBlock.Receipts[0].ContractAddress
+
+	increment := signedRPCTransaction(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxCall,
+		From:     alice,
+		To:       counter,
+		Nonce:    1,
+		GasLimit: 50_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"method": "increment",
+			"amount": "2",
+		},
+	})
+	if err := n.SubmitTx(increment); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+
+	result := callRPC(t, server.URL, "eth_call", []any{map[string]any{
+		"from": alice,
+		"to":   counter,
+		"payload": map[string]any{
+			"method": "get",
+		},
+	}, "latest"})
+	if result != hexData("3") {
+		t.Fatalf("eth_call result = %v", result)
+	}
+
+	estimateCall := callRPC(t, server.URL, "eth_estimateGas", []any{map[string]any{
+		"from": alice,
+		"to":   counter,
+		"payload": map[string]any{
+			"method": "get",
+		},
+	}})
+	if estimateCall != "0xc350" {
+		t.Fatalf("call gas estimate = %v", estimateCall)
+	}
+
+	estimateTransfer := callRPC(t, server.URL, "eth_estimateGas", []any{map[string]any{
+		"type":  "transfer",
+		"from":  alice,
+		"to":    bob,
+		"value": "0x64",
+	}})
+	if estimateTransfer != "0x5208" {
+		t.Fatalf("transfer gas estimate = %v", estimateTransfer)
+	}
+}
+
 func TestRPCBroadcastsTransactionsToPeers(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {
@@ -393,6 +486,10 @@ func TestRPCBroadcastsTransactionsToPeers(t *testing.T) {
 	if got := peerNode.Account(bob).Balance; got != 100 {
 		t.Fatalf("peer bob balance = %d", got)
 	}
+}
+
+func hexData(value string) string {
+	return "0x" + hex.EncodeToString([]byte(value))
 }
 
 func TestRPCBroadcastsProducedBlocksToPeers(t *testing.T) {
