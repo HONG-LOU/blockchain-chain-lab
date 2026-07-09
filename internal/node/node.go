@@ -159,7 +159,7 @@ func newGenesisStore(balances map[string]uint64, validators []string) *state.Sto
 }
 
 func snapshotIsEmpty(snapshot state.Snapshot) bool {
-	return len(snapshot.Accounts) == 0 && len(snapshot.Stakes) == 0 && len(snapshot.Proposals) == 0 && len(snapshot.Validators) == 0
+	return len(snapshot.Accounts) == 0 && len(snapshot.Stakes) == 0 && len(snapshot.Proposals) == 0 && len(snapshot.Params) == 0 && len(snapshot.Validators) == 0
 }
 
 func (n *Node) SubmitTx(tx types.Transaction) error {
@@ -212,7 +212,8 @@ func (n *Node) submitTxLocked(tx types.Transaction) error {
 	if err != nil {
 		return err
 	}
-	if _, err := n.executor.Execute(working, tx); err != nil {
+	blockHeight := n.blocks[len(n.blocks)-1].Header.Height + 1
+	if _, err := n.executor.ExecuteAtHeight(working, tx, blockHeight); err != nil {
 		return err
 	}
 	n.mempool = append(n.mempool, tx)
@@ -225,19 +226,20 @@ func (n *Node) ProduceBlock() (types.Block, error) {
 
 	working := n.state.Clone()
 	receipts := make([]types.Receipt, 0, len(n.mempool))
+	parent := n.blocks[len(n.blocks)-1]
+	blockHeight := parent.Header.Height + 1
 	for _, tx := range n.mempool {
-		receipt, err := n.executor.Execute(working, tx)
+		receipt, err := n.executor.ExecuteAtHeight(working, tx, blockHeight)
 		if err != nil {
 			return types.Block{}, err
 		}
 		receipts = append(receipts, receipt)
 	}
 
-	parent := n.blocks[len(n.blocks)-1]
 	block := types.Block{
 		Header: types.BlockHeader{
 			ChainID:     n.chainID,
-			Height:      parent.Header.Height + 1,
+			Height:      blockHeight,
 			ParentHash:  parent.Hash(),
 			TimeUnix:    time.Now().Unix(),
 			Proposer:    n.proposer,
@@ -415,6 +417,12 @@ func (n *Node) Proposal(id string) types.Proposal {
 	return n.state.Proposal(id)
 }
 
+func (n *Node) Param(key string) string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.state.Param(key)
+}
+
 func (n *Node) blockAtDepthLocked(depth uint64) types.Block {
 	headHeight := uint64(len(n.blocks) - 1)
 	if headHeight <= depth {
@@ -425,8 +433,9 @@ func (n *Node) blockAtDepthLocked(depth uint64) types.Block {
 
 func (n *Node) pendingStateLocked() (*state.Store, error) {
 	working := n.state.Clone()
+	blockHeight := n.blocks[len(n.blocks)-1].Header.Height + 1
 	for _, pending := range n.mempool {
-		if _, err := n.executor.Execute(working, pending); err != nil {
+		if _, err := n.executor.ExecuteAtHeight(working, pending, blockHeight); err != nil {
 			return nil, err
 		}
 	}
@@ -486,7 +495,7 @@ func (n *Node) validateBlockOnStateLocked(parent types.Block, parentState *state
 	executor := core.NewExecutor(n.chainID, block.Header.Proposer, contracts.NewRuntimeWithDefaults())
 	receipts := make([]types.Receipt, 0, len(block.Transactions))
 	for _, tx := range block.Transactions {
-		receipt, err := executor.Execute(working, tx)
+		receipt, err := executor.ExecuteAtHeight(working, tx, block.Header.Height)
 		if err != nil {
 			return nil, err
 		}

@@ -269,7 +269,7 @@ func faucetRequestCommand(args []string, out io.Writer) error {
 
 func txCommand(args []string, out io.Writer) {
 	if len(args) < 1 {
-		log.Fatal("usage: chainlab tx <transfer|deploy|call|wasm-upload|stake|validator-join|validator-leave|validator-slash|raw-submit>")
+		log.Fatal("usage: chainlab tx <transfer|deploy|call|wasm-upload|stake|proposal-submit|vote|proposal-execute|validator-join|validator-leave|validator-slash|raw-submit>")
 	}
 	switch args[0] {
 	case "transfer":
@@ -290,6 +290,18 @@ func txCommand(args []string, out io.Writer) {
 		}
 	case "stake":
 		if err := stakeCommand(args[1:], out); err != nil {
+			log.Fatal(err)
+		}
+	case "proposal-submit":
+		if err := proposalSubmitCommand(args[1:], out); err != nil {
+			log.Fatal(err)
+		}
+	case "vote":
+		if err := voteCommand(args[1:], out); err != nil {
+			log.Fatal(err)
+		}
+	case "proposal-execute":
+		if err := proposalExecuteCommand(args[1:], out); err != nil {
 			log.Fatal(err)
 		}
 	case "validator-join":
@@ -315,7 +327,7 @@ func txCommand(args []string, out io.Writer) {
 
 func queryCommand(args []string, out io.Writer) {
 	if len(args) < 1 {
-		log.Fatal("usage: chainlab query <account|tx|head|finality|mempool|logs|validators|call|estimate-gas>")
+		log.Fatal("usage: chainlab query <account|tx|head|finality|mempool|logs|validators|proposal|param|call|estimate-gas>")
 	}
 	var err error
 	switch args[0] {
@@ -333,6 +345,10 @@ func queryCommand(args []string, out io.Writer) {
 		err = logsCommand(args[1:], out)
 	case "validators":
 		err = validatorsCommand(args[1:], out)
+	case "proposal":
+		err = proposalCommand(args[1:], out)
+	case "param":
+		err = paramCommand(args[1:], out)
 	case "call":
 		err = callCommand(args[1:], out)
 	case "estimate-gas":
@@ -491,6 +507,114 @@ func stakeCommand(args []string, out io.Writer) error {
 		return err
 	}
 	tx, err := buildSignedTransaction(*rpcURL, *privateKeyHex, types.TxStake, "", *value, *gasLimit, *gasPrice, nil)
+	if err != nil {
+		return err
+	}
+	response, err := submitTransaction(*rpcURL, tx)
+	if err != nil {
+		return err
+	}
+	return writeTo(out, response)
+}
+
+func proposalSubmitCommand(args []string, out io.Writer) error {
+	flags := flag.NewFlagSet("tx proposal-submit", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
+	privateKeyHex := flags.String("private-key", "", "proposer private key")
+	title := flags.String("title", "", "proposal title")
+	description := flags.String("description", "", "proposal description")
+	kind := flags.String("kind", "param.change", "proposal kind")
+	param := flags.String("param", "", "parameter key for param.change")
+	value := flags.String("value", "", "parameter value for param.change")
+	votingPeriod := flags.Uint64("voting-period", 2, "voting period in blocks")
+	gasLimit := flags.Uint64("gas-limit", 35_000, "gas limit")
+	gasPrice := flags.Uint64("gas-price", 1, "gas price")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*title) == "" {
+		return fmt.Errorf("proposal title is required")
+	}
+	if strings.TrimSpace(*kind) == "" {
+		return fmt.Errorf("proposal kind is required")
+	}
+	if *votingPeriod == 0 {
+		return fmt.Errorf("voting period must be positive")
+	}
+	payload := map[string]string{
+		"title":         *title,
+		"description":   *description,
+		"kind":          *kind,
+		"voting_period": strconv.FormatUint(*votingPeriod, 10),
+	}
+	if *kind == "param.change" {
+		if strings.TrimSpace(*param) == "" {
+			return fmt.Errorf("param is required")
+		}
+		if strings.TrimSpace(*value) == "" {
+			return fmt.Errorf("value is required")
+		}
+		payload["param"] = *param
+		payload["value"] = *value
+	}
+	tx, err := buildSignedTransaction(*rpcURL, *privateKeyHex, types.TxProposalSubmit, "", 0, *gasLimit, *gasPrice, payload)
+	if err != nil {
+		return err
+	}
+	response, err := submitTransaction(*rpcURL, tx)
+	if err != nil {
+		return err
+	}
+	return writeTo(out, response)
+}
+
+func voteCommand(args []string, out io.Writer) error {
+	flags := flag.NewFlagSet("tx vote", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
+	privateKeyHex := flags.String("private-key", "", "voter private key")
+	proposal := flags.String("proposal", "", "proposal id")
+	choice := flags.String("choice", "", "vote choice: yes, no, or abstain")
+	gasLimit := flags.Uint64("gas-limit", 25_000, "gas limit")
+	gasPrice := flags.Uint64("gas-price", 1, "gas price")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*proposal) == "" {
+		return fmt.Errorf("proposal is required")
+	}
+	if strings.TrimSpace(*choice) == "" {
+		return fmt.Errorf("choice is required")
+	}
+	payload := map[string]string{
+		"proposal": *proposal,
+		"choice":   *choice,
+	}
+	tx, err := buildSignedTransaction(*rpcURL, *privateKeyHex, types.TxVote, "", 0, *gasLimit, *gasPrice, payload)
+	if err != nil {
+		return err
+	}
+	response, err := submitTransaction(*rpcURL, tx)
+	if err != nil {
+		return err
+	}
+	return writeTo(out, response)
+}
+
+func proposalExecuteCommand(args []string, out io.Writer) error {
+	flags := flag.NewFlagSet("tx proposal-execute", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
+	privateKeyHex := flags.String("private-key", "", "executor private key")
+	proposal := flags.String("proposal", "", "proposal id")
+	gasLimit := flags.Uint64("gas-limit", 35_000, "gas limit")
+	gasPrice := flags.Uint64("gas-price", 1, "gas price")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*proposal) == "" {
+		return fmt.Errorf("proposal is required")
+	}
+	payload := map[string]string{"proposal": *proposal}
+	tx, err := buildSignedTransaction(*rpcURL, *privateKeyHex, types.TxProposalExecute, "", 0, *gasLimit, *gasPrice, payload)
 	if err != nil {
 		return err
 	}
@@ -882,6 +1006,58 @@ func validatorsCommand(args []string, out io.Writer) error {
 		return err
 	}
 	return writeTo(out, validators)
+}
+
+func proposalCommand(args []string, out io.Writer) error {
+	flags := flag.NewFlagSet("query proposal", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
+	id := flags.String("id", "", "proposal id")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*id) == "" {
+		return fmt.Errorf("proposal id is required")
+	}
+	resp, err := http.Get(trimSlash(*rpcURL) + "/proposal/" + *id)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("proposal query failed: status %d: %s", resp.StatusCode, string(body))
+	}
+	var proposal types.Proposal
+	if err := json.NewDecoder(resp.Body).Decode(&proposal); err != nil {
+		return err
+	}
+	return writeTo(out, proposal)
+}
+
+func paramCommand(args []string, out io.Writer) error {
+	flags := flag.NewFlagSet("query param", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
+	key := flags.String("key", "", "parameter key")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*key) == "" {
+		return fmt.Errorf("param key is required")
+	}
+	resp, err := http.Get(trimSlash(*rpcURL) + "/param/" + *key)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("param query failed: status %d: %s", resp.StatusCode, string(body))
+	}
+	var param map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&param); err != nil {
+		return err
+	}
+	return writeTo(out, param)
 }
 
 func callCommand(args []string, out io.Writer) error {

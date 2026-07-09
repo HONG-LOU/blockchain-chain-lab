@@ -118,22 +118,42 @@ func TestStakeUnstakeAndVote(t *testing.T) {
 		t.Fatalf("stake = %d", got)
 	}
 
+	submit := signedTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxProposalSubmit,
+		From:     alice,
+		Nonce:    1,
+		GasLimit: 35_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"title":         "Upgrade one",
+			"kind":          "param.change",
+			"param":         "governance.mode",
+			"value":         "demo",
+			"voting_period": "2",
+		},
+	})
+	submitReceipt, err := executor.ExecuteAtHeight(store, submit, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	vote := signedTx(t, key, types.Transaction{
 		ChainID:  "chainlab-local",
 		Type:     types.TxVote,
 		From:     alice,
-		Nonce:    1,
+		Nonce:    2,
 		GasLimit: 25_000,
 		GasPrice: 1,
 		Payload: map[string]string{
-			"proposal": "upgrade-1",
+			"proposal": submitReceipt.ProposalID,
 			"choice":   "yes",
 		},
 	})
-	if _, err := executor.Execute(store, vote); err != nil {
+	if _, err := executor.ExecuteAtHeight(store, vote, 2); err != nil {
 		t.Fatal(err)
 	}
-	if got := store.Proposal("upgrade-1").Votes["yes"]; got != 500 {
+	if got := store.Proposal(submitReceipt.ProposalID).Votes["yes"]; got != 500 {
 		t.Fatalf("yes vote power = %d", got)
 	}
 
@@ -141,7 +161,7 @@ func TestStakeUnstakeAndVote(t *testing.T) {
 		ChainID:  "chainlab-local",
 		Type:     types.TxUnstake,
 		From:     alice,
-		Nonce:    2,
+		Nonce:    3,
 		Value:    200,
 		GasLimit: 30_000,
 		GasPrice: 1,
@@ -151,6 +171,104 @@ func TestStakeUnstakeAndVote(t *testing.T) {
 	}
 	if got := store.StakeOf(alice); got != 300 {
 		t.Fatalf("stake after unstake = %d", got)
+	}
+}
+
+func TestGovernanceProposalLifecycleExecutesParamChange(t *testing.T) {
+	store, executor, key, alice, _ := newExecutorFixture(t)
+	if err := store.AddStake(alice, 500); err != nil {
+		t.Fatal(err)
+	}
+
+	submit := signedTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxProposalSubmit,
+		From:     alice,
+		Nonce:    0,
+		GasLimit: 35_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"title":         "Tune governance quorum",
+			"description":   "Move quorum to majority for the local chain",
+			"kind":          "param.change",
+			"param":         "governance.quorum",
+			"value":         "majority",
+			"voting_period": "2",
+		},
+	})
+	submitReceipt, err := executor.ExecuteAtHeight(store, submit, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if submitReceipt.ProposalID == "" {
+		t.Fatalf("submit receipt = %+v", submitReceipt)
+	}
+	proposal := store.Proposal(submitReceipt.ProposalID)
+	if proposal.Status != types.ProposalStatusOpen {
+		t.Fatalf("proposal after submit = %+v", proposal)
+	}
+	if proposal.SubmitHeight != 1 || proposal.VotingEndHeight != 3 {
+		t.Fatalf("proposal heights = submit %d end %d", proposal.SubmitHeight, proposal.VotingEndHeight)
+	}
+
+	vote := signedTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxVote,
+		From:     alice,
+		Nonce:    1,
+		GasLimit: 25_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"proposal": submitReceipt.ProposalID,
+			"choice":   "yes",
+		},
+	})
+	if _, err := executor.ExecuteAtHeight(store, vote, 2); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Proposal(submitReceipt.ProposalID).Votes["yes"]; got != 500 {
+		t.Fatalf("yes votes = %d", got)
+	}
+
+	earlyExecute := signedTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxProposalExecute,
+		From:     alice,
+		Nonce:    2,
+		GasLimit: 35_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"proposal": submitReceipt.ProposalID,
+		},
+	})
+	if _, err := executor.ExecuteAtHeight(store, earlyExecute, 2); err == nil {
+		t.Fatal("proposal should not execute before voting period ends")
+	}
+
+	execute := signedTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxProposalExecute,
+		From:     alice,
+		Nonce:    2,
+		GasLimit: 35_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"proposal": submitReceipt.ProposalID,
+		},
+	})
+	executeReceipt, err := executor.ExecuteAtHeight(store, execute, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Param("governance.quorum"); got != "majority" {
+		t.Fatalf("param value = %q", got)
+	}
+	proposal = store.Proposal(submitReceipt.ProposalID)
+	if proposal.Status != types.ProposalStatusExecuted {
+		t.Fatalf("proposal after execute = %+v", proposal)
+	}
+	if len(executeReceipt.Events) != 1 || executeReceipt.Events[0].Type != "governance.proposal.executed" {
+		t.Fatalf("execute receipt events = %+v", executeReceipt.Events)
 	}
 }
 

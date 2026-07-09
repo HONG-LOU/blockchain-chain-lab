@@ -14,6 +14,7 @@ type Store struct {
 	codes      map[string]types.ContractCode
 	stakes     map[string]uint64
 	proposals  map[string]types.Proposal
+	params     map[string]string
 	validators []string
 }
 
@@ -22,6 +23,7 @@ type Snapshot struct {
 	Codes      map[string]types.ContractCode `json:"codes,omitempty"`
 	Stakes     map[string]uint64             `json:"stakes"`
 	Proposals  map[string]types.Proposal     `json:"proposals"`
+	Params     map[string]string             `json:"params,omitempty"`
 	Validators []string                      `json:"validators,omitempty"`
 }
 
@@ -31,6 +33,7 @@ func NewStore() *Store {
 		codes:     make(map[string]types.ContractCode),
 		stakes:    make(map[string]uint64),
 		proposals: make(map[string]types.Proposal),
+		params:    make(map[string]string),
 	}
 }
 
@@ -55,9 +58,10 @@ func NewStoreFromSnapshot(snapshot Snapshot) *Store {
 		store.stakes[normalize(address)] = stake
 	}
 	for id, proposal := range snapshot.Proposals {
-		proposal.Votes = cloneUint64Map(proposal.Votes)
-		proposal.Voters = cloneStringMap(proposal.Voters)
-		store.proposals[id] = proposal
+		store.SetProposal(normalizeProposalID(id, proposal))
+	}
+	for key, value := range snapshot.Params {
+		store.params[strings.TrimSpace(key)] = value
 	}
 	store.SetValidators(snapshot.Validators)
 	return store
@@ -74,10 +78,9 @@ func (s *Store) Clone() *Store {
 		clone.stakes[address] = stake
 	}
 	for id, proposal := range s.proposals {
-		proposal.Votes = cloneUint64Map(proposal.Votes)
-		proposal.Voters = cloneStringMap(proposal.Voters)
-		clone.proposals[id] = proposal
+		clone.proposals[id] = cloneProposal(proposal)
 	}
+	clone.params = cloneStringMap(s.params)
 	clone.validators = cloneStringSlice(s.validators)
 	return clone
 }
@@ -88,6 +91,7 @@ func (s *Store) Snapshot() Snapshot {
 		Codes:      cloneContractCodeMap(s.codes),
 		Stakes:     cloneUint64Map(s.stakes),
 		Proposals:  make(map[string]types.Proposal, len(s.proposals)),
+		Params:     cloneStringMap(s.params),
 		Validators: cloneStringSlice(s.validators),
 	}
 	for address, account := range s.accounts {
@@ -95,9 +99,7 @@ func (s *Store) Snapshot() Snapshot {
 		snapshot.Accounts[address] = account
 	}
 	for id, proposal := range s.proposals {
-		proposal.Votes = cloneUint64Map(proposal.Votes)
-		proposal.Voters = cloneStringMap(proposal.Voters)
-		snapshot.Proposals[id] = proposal
+		snapshot.Proposals[id] = cloneProposal(proposal)
 	}
 	return snapshot
 }
@@ -108,6 +110,7 @@ func (s *Store) ReplaceWith(other *Store) {
 	s.codes = replacement.codes
 	s.stakes = replacement.stakes
 	s.proposals = replacement.proposals
+	s.params = replacement.params
 	s.validators = replacement.validators
 }
 
@@ -255,6 +258,20 @@ func (s *Store) Validators() []string {
 	return cloneStringSlice(s.validators)
 }
 
+func (s *Store) SetProposal(proposal types.Proposal) {
+	proposal.ID = strings.TrimSpace(proposal.ID)
+	if proposal.ID == "" {
+		return
+	}
+	if proposal.Votes == nil {
+		proposal.Votes = make(map[string]uint64)
+	}
+	if proposal.Voters == nil {
+		proposal.Voters = make(map[string]string)
+	}
+	s.proposals[proposal.ID] = cloneProposal(proposal)
+}
+
 func (s *Store) RecordVote(proposalID string, voter string, choice string, power uint64) {
 	proposal := s.Proposal(proposalID)
 	previousChoice, voted := proposal.Voters[normalize(voter)]
@@ -268,21 +285,35 @@ func (s *Store) RecordVote(proposalID string, voter string, choice string, power
 	}
 	proposal.Votes[choice] += power
 	proposal.Voters[normalize(voter)] = choice
-	s.proposals[proposalID] = proposal
+	s.SetProposal(proposal)
 }
 
 func (s *Store) Proposal(id string) types.Proposal {
 	proposal, ok := s.proposals[id]
 	if !ok {
 		return types.Proposal{
-			ID:     id,
+			ID:     strings.TrimSpace(id),
 			Votes:  make(map[string]uint64),
 			Voters: make(map[string]string),
 		}
 	}
-	proposal.Votes = cloneUint64Map(proposal.Votes)
-	proposal.Voters = cloneStringMap(proposal.Voters)
-	return proposal
+	return cloneProposal(proposal)
+}
+
+func (s *Store) SetParam(key string, value string) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return
+	}
+	s.params[key] = value
+}
+
+func (s *Store) Param(key string) string {
+	return s.params[strings.TrimSpace(key)]
+}
+
+func (s *Store) Params() map[string]string {
+	return cloneStringMap(s.params)
 }
 
 func (s *Store) Root() string {
@@ -291,12 +322,14 @@ func (s *Store) Root() string {
 		Codes      map[string]types.ContractCode `json:"codes"`
 		Stakes     map[string]uint64             `json:"stakes"`
 		Proposals  map[string]types.Proposal     `json:"proposals"`
+		Params     map[string]string             `json:"params"`
 		Validators []string                      `json:"validators"`
 	}{
 		Accounts:   make(map[string]types.Account, len(s.accounts)),
 		Codes:      cloneContractCodeMap(s.codes),
 		Stakes:     cloneUint64Map(s.stakes),
 		Proposals:  make(map[string]types.Proposal, len(s.proposals)),
+		Params:     cloneStringMap(s.params),
 		Validators: cloneStringSlice(s.validators),
 	}
 	for address, account := range s.accounts {
@@ -304,11 +337,17 @@ func (s *Store) Root() string {
 		snapshot.Accounts[address] = account
 	}
 	for id, proposal := range s.proposals {
-		proposal.Votes = cloneUint64Map(proposal.Votes)
-		proposal.Voters = cloneStringMap(proposal.Voters)
-		snapshot.Proposals[id] = proposal
+		snapshot.Proposals[id] = cloneProposal(proposal)
 	}
 	return hash.MustHex(snapshot)
+}
+
+func normalizeProposalID(id string, proposal types.Proposal) types.Proposal {
+	proposal.ID = strings.TrimSpace(proposal.ID)
+	if proposal.ID == "" {
+		proposal.ID = strings.TrimSpace(id)
+	}
+	return proposal
 }
 
 func (s *Store) addValidator(address string) error {
@@ -356,6 +395,12 @@ func cloneContractCodeMap(input map[string]types.ContractCode) map[string]types.
 		output[key] = value
 	}
 	return output
+}
+
+func cloneProposal(input types.Proposal) types.Proposal {
+	input.Votes = cloneUint64Map(input.Votes)
+	input.Voters = cloneStringMap(input.Voters)
+	return input
 }
 
 func cloneUint64Map(input map[string]uint64) map[string]uint64 {

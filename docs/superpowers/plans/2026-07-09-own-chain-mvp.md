@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the first runnable local blockchain release with signed transactions, deterministic state, PoA block production, native contracts, staking/governance modules, RPC, CLI, and tests.
+**Goal:** Build the first runnable local blockchain release with signed transactions, deterministic state, PoA block production, native contracts, staking/governance proposal modules, RPC, CLI, and tests.
 
 **Architecture:** Implement a Go monorepo with small internal packages. Consensus-critical types live in `internal/types`; state transitions live in `internal/core`; signing lives in `internal/crypto`; contracts and modules are isolated behind explicit interfaces; the node package composes mempool, block production, and RPC operations.
 
@@ -114,7 +114,7 @@ Expected: PASS.
 
 - [ ] **Step 1: Write failing executor tests**
 
-Cover transfer success, invalid signature, bad nonce, insufficient funds, gas fee charging, stake, unstake, and governance vote.
+Cover transfer success, invalid signature, bad nonce, insufficient funds, gas fee charging, stake, unstake, proposal submission, voting, and proposal execution.
 
 - [ ] **Step 2: Run failing tests**
 
@@ -124,7 +124,7 @@ Expected: FAIL because executor does not exist.
 
 - [ ] **Step 3: Implement executor**
 
-Validate signatures and nonces, charge gas fees, mutate balances, staking records, and governance proposals, and return receipts.
+Validate signatures and nonces, charge gas fees, mutate balances, staking records, governance proposals, and governance parameters, and return receipts.
 
 - [ ] **Step 4: Run tests**
 
@@ -221,11 +221,10 @@ Expected: PASS.
 
 Run: `go run ./cmd/chainlab demo`
 
-Expected: output includes a produced block, successful transfer, counter increment, token transfer, stake, and governance vote.
+Expected: output includes produced blocks, successful transfer, counter increment, token transfer, stake, governance vote, and an executed parameter change.
 
 ## Self-Review
 
 - The plan covers every phase 1 feature in the design.
 - The plan has no placeholder tasks; future production features are explicitly out of phase 1.
 - Package names and APIs are intentionally small so tests can drive exact signatures.
-

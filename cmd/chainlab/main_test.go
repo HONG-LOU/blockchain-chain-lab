@@ -497,6 +497,124 @@ func TestStakeAndValidatorJoinCommandsSendSignedTx(t *testing.T) {
 	}
 }
 
+func TestGovernanceProposalCommandsSubmitVoteExecuteAndQuery(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := crypto.AddressFromPrivateKey(key)
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	var stakeOut bytes.Buffer
+	if err := stakeCommand([]string{
+		"--rpc", server.URL,
+		"--private-key", crypto.PrivateKeyToHex(key),
+		"--value", "500",
+	}, &stakeOut); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+
+	var submitOut bytes.Buffer
+	if err := proposalSubmitCommand([]string{
+		"--rpc", server.URL,
+		"--private-key", crypto.PrivateKeyToHex(key),
+		"--title", "Set local quorum",
+		"--description", "Use majority quorum for ChainLab governance",
+		"--kind", "param.change",
+		"--param", "governance.quorum",
+		"--value", "majority",
+		"--voting-period", "2",
+	}, &submitOut); err != nil {
+		t.Fatal(err)
+	}
+	var submitResult struct {
+		Hash string `json:"hash"`
+	}
+	if err := json.Unmarshal(submitOut.Bytes(), &submitResult); err != nil {
+		t.Fatal(err)
+	}
+	if submitResult.Hash == "" {
+		t.Fatalf("submit result = %+v", submitResult)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+
+	var txOut bytes.Buffer
+	if err := txQueryCommand([]string{"--rpc", server.URL, "--hash", submitResult.Hash}, &txOut); err != nil {
+		t.Fatal(err)
+	}
+	var txResult types.TransactionRecord
+	if err := json.Unmarshal(txOut.Bytes(), &txResult); err != nil {
+		t.Fatal(err)
+	}
+	proposalID := txResult.Receipt.ProposalID
+	if proposalID == "" {
+		t.Fatalf("tx result = %+v", txResult)
+	}
+
+	var voteOut bytes.Buffer
+	if err := voteCommand([]string{
+		"--rpc", server.URL,
+		"--private-key", crypto.PrivateKeyToHex(key),
+		"--proposal", proposalID,
+		"--choice", "yes",
+	}, &voteOut); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+
+	var executeOut bytes.Buffer
+	if err := proposalExecuteCommand([]string{
+		"--rpc", server.URL,
+		"--private-key", crypto.PrivateKeyToHex(key),
+		"--proposal", proposalID,
+	}, &executeOut); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+
+	var proposalOut bytes.Buffer
+	if err := proposalCommand([]string{"--rpc", server.URL, "--id", proposalID}, &proposalOut); err != nil {
+		t.Fatal(err)
+	}
+	var proposal types.Proposal
+	if err := json.Unmarshal(proposalOut.Bytes(), &proposal); err != nil {
+		t.Fatal(err)
+	}
+	if proposal.Status != types.ProposalStatusExecuted || proposal.Votes["yes"] != 500 {
+		t.Fatalf("proposal = %+v", proposal)
+	}
+
+	var paramOut bytes.Buffer
+	if err := paramCommand([]string{"--rpc", server.URL, "--key", "governance.quorum"}, &paramOut); err != nil {
+		t.Fatal(err)
+	}
+	var param map[string]string
+	if err := json.Unmarshal(paramOut.Bytes(), &param); err != nil {
+		t.Fatal(err)
+	}
+	if param["value"] != "majority" {
+		t.Fatalf("param = %+v", param)
+	}
+}
+
 func TestValidatorLeaveCommandSendsSignedTx(t *testing.T) {
 	proposerKey, err := crypto.GenerateKey()
 	if err != nil {

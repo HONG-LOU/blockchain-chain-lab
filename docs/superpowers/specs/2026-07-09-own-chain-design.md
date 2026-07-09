@@ -38,7 +38,7 @@ Phase 1 creates a runnable local blockchain with these capabilities:
 - Account model with balances, nonces, optional contract code id, and key-value storage.
 - Secp256k1 transaction signatures and Ethereum-style 20-byte addresses.
 - ChainLab-native raw transaction encoding for offline signing and later broadcast.
-- Transaction types for transfer, contract deployment, contract calls, staking, unstaking, and governance voting.
+- Transaction types for transfer, contract deployment, contract calls, staking, unstaking, proposal submission, proposal execution, and governance voting.
 - Validator lifecycle starts with staked validator join transactions, explicit validator leave transactions, and validator slashing transactions. The active validator set is committed into state roots.
 - Gas accounting with gas limit, gas price, and deterministic fee charging.
 - Block production with deterministic transaction, receipt, and state roots.
@@ -78,7 +78,7 @@ All consensus-critical hashes use deterministic JSON encoding over normalized st
 
 ### `internal/state`
 
-Maintains accounts, native balances, contract storage, staking records, governance proposals, active validators, and deterministic state roots.
+Maintains accounts, native balances, contract storage, staking records, governance proposals, governance parameters, active validators, and deterministic state roots.
 
 The phase 1 backend is in-memory with snapshot cloning for tests. A disk backend can be added behind the same store interface.
 
@@ -135,6 +135,8 @@ Exposes HTTP endpoints:
 - `GET /chain/block/{height}`
 - `GET /account/{address}`
 - `GET /validators`
+- `GET /proposal/{id}`
+- `GET /param/{key}`
 - `POST /tx`
 - `POST /rpc` for JSON-RPC-style calls
 - EVM-style read calls include account, block, transaction, receipt, and log queries.
@@ -177,7 +179,7 @@ The phase 1 suite must prove:
 - block validation catches wrong parent, wrong roots, and unauthorized proposers
 - counter contract deploy/call changes isolated contract storage
 - token contract mint/transfer updates token balances
-- staking and governance module transactions produce expected state
+- staking and governance proposal lifecycle transactions produce expected proposal and parameter state
 - RPC exposes chain state and accepts signed transactions
 - CLI demo completes without errors
 
@@ -217,6 +219,7 @@ Phase 2 progress:
 - Staked accounts can submit `validator.join`; accepted joins update the active validator set for subsequent block scheduling, are included in state roots, persist in snapshots, and can be queried over REST, JSON-RPC, and CLI.
 - Active validators can submit `validator.leave`; accepted leaves remove them from the active validator set, refuse to remove the final validator, update subsequent block scheduling, persist in snapshots, and are available through CLI transaction submission.
 - Active validators can submit `validator.slash` with target, amount, and evidence; accepted slashes burn target stake, remove a depleted target from the active validator set while preserving at least one validator, update scheduling, and are available through CLI transaction submission.
+- Governance now has an explicit proposal lifecycle: staked accounts can submit `proposal.submit` parameter-change proposals, staked voters can cast `vote` transactions while the voting period is open, and `proposal.execute` applies passing `param.change` proposals after the period closes. Proposal metadata, votes, voters, status, and executed params are committed into state roots, persisted in snapshots, exposed over REST/JSON-RPC, and available through CLI commands.
 
 Phase 3:
 

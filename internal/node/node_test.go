@@ -133,6 +133,122 @@ func TestNodePersistsChainStateAndTransactionIndex(t *testing.T) {
 	}
 }
 
+func TestNodePersistsGovernanceProposalAndParam(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	dataDir := t.TempDir()
+
+	first, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		DataDir:        dataDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stake := signedNodeTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxStake,
+		From:     alice,
+		Nonce:    0,
+		Value:    500,
+		GasLimit: 30_000,
+		GasPrice: 1,
+	})
+	if err := first.SubmitTx(stake); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+
+	submit := signedNodeTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxProposalSubmit,
+		From:     alice,
+		Nonce:    1,
+		GasLimit: 35_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"title":         "Enable majority quorum",
+			"kind":          "param.change",
+			"param":         "governance.quorum",
+			"value":         "majority",
+			"voting_period": "2",
+		},
+	})
+	if err := first.SubmitTx(submit); err != nil {
+		t.Fatal(err)
+	}
+	submitBlock, err := first.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposalID := submitBlock.Receipts[0].ProposalID
+	if proposalID == "" {
+		t.Fatalf("submit receipt = %+v", submitBlock.Receipts[0])
+	}
+
+	vote := signedNodeTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxVote,
+		From:     alice,
+		Nonce:    2,
+		GasLimit: 25_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"proposal": proposalID,
+			"choice":   "yes",
+		},
+	})
+	if err := first.SubmitTx(vote); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+
+	execute := signedNodeTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxProposalExecute,
+		From:     alice,
+		Nonce:    3,
+		GasLimit: 35_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"proposal": proposalID,
+		},
+	})
+	if err := first.SubmitTx(execute); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		DataDir:        dataDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposal := reloaded.Proposal(proposalID)
+	if proposal.Status != types.ProposalStatusExecuted {
+		t.Fatalf("reloaded proposal = %+v", proposal)
+	}
+	if got := reloaded.Param("governance.quorum"); got != "majority" {
+		t.Fatalf("reloaded param = %q", got)
+	}
+}
+
 func TestNodePersistsUploadedWASMCode(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {

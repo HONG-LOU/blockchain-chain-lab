@@ -81,6 +81,23 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /validators", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, s.node.Validators())
 	})
+	mux.HandleFunc("GET /proposal/{id}", func(w http.ResponseWriter, r *http.Request) {
+		proposal := s.node.Proposal(r.PathValue("id"))
+		if proposal.Status == "" {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "proposal not found"})
+			return
+		}
+		writeJSON(w, http.StatusOK, proposal)
+	})
+	mux.HandleFunc("GET /param/{key}", func(w http.ResponseWriter, r *http.Request) {
+		key := strings.TrimSpace(r.PathValue("key"))
+		value := s.node.Param(key)
+		if value == "" {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "param not found"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"key": key, "value": value})
+	})
 	mux.HandleFunc("GET /tx/{hash}", func(w http.ResponseWriter, r *http.Request) {
 		record, ok := s.node.Transaction(r.PathValue("hash"))
 		if !ok {
@@ -469,6 +486,35 @@ func handleJSONRPC(w http.ResponseWriter, r *http.Request, n *node.Node) {
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: n.Account(params.Address)})
 	case "chain_validators":
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: n.Validators()})
+	case "chain_proposal":
+		params, err := rpcParams(request.Params)
+		if err != nil || len(params) < 1 {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "proposal id is required"})
+			return
+		}
+		proposalID, ok := params[0].(string)
+		if !ok || strings.TrimSpace(proposalID) == "" {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "proposal id is required"})
+			return
+		}
+		proposal := n.Proposal(proposalID)
+		if proposal.Status == "" {
+			writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: nil})
+			return
+		}
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: proposal})
+	case "chain_param":
+		params, err := rpcParams(request.Params)
+		if err != nil || len(params) < 1 {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "param key is required"})
+			return
+		}
+		key, ok := params[0].(string)
+		if !ok || strings.TrimSpace(key) == "" {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "param key is required"})
+			return
+		}
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: n.Param(key)})
 	case "chain_sendTx":
 		var tx types.Transaction
 		if err := json.Unmarshal(request.Params, &tx); err != nil {

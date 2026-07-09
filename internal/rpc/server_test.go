@@ -223,6 +223,143 @@ func TestRPCExposesValidatorSet(t *testing.T) {
 	}
 }
 
+func TestRPCExposesGovernanceProposalAndParam(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	stake := signedRPCTransaction(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxStake,
+		From:     alice,
+		Nonce:    0,
+		Value:    500,
+		GasLimit: 30_000,
+		GasPrice: 1,
+	})
+	if err := n.SubmitTx(stake); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+
+	submit := signedRPCTransaction(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxProposalSubmit,
+		From:     alice,
+		Nonce:    1,
+		GasLimit: 35_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"title":         "Set governance quorum",
+			"description":   "Use majority quorum for local governance",
+			"kind":          "param.change",
+			"param":         "governance.quorum",
+			"value":         "majority",
+			"voting_period": "2",
+		},
+	})
+	if err := n.SubmitTx(submit); err != nil {
+		t.Fatal(err)
+	}
+	submitBlock, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposalID := submitBlock.Receipts[0].ProposalID
+
+	vote := signedRPCTransaction(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxVote,
+		From:     alice,
+		Nonce:    2,
+		GasLimit: 25_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"proposal": proposalID,
+			"choice":   "yes",
+		},
+	})
+	if err := n.SubmitTx(vote); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+
+	execute := signedRPCTransaction(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxProposalExecute,
+		From:     alice,
+		Nonce:    3,
+		GasLimit: 35_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"proposal": proposalID,
+		},
+	})
+	if err := n.SubmitTx(execute); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := http.Get(server.URL + "/proposal/" + proposalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("proposal status = %d body = %s", resp.StatusCode, string(body))
+	}
+	var proposal types.Proposal
+	if err := json.NewDecoder(resp.Body).Decode(&proposal); err != nil {
+		t.Fatal(err)
+	}
+	if proposal.Status != types.ProposalStatusExecuted || proposal.Votes["yes"] != 500 {
+		t.Fatalf("proposal = %+v", proposal)
+	}
+
+	resp, err = http.Get(server.URL + "/param/governance.quorum")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("param status = %d body = %s", resp.StatusCode, string(body))
+	}
+	var param map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&param); err != nil {
+		t.Fatal(err)
+	}
+	if param["key"] != "governance.quorum" || param["value"] != "majority" {
+		t.Fatalf("param = %+v", param)
+	}
+
+	proposalResult := callRPC(t, server.URL, "chain_proposal", []any{proposalID})
+	proposalMap, ok := proposalResult.(map[string]any)
+	if !ok || proposalMap["status"] != string(types.ProposalStatusExecuted) {
+		t.Fatalf("rpc proposal = %#v", proposalResult)
+	}
+	assertRPCResult(t, server.URL, "chain_param", []any{"governance.quorum"}, "majority")
+}
+
 func TestRPCExposesSafeAndFinalizedHeads(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {

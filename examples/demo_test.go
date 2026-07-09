@@ -32,4 +32,7 @@ func TestRunDemo(t *testing.T) {
 	if summary.YesVotes != 200 {
 		t.Fatalf("yes votes = %d", summary.YesVotes)
 	}
+	if summary.GovernanceParam != "majority" {
+		t.Fatalf("governance param = %q", summary.GovernanceParam)
+	}
 }

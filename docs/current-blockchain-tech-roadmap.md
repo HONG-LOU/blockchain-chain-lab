@@ -14,6 +14,7 @@ As of 2026-07-09, the practical way to build a serious chain is not to copy one 
 
 1. Keep ChainLab as a learning and prototype chain. The goal is to understand the state transition function, blocks, receipts, roots, mempool, signatures, RPC, contract VM boundary, and local validator operations.
 2. Add advanced concepts in small verified slices: uploaded WASM, deterministic resource metering, ABI encoding, richer event indexing, BFT finality simulation, and EVM-style raw transactions.
+   - Current ChainLab progress includes uploaded WASM code, deterministic WASM host-resource gas, validator set changes, and an explicit governance proposal lifecycle for parameter changes.
 3. Once the product target is clear, choose a production base instead of shipping the custom dev chain as a mainnet:
    - OP Stack or another Ethereum rollup stack if liquidity, Solidity, and wallet compatibility matter most.
    - Cosmos SDK if the chain needs sovereign governance, IBC, and custom modules.

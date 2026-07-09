@@ -32,6 +32,10 @@ func NewExecutor(chainID string, feeCollector string, runtime *contracts.Runtime
 }
 
 func (e *Executor) Execute(store *state.Store, tx types.Transaction) (types.Receipt, error) {
+	return e.ExecuteAtHeight(store, tx, 0)
+}
+
+func (e *Executor) ExecuteAtHeight(store *state.Store, tx types.Transaction, blockHeight uint64) (types.Receipt, error) {
 	if tx.ChainID != e.chainID {
 		return types.Receipt{}, fmt.Errorf("wrong chain id %q", tx.ChainID)
 	}
@@ -85,11 +89,37 @@ func (e *Executor) Execute(store *state.Store, tx types.Transaction) (types.Rece
 			return types.Receipt{}, err
 		}
 		receipt.Events = append(receipt.Events, types.Event{Type: "unstake"})
+	case types.TxProposalSubmit:
+		proposal, err := parseProposalSubmitPayload(tx, blockHeight)
+		if err != nil {
+			return types.Receipt{}, err
+		}
+		if working.StakeOf(tx.From) == 0 {
+			return types.Receipt{}, errors.New("proposal submit requires stake")
+		}
+		working.SetProposal(proposal)
+		receipt.ProposalID = proposal.ID
+		receipt.Events = append(receipt.Events, types.Event{Type: "governance.proposal.submitted", Attributes: map[string]string{
+			"proposal": proposal.ID,
+			"kind":     proposal.Kind,
+			"proposer": strings.ToLower(tx.From),
+		}})
 	case types.TxVote:
 		proposal := tx.Payload["proposal"]
 		choice := tx.Payload["choice"]
 		if proposal == "" || choice == "" {
 			return types.Receipt{}, errors.New("vote requires proposal and choice")
+		}
+		choice = strings.ToLower(strings.TrimSpace(choice))
+		if choice != "yes" && choice != "no" && choice != "abstain" {
+			return types.Receipt{}, errors.New("vote choice must be yes, no, or abstain")
+		}
+		record := working.Proposal(proposal)
+		if record.Status != types.ProposalStatusOpen {
+			return types.Receipt{}, errors.New("proposal is not open")
+		}
+		if record.VotingEndHeight != 0 && blockHeight >= record.VotingEndHeight {
+			return types.Receipt{}, errors.New("proposal voting period has ended")
 		}
 		power := working.StakeOf(tx.From)
 		if power == 0 {
@@ -97,6 +127,35 @@ func (e *Executor) Execute(store *state.Store, tx types.Transaction) (types.Rece
 		}
 		working.RecordVote(proposal, tx.From, choice, power)
 		receipt.Events = append(receipt.Events, types.Event{Type: "governance.vote", Attributes: map[string]string{"proposal": proposal, "choice": choice}})
+	case types.TxProposalExecute:
+		proposalID := strings.TrimSpace(tx.Payload["proposal"])
+		if proposalID == "" {
+			return types.Receipt{}, errors.New("proposal execute requires proposal")
+		}
+		proposal := working.Proposal(proposalID)
+		if proposal.Status != types.ProposalStatusOpen {
+			return types.Receipt{}, errors.New("proposal is not open")
+		}
+		if blockHeight < proposal.VotingEndHeight {
+			return types.Receipt{}, errors.New("proposal voting period is still open")
+		}
+		eventType := "governance.proposal.rejected"
+		if proposal.Votes["yes"] > proposal.Votes["no"] && proposal.Votes["yes"] > 0 {
+			if err := executeProposal(working, proposal); err != nil {
+				return types.Receipt{}, err
+			}
+			proposal.Status = types.ProposalStatusExecuted
+			eventType = "governance.proposal.executed"
+		} else {
+			proposal.Status = types.ProposalStatusRejected
+		}
+		working.SetProposal(proposal)
+		receipt.ProposalID = proposal.ID
+		receipt.Events = append(receipt.Events, types.Event{Type: eventType, Attributes: map[string]string{
+			"proposal": proposal.ID,
+			"yes":      strconv.FormatUint(proposal.Votes["yes"], 10),
+			"no":       strconv.FormatUint(proposal.Votes["no"], 10),
+		}})
 	case types.TxValidatorJoin:
 		if working.StakeOf(tx.From) == 0 {
 			return types.Receipt{}, errors.New("validator join requires stake")
@@ -236,6 +295,8 @@ func EstimateGas(txType types.TxType) (uint64, error) {
 		return 30_000, nil
 	case types.TxVote:
 		return 25_000, nil
+	case types.TxProposalSubmit, types.TxProposalExecute:
+		return 35_000, nil
 	case types.TxValidatorJoin, types.TxValidatorLeave:
 		return 40_000, nil
 	case types.TxValidatorSlash:
@@ -249,6 +310,57 @@ func EstimateGas(txType types.TxType) (uint64, error) {
 	default:
 		return 0, fmt.Errorf("unsupported transaction type %q", txType)
 	}
+}
+
+func parseProposalSubmitPayload(tx types.Transaction, blockHeight uint64) (types.Proposal, error) {
+	title := strings.TrimSpace(tx.Payload["title"])
+	if title == "" {
+		return types.Proposal{}, errors.New("proposal title is required")
+	}
+	kind := strings.TrimSpace(tx.Payload["kind"])
+	if kind == "" {
+		return types.Proposal{}, errors.New("proposal kind is required")
+	}
+	periodRaw := strings.TrimSpace(tx.Payload["voting_period"])
+	if periodRaw == "" {
+		return types.Proposal{}, errors.New("proposal voting_period is required")
+	}
+	votingPeriod, err := strconv.ParseUint(periodRaw, 10, 64)
+	if err != nil || votingPeriod == 0 {
+		return types.Proposal{}, errors.New("proposal voting_period must be positive")
+	}
+	proposal := types.Proposal{
+		ID:              types.ProposalID(tx.Hash()),
+		Proposer:        strings.ToLower(tx.From),
+		Title:           title,
+		Description:     strings.TrimSpace(tx.Payload["description"]),
+		Kind:            kind,
+		Status:          types.ProposalStatusOpen,
+		SubmitHeight:    blockHeight,
+		VotingEndHeight: blockHeight + votingPeriod,
+		Votes:           make(map[string]uint64),
+		Voters:          make(map[string]string),
+	}
+	if kind == "param.change" {
+		proposal.Param = strings.TrimSpace(tx.Payload["param"])
+		proposal.Value = strings.TrimSpace(tx.Payload["value"])
+		if proposal.Param == "" {
+			return types.Proposal{}, errors.New("param.change proposal requires param")
+		}
+		if proposal.Value == "" {
+			return types.Proposal{}, errors.New("param.change proposal requires value")
+		}
+		return proposal, nil
+	}
+	return types.Proposal{}, fmt.Errorf("unsupported proposal kind %q", kind)
+}
+
+func executeProposal(store *state.Store, proposal types.Proposal) error {
+	if proposal.Kind == "param.change" {
+		store.SetParam(proposal.Param, proposal.Value)
+		return nil
+	}
+	return fmt.Errorf("unsupported proposal kind %q", proposal.Kind)
 }
 
 func EstimateGasForPayload(txType types.TxType, payload map[string]string) (uint64, error) {

@@ -7,16 +7,18 @@ import (
 type TxType string
 
 const (
-	TxTransfer       TxType = "transfer"
-	TxDeploy         TxType = "deploy"
-	TxCall           TxType = "call"
-	TxWASMUpload     TxType = "wasm.upload"
-	TxStake          TxType = "stake"
-	TxUnstake        TxType = "unstake"
-	TxVote           TxType = "vote"
-	TxValidatorJoin  TxType = "validator.join"
-	TxValidatorLeave TxType = "validator.leave"
-	TxValidatorSlash TxType = "validator.slash"
+	TxTransfer        TxType = "transfer"
+	TxDeploy          TxType = "deploy"
+	TxCall            TxType = "call"
+	TxWASMUpload      TxType = "wasm.upload"
+	TxStake           TxType = "stake"
+	TxUnstake         TxType = "unstake"
+	TxProposalSubmit  TxType = "proposal.submit"
+	TxProposalExecute TxType = "proposal.execute"
+	TxVote            TxType = "vote"
+	TxValidatorJoin   TxType = "validator.join"
+	TxValidatorLeave  TxType = "validator.leave"
+	TxValidatorSlash  TxType = "validator.slash"
 )
 
 type Account struct {
@@ -53,6 +55,10 @@ func WASMCodeID(bytecode []byte) string {
 	return "wasm:" + hash.KeccakHex(bytecode)
 }
 
+func ProposalID(txHash string) string {
+	return "proposal:" + txHash
+}
+
 type Event struct {
 	Type       string            `json:"type"`
 	Attributes map[string]string `json:"attributes,omitempty"`
@@ -65,6 +71,7 @@ type Receipt struct {
 	GasUsed         uint64  `json:"gas_used"`
 	Events          []Event `json:"events,omitempty"`
 	CodeID          string  `json:"code_id,omitempty"`
+	ProposalID      string  `json:"proposal_id,omitempty"`
 	ContractAddress string  `json:"contract_address,omitempty"`
 }
 
@@ -83,10 +90,27 @@ type TransactionRecord struct {
 	Index       int         `json:"index"`
 }
 
+type ProposalStatus string
+
+const (
+	ProposalStatusOpen     ProposalStatus = "open"
+	ProposalStatusRejected ProposalStatus = "rejected"
+	ProposalStatusExecuted ProposalStatus = "executed"
+)
+
 type Proposal struct {
-	ID     string            `json:"id"`
-	Votes  map[string]uint64 `json:"votes"`
-	Voters map[string]string `json:"voters"`
+	ID              string            `json:"id"`
+	Proposer        string            `json:"proposer,omitempty"`
+	Title           string            `json:"title,omitempty"`
+	Description     string            `json:"description,omitempty"`
+	Kind            string            `json:"kind,omitempty"`
+	Param           string            `json:"param,omitempty"`
+	Value           string            `json:"value,omitempty"`
+	Status          ProposalStatus    `json:"status,omitempty"`
+	SubmitHeight    uint64            `json:"submit_height,omitempty"`
+	VotingEndHeight uint64            `json:"voting_end_height,omitempty"`
+	Votes           map[string]uint64 `json:"votes"`
+	Voters          map[string]string `json:"voters"`
 }
 
 type BlockHeader struct {

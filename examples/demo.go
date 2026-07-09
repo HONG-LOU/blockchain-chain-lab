@@ -18,6 +18,7 @@ type Summary struct {
 	WASMValue               string
 	Stake                   uint64
 	YesVotes                uint64
+	GovernanceParam         string
 }
 
 func RunDemo() (Summary, error) {
@@ -189,7 +190,7 @@ func RunDemo() (Summary, error) {
 		return Summary{}, err
 	}
 
-	if err := signAndSubmit(n, key, types.Transaction{
+	if _, err := submitAndProduce(n, key, types.Transaction{
 		ChainID:  "chainlab-local",
 		Type:     types.TxStake,
 		From:     alice,
@@ -200,21 +201,54 @@ func RunDemo() (Summary, error) {
 	}); err != nil {
 		return Summary{}, err
 	}
-	if err := signAndSubmit(n, key, types.Transaction{
+
+	proposalBlock, err := submitAndProduce(n, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxProposalSubmit,
+		From:     alice,
+		Nonce:    10,
+		GasLimit: 35_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"title":         "Set local quorum",
+			"description":   "Use majority quorum for the local chain",
+			"kind":          "param.change",
+			"param":         "governance.quorum",
+			"value":         "majority",
+			"voting_period": "2",
+		},
+	})
+	if err != nil {
+		return Summary{}, err
+	}
+	proposalID := proposalBlock.Receipts[0].ProposalID
+
+	if _, err := submitAndProduce(n, key, types.Transaction{
 		ChainID:  "chainlab-local",
 		Type:     types.TxVote,
 		From:     alice,
-		Nonce:    10,
+		Nonce:    11,
 		GasLimit: 25_000,
 		GasPrice: 1,
 		Payload: map[string]string{
-			"proposal": "upgrade-1",
+			"proposal": proposalID,
 			"choice":   "yes",
 		},
 	}); err != nil {
 		return Summary{}, err
 	}
-	if _, err := n.ProduceBlock(); err != nil {
+
+	if _, err := submitAndProduce(n, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxProposalExecute,
+		From:     alice,
+		Nonce:    12,
+		GasLimit: 35_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"proposal": proposalID,
+		},
+	}); err != nil {
 		return Summary{}, err
 	}
 
@@ -225,7 +259,8 @@ func RunDemo() (Summary, error) {
 		TokenReceiverBalance:    n.Account(token).Storage["balance:"+bob],
 		WASMValue:               wasmValue,
 		Stake:                   n.StakeOf(alice),
-		YesVotes:                n.Proposal("upgrade-1").Votes["yes"],
+		YesVotes:                n.Proposal(proposalID).Votes["yes"],
+		GovernanceParam:         n.Param("governance.quorum"),
 	}, nil
 }
 

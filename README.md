@@ -6,7 +6,7 @@ It currently implements:
 
 - account balances, nonces, storage, and deterministic state roots
 - secp256k1 signatures and Ethereum-style 20-byte addresses
-- transfers, staking, unstaking, and governance voting
+- transfers, staking, unstaking, and a governance proposal lifecycle for parameter changes
 - local proof-of-authority block production with deterministic multi-validator proposer rotation
 - dynamic validator joins, leaves, and slashing through `validator.join` / `validator.leave` / `validator.slash` transactions, with validator set committed into state roots and snapshots
 - deterministic local `safe` and `finalized` chain checkpoints using conservative block-depth rules
@@ -147,6 +147,22 @@ go run ./cmd/chainlab tx validator-leave --rpc http://127.0.0.1:8547 --private-k
 go run ./cmd/chainlab tx validator-slash --rpc http://127.0.0.1:8547 --private-key <reporter-private-key> --target <validator-address> --amount 100 --evidence <evidence-ref>
 ```
 
+Submit, vote on, execute, and query a governance parameter-change proposal:
+
+```powershell
+go run ./cmd/chainlab tx proposal-submit --rpc http://127.0.0.1:8547 --private-key <hex-private-key> --title "Set quorum" --kind param.change --param governance.quorum --value majority --voting-period 2
+go run ./cmd/chainlab chain produce --rpc http://127.0.0.1:8547
+go run ./cmd/chainlab query tx --rpc http://127.0.0.1:8547 --hash <proposal-submit-tx-hash>
+go run ./cmd/chainlab tx vote --rpc http://127.0.0.1:8547 --private-key <hex-private-key> --proposal <proposal-id> --choice yes
+go run ./cmd/chainlab chain produce --rpc http://127.0.0.1:8547
+go run ./cmd/chainlab tx proposal-execute --rpc http://127.0.0.1:8547 --private-key <hex-private-key> --proposal <proposal-id>
+go run ./cmd/chainlab chain produce --rpc http://127.0.0.1:8547
+go run ./cmd/chainlab query proposal --rpc http://127.0.0.1:8547 --id <proposal-id>
+go run ./cmd/chainlab query param --rpc http://127.0.0.1:8547 --key governance.quorum
+```
+
+Proposal ids are returned in the submit transaction receipt as `receipt.proposal_id`. The current pass rule is intentionally simple for the dev chain: yes votes must be greater than no votes and greater than zero after the voting period closes.
+
 Produce a block:
 
 ```powershell
@@ -163,6 +179,8 @@ go run ./cmd/chainlab query account --rpc http://127.0.0.1:8547 --address <addre
 go run ./cmd/chainlab query tx --rpc http://127.0.0.1:8547 --hash <tx-hash>
 go run ./cmd/chainlab query logs --rpc http://127.0.0.1:8547 --from-block 0x1 --to-block latest --address <contract-address> --topic <topic0>
 go run ./cmd/chainlab query validators --rpc http://127.0.0.1:8547
+go run ./cmd/chainlab query proposal --rpc http://127.0.0.1:8547 --id <proposal-id>
+go run ./cmd/chainlab query param --rpc http://127.0.0.1:8547 --key <param-key>
 go run ./cmd/chainlab query call --rpc http://127.0.0.1:8547 --to <contract-address> --method <read-method> --arg address=<address>
 go run ./cmd/chainlab query estimate-gas --rpc http://127.0.0.1:8547 --type call --to <contract-address>
 ```
@@ -179,6 +197,8 @@ go run ./cmd/chainlab query estimate-gas --rpc http://127.0.0.1:8547 --type call
 - `GET /chain/block/{height}`
 - `GET /account/{address}`
 - `GET /validators`
+- `GET /proposal/{id}`
+- `GET /param/{key}`
 - `GET /tx/{hash}`
 - `GET /txpool`
 - `POST /tx` for signed transactions, including `transfer`, `deploy`, `call`, `wasm.upload`, staking, validator, and governance transaction types
@@ -187,7 +207,7 @@ go run ./cmd/chainlab query estimate-gas --rpc http://127.0.0.1:8547 --type call
 - `POST /chain/produce`
 - `POST /peer/tx`
 - `POST /peer/block`
-- `POST /rpc` with methods `chain_head`, `chain_finality`, `chain_getAccount`, `chain_validators`, `chain_sendTx`, and `chain_faucet`
+- `POST /rpc` with methods `chain_head`, `chain_finality`, `chain_getAccount`, `chain_validators`, `chain_proposal`, `chain_param`, `chain_sendTx`, and `chain_faucet`
 - `POST /rpc` with EVM-style methods `eth_chainId`, `eth_blockNumber`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`, `eth_getLogs`, `eth_call`, `eth_estimateGas`, and `eth_sendRawTransaction`. Block range tags support `earliest`, `latest`, `safe`, `finalized`, and hex quantities. `eth_getTransactionCount` also supports `pending` for mempool-aware nonce calculation.
 - `POST /rpc` with txpool-style methods `txpool_status` and `txpool_content`
 
@@ -198,4 +218,5 @@ Next useful milestones:
 - real BFT finality and richer fork-choice safety rules
 - broader WASM ABI with CPU instruction/fuel metering
 - richer contract explorer views with decoded native contract state and events
+- richer governance thresholds, quorum rules, deposits, and upgrade proposal handlers
 - production-framework migration decision: OP Stack, Cosmos SDK, Avalanche L1, or another appchain stack
