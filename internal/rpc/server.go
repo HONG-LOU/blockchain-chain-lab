@@ -114,6 +114,20 @@ func (s *Server) routes() http.Handler {
 		peerErrors := s.broadcastTransaction(tx)
 		writeJSON(w, http.StatusAccepted, map[string]any{"status": "accepted", "hash": tx.Hash(), "peer_errors": peerErrors})
 	})
+	mux.HandleFunc("POST /faucet", func(w http.ResponseWriter, r *http.Request) {
+		request, err := decodeFaucetRequest(r)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		tx, err := s.node.RequestFaucet(request.recipient(), request.Amount)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		peerErrors := s.broadcastTransaction(tx)
+		writeJSON(w, http.StatusAccepted, map[string]any{"status": "accepted", "hash": tx.Hash(), "peer_errors": peerErrors})
+	})
 	mux.HandleFunc("POST /peer/tx", func(w http.ResponseWriter, r *http.Request) {
 		tx, err := decodeTransaction(r)
 		if err != nil {
@@ -167,6 +181,27 @@ func decodeRawTransaction(r *http.Request) (types.Transaction, error) {
 		return types.Transaction{}, err
 	}
 	return tx, nil
+}
+
+type faucetRequest struct {
+	Address string `json:"address"`
+	To      string `json:"to"`
+	Amount  uint64 `json:"amount"`
+}
+
+func (f faucetRequest) recipient() string {
+	if strings.TrimSpace(f.Address) != "" {
+		return f.Address
+	}
+	return f.To
+}
+
+func decodeFaucetRequest(r *http.Request) (faucetRequest, error) {
+	var request faucetRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		return faucetRequest{}, fmt.Errorf("invalid faucet json")
+	}
+	return request, nil
 }
 
 func (s *Server) broadcastTransaction(tx types.Transaction) []string {
@@ -399,6 +434,18 @@ func handleJSONRPC(w http.ResponseWriter, r *http.Request, n *node.Node) {
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: n.Head()})
 	case "chain_finality":
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: n.Finality()})
+	case "chain_faucet":
+		faucet, err := parseRPCFaucetRequest(request.Params)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
+			return
+		}
+		tx, err := n.RequestFaucet(faucet.recipient(), faucet.Amount)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: map[string]string{"hash": tx.Hash()}})
 	case "txpool_status":
 		pool := n.TxPool()
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: map[string]string{
@@ -432,6 +479,21 @@ func handleJSONRPC(w http.ResponseWriter, r *http.Request, n *node.Node) {
 	default:
 		writeJSON(w, http.StatusNotFound, rpcResponse{ID: request.ID, Error: "unknown method"})
 	}
+}
+
+func parseRPCFaucetRequest(raw json.RawMessage) (faucetRequest, error) {
+	if len(raw) == 0 {
+		return faucetRequest{}, fmt.Errorf("faucet request is required")
+	}
+	var direct faucetRequest
+	if err := json.Unmarshal(raw, &direct); err == nil {
+		return direct, nil
+	}
+	var params []faucetRequest
+	if err := json.Unmarshal(raw, &params); err != nil || len(params) == 0 {
+		return faucetRequest{}, fmt.Errorf("faucet request is required")
+	}
+	return params[0], nil
 }
 
 func rpcParams(raw json.RawMessage) ([]any, error) {

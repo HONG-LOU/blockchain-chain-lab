@@ -386,6 +386,54 @@ func TestRawTransactionCommandsBuildAndSubmitRawTx(t *testing.T) {
 	}
 }
 
+func TestFaucetRequestCommandRequestsFunds(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposer := crypto.AddressFromPrivateKey(key)
+	recipient := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{proposer: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	var out bytes.Buffer
+	if err := faucetRequestCommand([]string{
+		"--rpc", server.URL,
+		"--to", recipient,
+		"--amount", "60",
+	}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		Hash string `json:"hash"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Hash == "" {
+		t.Fatalf("faucet result = %+v", result)
+	}
+	pool := n.TxPool()
+	if pool.PendingCount != 1 || pool.Pending[0].Hash() != result.Hash {
+		t.Fatalf("txpool = %+v, hash = %s", pool, result.Hash)
+	}
+
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+	if got := n.Account(recipient).Balance; got != 60 {
+		t.Fatalf("recipient balance = %d", got)
+	}
+}
+
 func TestStakeAndValidatorJoinCommandsSendSignedTx(t *testing.T) {
 	proposerKey, err := crypto.GenerateKey()
 	if err != nil {

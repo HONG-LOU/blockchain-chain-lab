@@ -98,6 +98,8 @@ func main() {
 		initCommand(os.Args[2:])
 	case "node":
 		nodeCommand(os.Args[2:])
+	case "faucet":
+		faucetCommand(os.Args[2:], os.Stdout)
 	case "tx":
 		txCommand(os.Args[2:], os.Stdout)
 	case "query":
@@ -209,7 +211,58 @@ func buildNodeConfig(options nodeOptions) (node.Config, error) {
 }
 
 func usage() {
-	fmt.Println("usage: chainlab <keygen|init|demo|node|tx|query|chain>")
+	fmt.Println("usage: chainlab <keygen|init|demo|node|faucet|tx|query|chain>")
+}
+
+func faucetCommand(args []string, out io.Writer) {
+	if len(args) < 1 {
+		log.Fatal("usage: chainlab faucet <request>")
+	}
+	switch args[0] {
+	case "request":
+		if err := faucetRequestCommand(args[1:], out); err != nil {
+			log.Fatal(err)
+		}
+	default:
+		log.Fatalf("unknown faucet command %q", args[0])
+	}
+}
+
+func faucetRequestCommand(args []string, out io.Writer) error {
+	flags := flag.NewFlagSet("faucet request", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
+	to := flags.String("to", "", "recipient address")
+	amount := flags.Uint64("amount", 0, "faucet amount")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*to) == "" {
+		return fmt.Errorf("recipient is required")
+	}
+	if *amount == 0 {
+		return fmt.Errorf("amount must be positive")
+	}
+	raw, err := json.Marshal(map[string]any{
+		"address": *to,
+		"amount":  *amount,
+	})
+	if err != nil {
+		return err
+	}
+	resp, err := http.Post(trimSlash(*rpcURL)+"/faucet", "application/json", bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("faucet request failed: status %d: %s", resp.StatusCode, string(body))
+	}
+	var response map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return err
+	}
+	return writeTo(out, response)
 }
 
 func txCommand(args []string, out io.Writer) {

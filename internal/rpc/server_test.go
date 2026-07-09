@@ -442,6 +442,101 @@ func TestRESTRawTransactionSubmitsSignedTx(t *testing.T) {
 	}
 }
 
+func TestRESTFaucetRequestsFundRecipientThroughMempool(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposer := chaincrypto.AddressFromPrivateKey(key)
+	recipient := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{proposer: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	raw, err := json.Marshal(map[string]any{"address": recipient, "amount": 125})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post(server.URL+"/faucet", "application/json", bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("faucet status = %d", resp.StatusCode)
+	}
+	var result struct {
+		Status string `json:"status"`
+		Hash   string `json:"hash"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "accepted" || result.Hash == "" {
+		t.Fatalf("faucet response = %+v", result)
+	}
+	pool := n.TxPool()
+	if pool.PendingCount != 1 || pool.Pending[0].Hash() != result.Hash {
+		t.Fatalf("txpool = %+v, hash = %s", pool, result.Hash)
+	}
+
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+	if got := n.Account(recipient).Balance; got != 125 {
+		t.Fatalf("recipient balance = %d", got)
+	}
+}
+
+func TestRPCFaucetRequestsFundRecipientThroughMempool(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposer := chaincrypto.AddressFromPrivateKey(key)
+	recipient := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{proposer: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	result := callRPC(t, server.URL, "chain_faucet", []any{map[string]any{
+		"address": recipient,
+		"amount":  75,
+	}})
+	resultMap, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("faucet result type = %T", result)
+	}
+	hash, ok := resultMap["hash"].(string)
+	if !ok || hash == "" {
+		t.Fatalf("faucet result = %#v", resultMap)
+	}
+	pool := n.TxPool()
+	if pool.PendingCount != 1 || pool.Pending[0].Hash() != hash {
+		t.Fatalf("txpool = %+v, hash = %s", pool, hash)
+	}
+
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+	if got := n.Account(recipient).Balance; got != 75 {
+		t.Fatalf("recipient balance = %d", got)
+	}
+}
+
 func TestEthGetLogsFiltersContractEvents(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {

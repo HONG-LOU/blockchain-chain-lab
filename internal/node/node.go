@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -136,11 +137,51 @@ func (n *Node) SubmitTx(tx types.Transaction) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	working := n.state.Clone()
-	for _, pending := range n.mempool {
-		if _, err := n.executor.Execute(working, pending); err != nil {
-			return err
-		}
+	return n.submitTxLocked(tx)
+}
+
+func (n *Node) RequestFaucet(to string, amount uint64) (types.Transaction, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	to = strings.TrimSpace(to)
+	if to == "" {
+		return types.Transaction{}, errors.New("faucet recipient is required")
+	}
+	if amount == 0 {
+		return types.Transaction{}, errors.New("faucet amount must be positive")
+	}
+
+	working, err := n.pendingStateLocked()
+	if err != nil {
+		return types.Transaction{}, err
+	}
+	account := working.GetAccount(n.proposer)
+	tx := types.Transaction{
+		ChainID:  n.chainID,
+		Type:     types.TxTransfer,
+		From:     n.proposer,
+		To:       to,
+		Nonce:    account.Nonce,
+		Value:    amount,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	}
+	signature, err := chaincrypto.Sign(n.proposerKey, tx.SigningBytes())
+	if err != nil {
+		return types.Transaction{}, err
+	}
+	tx.Signature = signature
+	if err := n.submitTxLocked(tx); err != nil {
+		return types.Transaction{}, err
+	}
+	return tx, nil
+}
+
+func (n *Node) submitTxLocked(tx types.Transaction) error {
+	working, err := n.pendingStateLocked()
+	if err != nil {
+		return err
 	}
 	if _, err := n.executor.Execute(working, tx); err != nil {
 		return err

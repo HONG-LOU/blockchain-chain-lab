@@ -657,6 +657,52 @@ func TestNodePendingAccountIncludesMempoolTransactions(t *testing.T) {
 	}
 }
 
+func TestNodeFaucetRequestsSignedTransferThroughMempool(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposer := chaincrypto.AddressFromPrivateKey(key)
+	recipient := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{proposer: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tx, err := n.RequestFaucet(recipient, 250)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tx.Type != types.TxTransfer || tx.From != proposer || tx.To != recipient || tx.Value != 250 {
+		t.Fatalf("faucet tx = %+v", tx)
+	}
+	if !chaincrypto.Verify(proposer, tx.SigningBytes(), tx.Signature) {
+		t.Fatal("faucet tx signature should verify")
+	}
+	pool := n.Mempool()
+	if len(pool) != 1 || pool[0].Hash() != tx.Hash() {
+		t.Fatalf("mempool = %#v", pool)
+	}
+	pending, err := n.PendingAccount(proposer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Nonce != 1 {
+		t.Fatalf("pending proposer nonce = %d", pending.Nonce)
+	}
+
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+	if got := n.Account(recipient).Balance; got != 250 {
+		t.Fatalf("recipient balance = %d", got)
+	}
+}
+
 func signedNodeTx(t *testing.T, key chaincrypto.PrivateKey, tx types.Transaction) types.Transaction {
 	t.Helper()
 	sig, err := chaincrypto.Sign(key, tx.SigningBytes())
