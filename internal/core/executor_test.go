@@ -117,6 +117,48 @@ func TestEIP1559FeeMarketBurnsBaseFeeAndPaysPriorityFee(t *testing.T) {
 	}
 }
 
+func TestExecutorAcceptsEthereumType2TransferSignature(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	store := state.NewStore()
+	store.SetBalance(alice, 1_000_000)
+	tx := types.Transaction{
+		ChainID:              "chainlab-local",
+		Type:                 types.TxTransfer,
+		From:                 alice,
+		To:                   bob,
+		Nonce:                0,
+		Value:                100,
+		GasLimit:             21_000,
+		MaxFeePerGas:         5,
+		MaxPriorityFeePerGas: 1,
+		SignatureKind:        types.SignatureKindEthereumType2,
+		EthereumRawHash:      "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}
+	digest, err := types.EthereumType2SigningDigest(tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature, err := chaincrypto.SignDigest(key, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx.Signature = signature
+
+	executor := core.NewExecutor("chainlab-local", alice, nil)
+	receipt, err := executor.ExecuteWithContext(store, tx, core.ExecutionContext{BlockHeight: 1, BaseFeePerGas: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !receipt.Success || store.GetAccount(bob).Balance != 100 {
+		t.Fatalf("receipt = %+v bob = %+v", receipt, store.GetAccount(bob))
+	}
+}
+
 func TestSponsoredTransferChargesPaymasterAndNotSenderForGas(t *testing.T) {
 	userKey, err := chaincrypto.GenerateKey()
 	if err != nil {

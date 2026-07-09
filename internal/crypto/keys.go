@@ -38,22 +38,42 @@ func AddressFromPrivateKey(key PrivateKey) string {
 
 func Sign(key PrivateKey, message []byte) (string, error) {
 	digest := hash.Keccak(message)
+	return SignDigest(key, digest)
+}
+
+func SignDigest(key PrivateKey, digest []byte) (string, error) {
+	if len(digest) != 32 {
+		return "", errors.New("digest must be 32 bytes")
+	}
 	signature := secpECDSA.SignCompact(key, digest, false)
 	return "0x" + hex.EncodeToString(signature), nil
 }
 
 func Verify(address string, message []byte, signatureHex string) bool {
-	signatureBytes, err := hexToBytes(signatureHex)
-	if err != nil || len(signatureBytes) != 65 {
-		return false
-	}
-	digest := hash.Keccak(message)
-	pub, _, err := secpECDSA.RecoverCompact(signatureBytes, digest)
+	return VerifyDigest(address, hash.Keccak(message), signatureHex)
+}
+
+func VerifyDigest(address string, digest []byte, signatureHex string) bool {
+	recovered, err := RecoverDigestAddress(digest, signatureHex)
 	if err != nil {
 		return false
 	}
-	recovered := addressFromPublicKey(pub)
 	return recovered == strings.ToLower(address)
+}
+
+func RecoverDigestAddress(digest []byte, signatureHex string) (string, error) {
+	if len(digest) != 32 {
+		return "", errors.New("digest must be 32 bytes")
+	}
+	signatureBytes, err := hexToBytes(signatureHex)
+	if err != nil || len(signatureBytes) != 65 {
+		return "", errors.New("signature must be 65 bytes")
+	}
+	pub, _, err := secpECDSA.RecoverCompact(signatureBytes, digest)
+	if err != nil {
+		return "", err
+	}
+	return addressFromPublicKey(pub), nil
 }
 
 func hexToBytes(encoded string) ([]byte, error) {

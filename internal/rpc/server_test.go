@@ -1727,6 +1727,52 @@ func TestRPCSendRawTransactionSubmitsSignedTx(t *testing.T) {
 	}
 }
 
+func TestRPCSendEthereumType2RawTransactionSubmitsTransfer(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	n, err := node.New(node.Config{
+		ChainID:        "0x7a69",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	raw, rawHash := signedEthereumType2TransferRaw(t, key, rpcEthereumType2Transfer{
+		ChainID:              31337,
+		Nonce:                0,
+		MaxPriorityFeePerGas: 1,
+		MaxFeePerGas:         5,
+		GasLimit:             21_000,
+		To:                   bob,
+		Value:                100,
+	})
+	result := callRPC(t, server.URL, "eth_sendRawTransaction", []any{raw})
+	if result != rawHash {
+		t.Fatalf("raw tx result = %v, want %s", result, rawHash)
+	}
+	pool := n.TxPool()
+	if pool.PendingCount != 1 || pool.Pending[0].Hash() != rawHash || pool.Pending[0].SignatureKind != types.SignatureKindEthereumType2 {
+		t.Fatalf("txpool = %+v", pool)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+	if got := n.Account(bob).Balance; got != 100 {
+		t.Fatalf("bob balance = %d", got)
+	}
+	if _, ok := n.Transaction(rawHash); !ok {
+		t.Fatalf("ethereum raw tx hash %s not indexed", rawHash)
+	}
+}
+
 func TestRESTRawTransactionSubmitsSignedTx(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {
@@ -1769,6 +1815,61 @@ func TestRESTRawTransactionSubmitsSignedTx(t *testing.T) {
 	}
 	if result.Hash != tx.Hash() {
 		t.Fatalf("raw tx hash = %q, want %q", result.Hash, tx.Hash())
+	}
+}
+
+func TestRESTEthereumType2RawTransactionSubmitsTransfer(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	n, err := node.New(node.Config{
+		ChainID:        "0x7a69",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	raw, rawHash := signedEthereumType2TransferRaw(t, key, rpcEthereumType2Transfer{
+		ChainID:              31337,
+		Nonce:                0,
+		MaxPriorityFeePerGas: 1,
+		MaxFeePerGas:         5,
+		GasLimit:             21_000,
+		To:                   bob,
+		Value:                100,
+	})
+	body, err := json.Marshal(map[string]string{"raw": raw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post(server.URL+"/tx/raw", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("raw tx status = %d", resp.StatusCode)
+	}
+	var result struct {
+		Hash string `json:"hash"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Hash != rawHash {
+		t.Fatalf("raw tx hash = %q, want %q", result.Hash, rawHash)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+	if got := n.Account(bob).Balance; got != 100 {
+		t.Fatalf("bob balance = %d", got)
 	}
 }
 
@@ -2928,6 +3029,127 @@ func signedRPCTransaction(t *testing.T, key chaincrypto.PrivateKey, tx types.Tra
 	}
 	tx.Signature = sig
 	return tx
+}
+
+type rpcEthereumType2Transfer struct {
+	ChainID              uint64
+	Nonce                uint64
+	MaxPriorityFeePerGas uint64
+	MaxFeePerGas         uint64
+	GasLimit             uint64
+	To                   string
+	Value                uint64
+}
+
+func signedEthereumType2TransferRaw(t *testing.T, key chaincrypto.PrivateKey, tx rpcEthereumType2Transfer) (string, string) {
+	t.Helper()
+	unsigned := testRLPList(
+		testRLPUint(tx.ChainID),
+		testRLPUint(tx.Nonce),
+		testRLPUint(tx.MaxPriorityFeePerGas),
+		testRLPUint(tx.MaxFeePerGas),
+		testRLPUint(tx.GasLimit),
+		testRLPAddress(t, tx.To),
+		testRLPUint(tx.Value),
+		testRLPBytes(nil),
+		testRLPList(),
+	)
+	digest := hash.Keccak(append([]byte{0x02}, unsigned...))
+	signature, err := chaincrypto.SignDigest(key, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signatureBytes, err := hex.DecodeString(strings.TrimPrefix(signature, "0x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(signatureBytes) != 65 || signatureBytes[0] < 27 {
+		t.Fatalf("compact signature = %x", signatureBytes)
+	}
+	yParity := uint64(signatureBytes[0] - 27)
+	if yParity > 1 {
+		t.Fatalf("unexpected y parity %d from compact header %d", yParity, signatureBytes[0])
+	}
+	signed := testRLPList(
+		testRLPUint(tx.ChainID),
+		testRLPUint(tx.Nonce),
+		testRLPUint(tx.MaxPriorityFeePerGas),
+		testRLPUint(tx.MaxFeePerGas),
+		testRLPUint(tx.GasLimit),
+		testRLPAddress(t, tx.To),
+		testRLPUint(tx.Value),
+		testRLPBytes(nil),
+		testRLPList(),
+		testRLPUint(yParity),
+		testRLPBytes(signatureBytes[1:33]),
+		testRLPBytes(signatureBytes[33:65]),
+	)
+	raw := append([]byte{0x02}, signed...)
+	return "0x" + hex.EncodeToString(raw), hash.KeccakHex(raw)
+}
+
+func testRLPAddress(t *testing.T, address string) []byte {
+	t.Helper()
+	raw, err := hex.DecodeString(strings.TrimPrefix(address, "0x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) != 20 {
+		t.Fatalf("address length = %d", len(raw))
+	}
+	return testRLPBytes(raw)
+}
+
+func testRLPUint(value uint64) []byte {
+	if value == 0 {
+		return testRLPBytes(nil)
+	}
+	var raw [8]byte
+	i := len(raw)
+	for value > 0 {
+		i--
+		raw[i] = byte(value)
+		value >>= 8
+	}
+	return testRLPBytes(raw[i:])
+}
+
+func testRLPList(items ...[]byte) []byte {
+	payloadLen := 0
+	for _, item := range items {
+		payloadLen += len(item)
+	}
+	output := testRLPLength(0xc0, payloadLen)
+	for _, item := range items {
+		output = append(output, item...)
+	}
+	return output
+}
+
+func testRLPBytes(raw []byte) []byte {
+	if len(raw) == 1 && raw[0] < 0x80 {
+		return append([]byte(nil), raw...)
+	}
+	output := testRLPLength(0x80, len(raw))
+	output = append(output, raw...)
+	return output
+}
+
+func testRLPLength(offset byte, length int) []byte {
+	if length <= 55 {
+		return []byte{offset + byte(length)}
+	}
+	var raw [8]byte
+	i := len(raw)
+	value := length
+	for value > 0 {
+		i--
+		raw[i] = byte(value)
+		value >>= 8
+	}
+	output := []byte{offset + 55 + byte(len(raw)-i)}
+	output = append(output, raw[i:]...)
+	return output
 }
 
 func sponsoredRPCTransaction(t *testing.T, userKey chaincrypto.PrivateKey, paymasterKey chaincrypto.PrivateKey, tx types.Transaction) types.Transaction {

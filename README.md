@@ -27,7 +27,7 @@ It currently implements:
 - minimal ABI-compatible `eth_call` support for native read methods, including Solidity-style calldata selectors for `get()`, `symbol()`, `owner()`, and `balanceOf(address)`, plus ABI-shaped `uint256`, `address`, and dynamic `string` return data
 - EVM-style `safe` and `finalized` block tags for block and log reads
 - pending nonce calculation, txpool inspection, pending transaction lookup, pending transaction filter polling, and WebSocket pending transaction hash subscriptions for uncommitted transactions
-- ChainLab-native raw transaction envelope for offline signing and later broadcast
+- raw transaction submission for ChainLab-native signed JSON and a limited Ethereum EIP-1559 type-2 transfer subset
 - devnet faucet that creates a normal proposer-signed transfer into the mempool
 - local block explorer pages for head, finality, recent blocks, transactions, accounts, validators, mempool, and indexed recent contract events
 - EVM-style contract event logs served from the node event index, with block range, address, and topic filtering
@@ -111,7 +111,7 @@ go run ./cmd/chainlab query fees --rpc http://127.0.0.1:8547
 go run ./cmd/chainlab tx transfer --rpc http://127.0.0.1:8547 --private-key <hex-private-key> --to <address> --value 100 --max-fee-per-gas 5 --max-priority-fee-per-gas 2
 ```
 
-The block header records `base_fee_per_gas`, `gas_limit`, and `gas_used`. Receipts record `effective_gas_price`, burned base fee, and paid priority fee. ChainLab still uses its native signed transaction JSON; this is not full Ethereum EIP-2718 / type-2 raw transaction compatibility.
+The block header records `base_fee_per_gas`, `gas_limit`, and `gas_used`. Receipts record `effective_gas_price`, burned base fee, and paid priority fee. ChainLab accepts its native signed transaction JSON raw envelope and a limited Ethereum EIP-1559 type-2 raw transfer subset. Type-2 support covers value transfers with empty calldata and empty access lists; general EVM calldata, contract creation, legacy RLP, and type-1 access-list transactions remain later work.
 
 Submit a sponsored transfer where a paymaster pays gas:
 
@@ -154,7 +154,7 @@ go run ./cmd/chainlab tx transfer --rpc http://127.0.0.1:8547 --private-key <hex
 go run ./cmd/chainlab tx raw-submit --rpc http://127.0.0.1:8547 --raw <0x-raw-transaction>
 ```
 
-The raw format is a `0x`-prefixed hex encoding of ChainLab's signed transaction JSON. It is not Ethereum RLP or EIP-1559 raw transaction encoding yet.
+The native raw format is a `0x`-prefixed hex encoding of ChainLab's signed transaction JSON. `tx raw-submit`, `POST /tx/raw`, and `eth_sendRawTransaction` also accept signed Ethereum EIP-1559 type-2 raw value transfers (`0x02 || rlp(payload)`) when calldata and access list are empty. Legacy RLP, type-1 access-list transactions, contract creation, and general calldata remain later work.
 
 Request devnet funds from the local proposer account:
 

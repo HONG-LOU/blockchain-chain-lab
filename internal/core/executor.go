@@ -372,6 +372,9 @@ func tagBatchEvents(events []types.Event, index int) {
 }
 
 func validateTransactionAuthorization(store *state.Store, tx types.Transaction) error {
+	if tx.SignatureKind == types.SignatureKindEthereumType2 {
+		return validateEthereumType2Authorization(tx)
+	}
 	if len(tx.Authorizations) > 0 {
 		return validateMultisigAuthorization(store, tx)
 	}
@@ -395,6 +398,20 @@ func validateTransactionAuthorization(store *state.Store, tx types.Transaction) 
 	}
 	if signer != owner {
 		return errors.New("transaction signer is not smart account owner")
+	}
+	return nil
+}
+
+func validateEthereumType2Authorization(tx types.Transaction) error {
+	if strings.TrimSpace(tx.Signer) != "" || len(tx.Authorizations) > 0 || strings.TrimSpace(tx.Paymaster) != "" {
+		return errors.New("ethereum type2 transactions cannot use ChainLab signer, multisig, or paymaster fields")
+	}
+	digest, err := types.EthereumType2SigningDigest(tx)
+	if err != nil {
+		return err
+	}
+	if !chaincrypto.VerifyDigest(tx.From, digest, tx.Signature) {
+		return errors.New("invalid ethereum type2 transaction signature")
 	}
 	return nil
 }

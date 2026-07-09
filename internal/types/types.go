@@ -27,6 +27,8 @@ const (
 	TxValidatorSlash  TxType = "validator.slash"
 )
 
+const SignatureKindEthereumType2 = "ethereum.type2"
+
 type Account struct {
 	Address string            `json:"address"`
 	Balance uint64            `json:"balance"`
@@ -53,6 +55,8 @@ type Transaction struct {
 	Authorizations       []Authorization   `json:"authorizations,omitempty"`
 	Signature            string            `json:"signature,omitempty"`
 	PaymasterSignature   string            `json:"paymaster_signature,omitempty"`
+	SignatureKind        string            `json:"signature_kind,omitempty"`
+	EthereumRawHash      string            `json:"ethereum_raw_hash,omitempty"`
 }
 
 type Authorization struct {
@@ -85,6 +89,9 @@ func (tx Transaction) PaymasterSigningBytes() []byte {
 }
 
 func (tx Transaction) Hash() string {
+	if tx.SignatureKind == SignatureKindEthereumType2 && tx.EthereumRawHash != "" {
+		return tx.EthereumRawHash
+	}
 	return hash.MustHex(tx)
 }
 

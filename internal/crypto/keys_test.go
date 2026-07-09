@@ -30,6 +30,29 @@ func TestSignVerifyAndAddress(t *testing.T) {
 	}
 }
 
+func TestSignAndVerifyDigest(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := make([]byte, 32)
+	for i := range digest {
+		digest[i] = byte(i + 1)
+	}
+	signature, err := chaincrypto.SignDigest(key, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := chaincrypto.AddressFromPrivateKey(key)
+	if !chaincrypto.VerifyDigest(address, digest, signature) {
+		t.Fatal("digest signature should verify")
+	}
+	digest[0] ^= 0xff
+	if chaincrypto.VerifyDigest(address, digest, signature) {
+		t.Fatal("tampered digest should not verify")
+	}
+}
+
 func TestPrivateKeyHexRoundTrip(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {
