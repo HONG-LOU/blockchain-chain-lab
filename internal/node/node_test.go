@@ -1755,6 +1755,232 @@ func TestNodePendingAccountIncludesMempoolTransactions(t *testing.T) {
 	}
 }
 
+func TestNodeQueuesFutureNonceTransactionsAndPromotesWhenGapFills(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	future := signedNodeTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     alice,
+		To:       carol,
+		Nonce:    1,
+		Value:    20,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+	if err := n.SubmitTx(future); err != nil {
+		t.Fatal(err)
+	}
+	pool := n.TxPool()
+	if pool.PendingCount != 0 || pool.QueuedCount != 1 || len(pool.Queued) != 1 || pool.Queued[0].Hash() != future.Hash() {
+		t.Fatalf("queued pool = %+v", pool)
+	}
+	pending, err := n.PendingAccount(alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Nonce != 0 {
+		t.Fatalf("pending nonce = %d", pending.Nonce)
+	}
+
+	first := signedNodeTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     alice,
+		To:       bob,
+		Nonce:    0,
+		Value:    10,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+	if err := n.SubmitTx(first); err != nil {
+		t.Fatal(err)
+	}
+	pool = n.TxPool()
+	if pool.PendingCount != 2 || pool.QueuedCount != 0 {
+		t.Fatalf("promoted pool = %+v", pool)
+	}
+	if pool.Pending[0].Hash() != first.Hash() || pool.Pending[1].Hash() != future.Hash() {
+		t.Fatalf("pending order = %+v", pool.Pending)
+	}
+	pending, err = n.PendingAccount(alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Nonce != 2 {
+		t.Fatalf("pending nonce after promotion = %d", pending.Nonce)
+	}
+
+	block, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(block.Transactions) != 2 || block.Transactions[0].Hash() != first.Hash() || block.Transactions[1].Hash() != future.Hash() {
+		t.Fatalf("block transactions = %+v", block.Transactions)
+	}
+	if got := n.Account(bob).Balance; got != 10 {
+		t.Fatalf("bob balance = %d", got)
+	}
+	if got := n.Account(carol).Balance; got != 20 {
+		t.Fatalf("carol balance = %d", got)
+	}
+}
+
+func TestNodeReplacesQueuedTransactionWithHigherFeeSameNonce(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	original := signedNodeTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     alice,
+		To:       bob,
+		Nonce:    2,
+		Value:    10,
+		GasLimit: 21_000,
+		GasPrice: 10,
+	})
+	underpriced := signedNodeTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     alice,
+		To:       carol,
+		Nonce:    2,
+		Value:    20,
+		GasLimit: 21_000,
+		GasPrice: 10,
+	})
+	replacement := signedNodeTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     alice,
+		To:       carol,
+		Nonce:    2,
+		Value:    20,
+		GasLimit: 21_000,
+		GasPrice: 11,
+	})
+
+	if err := n.SubmitTx(original); err != nil {
+		t.Fatal(err)
+	}
+	err = n.SubmitTx(underpriced)
+	if err == nil || !strings.Contains(err.Error(), "replacement transaction underpriced") {
+		t.Fatalf("underpriced queued replacement error = %v", err)
+	}
+	if err := n.SubmitTx(replacement); err != nil {
+		t.Fatal(err)
+	}
+	pool := n.TxPool()
+	if pool.PendingCount != 0 || pool.QueuedCount != 1 || len(pool.Queued) != 1 || pool.Queued[0].Hash() != replacement.Hash() {
+		t.Fatalf("queued replacement pool = %+v", pool)
+	}
+}
+
+func TestNodePromotesQueuedTransactionsAfterImportedBlockAdvancesNonce(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
+	genesis := map[string]uint64{alice: 1_000_000}
+	producer, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: genesis,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	follower, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: genesis,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	future := signedNodeTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     alice,
+		To:       carol,
+		Nonce:    1,
+		Value:    20,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+	if err := follower.SubmitTx(future); err != nil {
+		t.Fatal(err)
+	}
+	if pool := follower.TxPool(); pool.PendingCount != 0 || pool.QueuedCount != 1 {
+		t.Fatalf("initial follower pool = %+v", pool)
+	}
+
+	first := signedNodeTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     alice,
+		To:       bob,
+		Nonce:    0,
+		Value:    10,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+	if err := producer.SubmitTx(first); err != nil {
+		t.Fatal(err)
+	}
+	block, err := producer.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := follower.ImportBlock(block); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := follower.TxPool()
+	if pool.PendingCount != 1 || pool.QueuedCount != 0 || len(pool.Pending) != 1 || pool.Pending[0].Hash() != future.Hash() {
+		t.Fatalf("promoted follower pool = %+v", pool)
+	}
+	pending, err := follower.PendingAccount(alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Nonce != 2 {
+		t.Fatalf("pending nonce after import promotion = %d", pending.Nonce)
+	}
+}
+
 func TestNodeReplacesPendingTransactionWithHigherFeeSameNonce(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {

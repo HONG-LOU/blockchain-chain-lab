@@ -2047,24 +2047,35 @@ func pendingTransactionByHash(pool node.MempoolSnapshot, txHash string) (types.T
 			return tx, true
 		}
 	}
+	for _, tx := range pool.Queued {
+		if strings.ToLower(tx.Hash()) == txHash {
+			return tx, true
+		}
+	}
 	return types.Transaction{}, false
 }
 
 func evmTxPool(pool node.MempoolSnapshot) map[string]any {
-	pending := make(map[string]map[string]any)
-	for _, tx := range pool.Pending {
+	pending := evmTxPoolSection(pool.Pending)
+	queued := evmTxPoolSection(pool.Queued)
+	return map[string]any{
+		"pending": pending,
+		"queued":  queued,
+	}
+}
+
+func evmTxPoolSection(transactions []types.Transaction) map[string]map[string]any {
+	section := make(map[string]map[string]any)
+	for _, tx := range transactions {
 		from := strings.ToLower(tx.From)
-		byNonce, ok := pending[from]
+		byNonce, ok := section[from]
 		if !ok {
 			byNonce = make(map[string]any)
-			pending[from] = byNonce
+			section[from] = byNonce
 		}
 		byNonce[quantity(tx.Nonce)] = evmPendingTransaction(tx)
 	}
-	return map[string]any{
-		"pending": pending,
-		"queued":  map[string]any{},
-	}
+	return section
 }
 
 func evmReceipt(record types.TransactionRecord, block types.Block) map[string]any {

@@ -610,6 +610,20 @@ func TestTransferCommandUsesPendingNonceAndQueryMempool(t *testing.T) {
 		}
 	}
 
+	future := signedCLITx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     alice,
+		To:       bob,
+		Nonce:    3,
+		Value:    50,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+	if err := n.SubmitTx(future); err != nil {
+		t.Fatal(err)
+	}
+
 	var poolOut bytes.Buffer
 	if err := mempoolCommand([]string{"--rpc", server.URL}, &poolOut); err != nil {
 		t.Fatal(err)
@@ -618,12 +632,16 @@ func TestTransferCommandUsesPendingNonceAndQueryMempool(t *testing.T) {
 		PendingCount int                 `json:"pending_count"`
 		QueuedCount  int                 `json:"queued_count"`
 		Pending      []types.Transaction `json:"pending"`
+		Queued       []types.Transaction `json:"queued"`
 	}
 	if err := json.Unmarshal(poolOut.Bytes(), &pool); err != nil {
 		t.Fatal(err)
 	}
-	if pool.PendingCount != 2 || pool.QueuedCount != 0 || len(pool.Pending) != 2 {
+	if pool.PendingCount != 2 || pool.QueuedCount != 1 || len(pool.Pending) != 2 || len(pool.Queued) != 1 {
 		t.Fatalf("mempool = %+v", pool)
+	}
+	if pool.Queued[0].Hash() != future.Hash() {
+		t.Fatalf("queued tx = %+v, want %s", pool.Queued[0], future.Hash())
 	}
 
 	block, err := n.ProduceBlock()

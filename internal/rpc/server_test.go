@@ -1518,6 +1518,109 @@ func TestRPCExposesTxPoolAndPendingNonce(t *testing.T) {
 	}
 }
 
+func TestRPCExposesQueuedTxPoolAndPromotesFutureNonceTransactions(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	future := signedTransfer(t, key, alice, carol, 1, 20)
+	body, err := json.Marshal(future)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post(server.URL+"/tx", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("future tx status = %d", resp.StatusCode)
+	}
+
+	assertRPCResult(t, server.URL, "eth_getTransactionCount", []any{alice, "pending"}, "0x0")
+	status := callRPC(t, server.URL, "txpool_status", []any{})
+	statusMap, ok := status.(map[string]any)
+	if !ok || statusMap["pending"] != "0x0" || statusMap["queued"] != "0x1" {
+		t.Fatalf("queued txpool_status = %#v", status)
+	}
+	content := callRPC(t, server.URL, "txpool_content", []any{})
+	contentMap, ok := content.(map[string]any)
+	if !ok {
+		t.Fatalf("txpool_content type = %T", content)
+	}
+	queued, ok := contentMap["queued"].(map[string]any)
+	if !ok {
+		t.Fatalf("queued content = %#v", contentMap["queued"])
+	}
+	queuedByNonce, ok := queued[strings.ToLower(alice)].(map[string]any)
+	if !ok {
+		t.Fatalf("queued sender content = %#v", queued)
+	}
+	queuedTx, ok := queuedByNonce["0x1"].(map[string]any)
+	if !ok || queuedTx["hash"] != future.Hash() || queuedTx["blockHash"] != nil || queuedTx["blockNumber"] != nil {
+		t.Fatalf("queued tx = %#v", queuedTx)
+	}
+	queuedLookup := callRPC(t, server.URL, "eth_getTransactionByHash", []any{future.Hash()})
+	queuedLookupMap, ok := queuedLookup.(map[string]any)
+	if !ok || queuedLookupMap["hash"] != future.Hash() || queuedLookupMap["blockHash"] != nil {
+		t.Fatalf("queued lookup = %#v", queuedLookup)
+	}
+
+	first := signedTransfer(t, key, alice, bob, 0, 10)
+	body, err = json.Marshal(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err = http.Post(server.URL+"/tx", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("first tx status = %d", resp.StatusCode)
+	}
+	assertRPCResult(t, server.URL, "eth_getTransactionCount", []any{alice, "pending"}, "0x2")
+	status = callRPC(t, server.URL, "txpool_status", []any{})
+	statusMap, ok = status.(map[string]any)
+	if !ok || statusMap["pending"] != "0x2" || statusMap["queued"] != "0x0" {
+		t.Fatalf("promoted txpool_status = %#v", status)
+	}
+	content = callRPC(t, server.URL, "txpool_content", []any{})
+	contentMap, ok = content.(map[string]any)
+	if !ok {
+		t.Fatalf("promoted txpool_content type = %T", content)
+	}
+	pending, ok := contentMap["pending"].(map[string]any)
+	if !ok {
+		t.Fatalf("pending content = %#v", contentMap["pending"])
+	}
+	pendingByNonce, ok := pending[strings.ToLower(alice)].(map[string]any)
+	if !ok {
+		t.Fatalf("pending sender content = %#v", pending)
+	}
+	if pendingByNonce["0x0"].(map[string]any)["hash"] != first.Hash() || pendingByNonce["0x1"].(map[string]any)["hash"] != future.Hash() {
+		t.Fatalf("promoted pending content = %#v", pendingByNonce)
+	}
+	queued, ok = contentMap["queued"].(map[string]any)
+	if !ok || len(queued) != 0 {
+		t.Fatalf("promoted queued content = %#v", contentMap["queued"])
+	}
+}
+
 func TestRPCTransactionLookupIncludesPendingTransactions(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {

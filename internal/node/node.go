@@ -47,6 +47,7 @@ type Node struct {
 	finalityVoteIndex map[uint64]map[string]finalityVoteRecord
 	finalityEvidence  map[string]types.FinalityEquivocationEvidence
 	mempool           []types.Transaction
+	queued            []types.Transaction
 	txIndex           map[string]types.TransactionRecord
 	eventIndex        []types.EventRecord
 	dataDir           string
@@ -89,6 +90,7 @@ type FinalityCheckpoint struct {
 
 type MempoolSnapshot struct {
 	Pending      []types.Transaction `json:"pending"`
+	Queued       []types.Transaction `json:"queued"`
 	PendingCount int                 `json:"pending_count"`
 	QueuedCount  int                 `json:"queued_count"`
 }
@@ -270,15 +272,15 @@ func (n *Node) RequestFaucet(to string, amount uint64) (types.Transaction, error
 }
 
 func (n *Node) submitTxLocked(tx types.Transaction) error {
-	replacementIndex := n.mempoolReplacementIndex(tx)
-	if replacementIndex >= 0 {
-		if err := canReplacePendingTransaction(n.mempool[replacementIndex], tx); err != nil {
+	pendingReplacementIndex := transactionReplacementIndex(n.mempool, tx)
+	if pendingReplacementIndex >= 0 {
+		if err := canReplacePendingTransaction(n.mempool[pendingReplacementIndex], tx); err != nil {
 			return err
 		}
-		if err := n.validateMempoolWithReplacementLocked(replacementIndex, tx); err != nil {
+		if err := n.validateMempoolWithReplacementLocked(pendingReplacementIndex, tx); err != nil {
 			return err
 		}
-		n.mempool[replacementIndex] = tx
+		n.mempool[pendingReplacementIndex] = tx
 		return nil
 	}
 
@@ -286,12 +288,32 @@ func (n *Node) submitTxLocked(tx types.Transaction) error {
 	if err != nil {
 		return err
 	}
+	queuedReplacementIndex := transactionReplacementIndex(n.queued, tx)
+	if queuedReplacementIndex >= 0 {
+		if err := canReplacePendingTransaction(n.queued[queuedReplacementIndex], tx); err != nil {
+			return err
+		}
+		if err := n.submitQueuedReplacementLocked(queuedReplacementIndex, tx, working); err != nil {
+			return err
+		}
+		return nil
+	}
+
 	blockHeight := n.blocks[len(n.blocks)-1].Header.Height + 1
 	baseFee := n.nextBaseFeeLocked()
+	pendingAccount := working.GetAccount(tx.From)
+	if tx.Nonce > pendingAccount.Nonce {
+		if err := n.validateQueuedTransactionLocked(tx, working); err != nil {
+			return err
+		}
+		n.queued = append(n.queued, tx)
+		return nil
+	}
 	if _, err := n.executor.ExecuteWithContext(working, tx, core.ExecutionContext{BlockHeight: blockHeight, BaseFeePerGas: baseFee}); err != nil {
 		return err
 	}
 	n.mempool = append(n.mempool, tx)
+	n.promoteQueuedLocked()
 	return nil
 }
 
@@ -351,6 +373,7 @@ func (n *Node) ProduceBlock() (types.Block, error) {
 	n.knownBlocks[block.Hash()] = block
 	n.indexBlock(block)
 	n.mempool = nil
+	n.promoteQueuedLocked()
 	if err := n.persistLocked(); err != nil {
 		return types.Block{}, err
 	}
@@ -391,6 +414,7 @@ func (n *Node) ImportBlock(block types.Block) error {
 		n.refreshConsensusLocked()
 		n.rebuildTxIndex()
 		n.removeMempoolTransactions(transactionsInBlocks(chain))
+		n.promoteQueuedLocked()
 	}
 	return n.persistLocked()
 }
@@ -634,11 +658,16 @@ func (n *Node) Mempool() []types.Transaction {
 }
 
 func (n *Node) TxPool() MempoolSnapshot {
-	pending := n.Mempool()
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	pending := append([]types.Transaction(nil), n.mempool...)
+	queued := append([]types.Transaction(nil), n.queued...)
 	return MempoolSnapshot{
 		Pending:      pending,
+		Queued:       queued,
 		PendingCount: len(pending),
-		QueuedCount:  0,
+		QueuedCount:  len(queued),
 	}
 }
 
@@ -907,12 +936,12 @@ func (n *Node) pendingStateLocked() (*state.Store, error) {
 	return working, nil
 }
 
-func (n *Node) mempoolReplacementIndex(tx types.Transaction) int {
+func transactionReplacementIndex(txs []types.Transaction, tx types.Transaction) int {
 	from := normalizedAddress(tx.From)
 	if from == "" {
 		return -1
 	}
-	for i, pending := range n.mempool {
+	for i, pending := range txs {
 		if normalizedAddress(pending.From) == from && pending.Nonce == tx.Nonce {
 			return i
 		}
@@ -934,6 +963,71 @@ func (n *Node) validateMempoolWithReplacementLocked(index int, replacement types
 		}
 	}
 	return nil
+}
+
+func (n *Node) submitQueuedReplacementLocked(index int, replacement types.Transaction, working *state.Store) error {
+	pendingAccount := working.GetAccount(replacement.From)
+	if replacement.Nonce == pendingAccount.Nonce {
+		blockHeight := n.blocks[len(n.blocks)-1].Header.Height + 1
+		baseFee := n.nextBaseFeeLocked()
+		if _, err := n.executor.ExecuteWithContext(working, replacement, core.ExecutionContext{BlockHeight: blockHeight, BaseFeePerGas: baseFee}); err != nil {
+			return err
+		}
+		n.queued = append(n.queued[:index], n.queued[index+1:]...)
+		n.mempool = append(n.mempool, replacement)
+		n.promoteQueuedLocked()
+		return nil
+	}
+	if replacement.Nonce < pendingAccount.Nonce {
+		return fmt.Errorf("bad nonce: got %d want %d", replacement.Nonce, pendingAccount.Nonce)
+	}
+	if err := n.validateQueuedTransactionLocked(replacement, working); err != nil {
+		return err
+	}
+	n.queued[index] = replacement
+	return nil
+}
+
+func (n *Node) validateQueuedTransactionLocked(tx types.Transaction, working *state.Store) error {
+	account := working.GetAccount(tx.From)
+	if tx.Nonce <= account.Nonce {
+		return fmt.Errorf("bad nonce: got %d want %d", tx.Nonce, account.Nonce)
+	}
+	check := working.Clone()
+	check.SetNonce(tx.From, tx.Nonce)
+	blockHeight := n.blocks[len(n.blocks)-1].Header.Height + 1
+	baseFee := n.nextBaseFeeLocked()
+	_, err := n.executor.ExecuteWithContext(check, tx, core.ExecutionContext{BlockHeight: blockHeight, BaseFeePerGas: baseFee})
+	return err
+}
+
+func (n *Node) promoteQueuedLocked() {
+	for {
+		working, err := n.pendingStateLocked()
+		if err != nil {
+			return
+		}
+		blockHeight := n.blocks[len(n.blocks)-1].Header.Height + 1
+		baseFee := n.nextBaseFeeLocked()
+		promoted := false
+		for i, tx := range n.queued {
+			account := working.GetAccount(tx.From)
+			if tx.Nonce != account.Nonce {
+				continue
+			}
+			candidate := working.Clone()
+			if _, err := n.executor.ExecuteWithContext(candidate, tx, core.ExecutionContext{BlockHeight: blockHeight, BaseFeePerGas: baseFee}); err != nil {
+				continue
+			}
+			n.queued = append(n.queued[:i], n.queued[i+1:]...)
+			n.mempool = append(n.mempool, tx)
+			promoted = true
+			break
+		}
+		if !promoted {
+			return
+		}
+	}
 }
 
 func normalizedAddress(address string) string {
@@ -1254,6 +1348,13 @@ func (n *Node) removeMempoolTransactions(txs []types.Transaction) {
 		}
 	}
 	n.mempool = remaining
+	queued := n.queued[:0]
+	for _, tx := range n.queued {
+		if _, ok := included[tx.Hash()]; !ok {
+			queued = append(queued, tx)
+		}
+	}
+	n.queued = queued
 }
 
 func transactionsInBlocks(blocks []types.Block) []types.Transaction {

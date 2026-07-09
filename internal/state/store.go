@@ -163,6 +163,12 @@ func (s *Store) IncrementNonce(address string) {
 	s.accounts[normalize(address)] = account
 }
 
+func (s *Store) SetNonce(address string, nonce uint64) {
+	account := s.account(address)
+	account.Nonce = nonce
+	s.accounts[normalize(address)] = account
+}
+
 func (s *Store) SetCodeID(address string, codeID string) {
 	account := s.account(address)
 	account.CodeID = codeID

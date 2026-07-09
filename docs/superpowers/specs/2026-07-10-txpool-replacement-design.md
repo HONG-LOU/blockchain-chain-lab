@@ -160,7 +160,7 @@ Update:
 - `docs/current-blockchain-tech-roadmap.md`
 - `docs/superpowers/specs/2026-07-09-own-chain-design.md`
 
-The docs should state that ChainLab supports Geth-style 10 percent pending tx replacement for same sender and nonce, but still does not implement queued pools, txpool eviction, local exemptions, or capacity policy.
+The docs should state that ChainLab supports Geth-style 10 percent pending tx replacement for same sender and nonce. At the time of this replacement design, queued pools, txpool eviction, local exemptions, and capacity policy were still separate milestones; queued nonce-gap handling is later covered by `2026-07-10-txpool-queued-pool-design.md`.
 
 ## Acceptance Criteria
 
