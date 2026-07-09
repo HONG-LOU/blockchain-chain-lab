@@ -603,6 +603,69 @@ func TestExplorerRendersChainOverview(t *testing.T) {
 	}
 }
 
+func TestExplorerRendersDetailPages(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx := signedTransfer(t, key, alice, bob, 0, 100)
+	if err := n.SubmitTx(tx); err != nil {
+		t.Fatal(err)
+	}
+	block, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	overview := getHTML(t, server.URL+"/explorer", http.StatusOK)
+	for _, href := range []string{
+		`href="/explorer/block/1"`,
+		`href="/explorer/tx/` + tx.Hash() + `"`,
+		`href="/explorer/account/` + alice + `"`,
+		`href="/explorer/account/` + bob + `"`,
+	} {
+		if !strings.Contains(overview, href) {
+			t.Fatalf("overview missing link %s:\n%s", href, overview)
+		}
+	}
+
+	blockPage := getHTML(t, server.URL+"/explorer/block/1", http.StatusOK)
+	for _, expected := range []string{"Block Details", block.Hash(), tx.Hash(), alice, bob, "State Root"} {
+		if !strings.Contains(blockPage, expected) {
+			t.Fatalf("block page missing %q:\n%s", expected, blockPage)
+		}
+	}
+
+	txPage := getHTML(t, server.URL+"/explorer/tx/"+tx.Hash(), http.StatusOK)
+	for _, expected := range []string{"Transaction Details", tx.Hash(), "Receipt", "success", alice, bob, "100"} {
+		if !strings.Contains(txPage, expected) {
+			t.Fatalf("tx page missing %q:\n%s", expected, txPage)
+		}
+	}
+
+	accountPage := getHTML(t, server.URL+"/explorer/account/"+bob, http.StatusOK)
+	for _, expected := range []string{"Account Details", bob, "Balance", "100", "Nonce"} {
+		if !strings.Contains(accountPage, expected) {
+			t.Fatalf("account page missing %q:\n%s", expected, accountPage)
+		}
+	}
+
+	getHTML(t, server.URL+"/explorer/block/99", http.StatusNotFound)
+	getHTML(t, server.URL+"/explorer/tx/0xmissing", http.StatusNotFound)
+}
+
 func TestEthGetLogsFiltersContractEvents(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {
@@ -874,6 +937,26 @@ func TestRPCBroadcastsTransactionsToPeers(t *testing.T) {
 
 func hexData(value string) string {
 	return "0x" + hex.EncodeToString([]byte(value))
+}
+
+func getHTML(t *testing.T, url string, expectedStatus int) string {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != expectedStatus {
+		t.Fatalf("%s status = %d, want %d:\n%s", url, resp.StatusCode, expectedStatus, string(raw))
+	}
+	if expectedStatus == http.StatusOK && !strings.Contains(resp.Header.Get("Content-Type"), "text/html") {
+		t.Fatalf("%s content type = %q", url, resp.Header.Get("Content-Type"))
+	}
+	return string(raw)
 }
 
 func TestRPCBroadcastsProducedBlocksToPeers(t *testing.T) {

@@ -40,6 +40,9 @@ func (s *Server) routes() http.Handler {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	mux.HandleFunc("GET /explorer", s.handleExplorer)
+	mux.HandleFunc("GET /explorer/block/{height}", s.handleExplorerBlock)
+	mux.HandleFunc("GET /explorer/tx/{hash}", s.handleExplorerTransaction)
+	mux.HandleFunc("GET /explorer/account/{address}", s.handleExplorerAccount)
 	mux.HandleFunc("GET /chain/head", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, s.node.Head())
 	})

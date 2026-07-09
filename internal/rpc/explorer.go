@@ -3,6 +3,8 @@ package rpc
 import (
 	"html/template"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"chainlab/internal/node"
 	"chainlab/internal/types"
@@ -11,19 +13,23 @@ import (
 const explorerRecentBlockLimit = 8
 
 type explorerPageData struct {
-	ChainID    string
-	Head       explorerBlock
-	Finality   node.FinalityCheckpoint
-	Mempool    node.MempoolSnapshot
-	Validators []string
-	Blocks     []explorerBlock
+	ChainID             string
+	Head                explorerBlock
+	Finality            node.FinalityCheckpoint
+	Mempool             node.MempoolSnapshot
+	PendingTransactions []explorerTransaction
+	Validators          []string
+	Blocks              []explorerBlock
 }
 
 type explorerBlock struct {
 	Height           uint64
+	URL              string
 	Hash             string
 	ParentHash       string
+	ParentURL        string
 	Proposer         string
+	ProposerURL      string
 	StateRoot        string
 	TxRoot           string
 	ReceiptRoot      string
@@ -32,11 +38,35 @@ type explorerBlock struct {
 }
 
 type explorerTransaction struct {
-	Hash  string
-	Type  types.TxType
-	From  string
-	To    string
-	Value uint64
+	Hash     string
+	URL      string
+	Type     types.TxType
+	From     string
+	FromURL  string
+	To       string
+	ToURL    string
+	Nonce    uint64
+	Value    uint64
+	GasLimit uint64
+	GasPrice uint64
+}
+
+type explorerTransactionPageData struct {
+	ChainID     string
+	Transaction explorerTransaction
+	Receipt     types.Receipt
+	BlockHeight uint64
+	BlockHash   string
+	BlockURL    string
+	Index       int
+	Status      string
+}
+
+type explorerAccountPageData struct {
+	ChainID     string
+	Account     types.Account
+	Stake       uint64
+	IsValidator bool
 }
 
 func (s *Server) handleExplorer(w http.ResponseWriter, r *http.Request) {
@@ -48,6 +78,79 @@ func (s *Server) handleExplorer(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	if err := explorerTemplate.Execute(w, data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) handleExplorerBlock(w http.ResponseWriter, r *http.Request) {
+	height, err := strconv.ParseUint(r.PathValue("height"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid block height", http.StatusBadRequest)
+		return
+	}
+	block, ok := s.node.Block(height)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	data := struct {
+		ChainID string
+		Block   explorerBlock
+	}{
+		ChainID: s.node.ChainID(),
+		Block:   newExplorerBlock(block),
+	}
+	writeExplorerHTML(w, explorerBlockTemplate, data)
+}
+
+func (s *Server) handleExplorerTransaction(w http.ResponseWriter, r *http.Request) {
+	hash := strings.TrimSpace(r.PathValue("hash"))
+	if hash == "" {
+		http.Error(w, "transaction hash is required", http.StatusBadRequest)
+		return
+	}
+	record, ok := s.node.Transaction(hash)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	status := "failed"
+	if record.Receipt.Success {
+		status = "success"
+	}
+	data := explorerTransactionPageData{
+		ChainID:     s.node.ChainID(),
+		Transaction: newExplorerTransaction(record.Transaction),
+		Receipt:     record.Receipt,
+		BlockHeight: record.BlockHeight,
+		BlockHash:   record.BlockHash,
+		BlockURL:    explorerBlockURL(record.BlockHeight),
+		Index:       record.Index,
+		Status:      status,
+	}
+	writeExplorerHTML(w, explorerTransactionTemplate, data)
+}
+
+func (s *Server) handleExplorerAccount(w http.ResponseWriter, r *http.Request) {
+	address := strings.TrimSpace(r.PathValue("address"))
+	if address == "" {
+		http.Error(w, "account address is required", http.StatusBadRequest)
+		return
+	}
+	account := s.node.Account(address)
+	data := explorerAccountPageData{
+		ChainID:     s.node.ChainID(),
+		Account:     account,
+		Stake:       s.node.StakeOf(address),
+		IsValidator: explorerContains(s.node.Validators(), account.Address),
+	}
+	writeExplorerHTML(w, explorerAccountTemplate, data)
+}
+
+func writeExplorerHTML(w http.ResponseWriter, tmpl *template.Template, data any) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	if err := tmpl.Execute(w, data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
@@ -69,39 +172,89 @@ func (s *Server) explorerData() explorerPageData {
 			break
 		}
 	}
+	pendingTransactions := make([]explorerTransaction, 0, len(pool.Pending))
+	for _, tx := range pool.Pending {
+		pendingTransactions = append(pendingTransactions, newExplorerTransaction(tx))
+	}
 
 	return explorerPageData{
-		ChainID:    s.node.ChainID(),
-		Head:       newExplorerBlock(head),
-		Finality:   finality,
-		Mempool:    pool,
-		Validators: validators,
-		Blocks:     blocks,
+		ChainID:             s.node.ChainID(),
+		Head:                newExplorerBlock(head),
+		Finality:            finality,
+		Mempool:             pool,
+		PendingTransactions: pendingTransactions,
+		Validators:          validators,
+		Blocks:              blocks,
 	}
 }
 
 func newExplorerBlock(block types.Block) explorerBlock {
 	transactions := make([]explorerTransaction, 0, len(block.Transactions))
 	for _, tx := range block.Transactions {
-		transactions = append(transactions, explorerTransaction{
-			Hash:  tx.Hash(),
-			Type:  tx.Type,
-			From:  tx.From,
-			To:    tx.To,
-			Value: tx.Value,
-		})
+		transactions = append(transactions, newExplorerTransaction(tx))
+	}
+	parentURL := ""
+	if block.Header.Height > 0 {
+		parentURL = explorerBlockURL(block.Header.Height - 1)
 	}
 	return explorerBlock{
 		Height:           block.Header.Height,
+		URL:              explorerBlockURL(block.Header.Height),
 		Hash:             block.Hash(),
 		ParentHash:       block.Header.ParentHash,
+		ParentURL:        parentURL,
 		Proposer:         block.Header.Proposer,
+		ProposerURL:      explorerAccountURL(block.Header.Proposer),
 		StateRoot:        block.Header.StateRoot,
 		TxRoot:           block.Header.TxRoot,
 		ReceiptRoot:      block.Header.ReceiptRoot,
 		TransactionCount: len(block.Transactions),
 		Transactions:     transactions,
 	}
+}
+
+func newExplorerTransaction(tx types.Transaction) explorerTransaction {
+	return explorerTransaction{
+		Hash:     tx.Hash(),
+		URL:      explorerTransactionURL(tx.Hash()),
+		Type:     tx.Type,
+		From:     tx.From,
+		FromURL:  explorerAccountURL(tx.From),
+		To:       tx.To,
+		ToURL:    explorerAccountURL(tx.To),
+		Nonce:    tx.Nonce,
+		Value:    tx.Value,
+		GasLimit: tx.GasLimit,
+		GasPrice: tx.GasPrice,
+	}
+}
+
+func explorerBlockURL(height uint64) string {
+	return "/explorer/block/" + strconv.FormatUint(height, 10)
+}
+
+func explorerTransactionURL(hash string) string {
+	if strings.TrimSpace(hash) == "" {
+		return ""
+	}
+	return "/explorer/tx/" + hash
+}
+
+func explorerAccountURL(address string) string {
+	if strings.TrimSpace(address) == "" {
+		return ""
+	}
+	return "/explorer/account/" + strings.ToLower(strings.TrimSpace(address))
+}
+
+func explorerContains(values []string, target string) bool {
+	target = strings.ToLower(strings.TrimSpace(target))
+	for _, value := range values {
+		if strings.ToLower(strings.TrimSpace(value)) == target {
+			return true
+		}
+	}
+	return false
 }
 
 var explorerTemplate = template.Must(template.New("explorer").Parse(`<!doctype html>
@@ -142,6 +295,8 @@ var explorerTemplate = template.Must(template.New("explorer").Parse(`<!doctype h
     }
     h1 { margin: 0; font-size: 28px; line-height: 1.1; }
     h2 { margin: 0 0 12px; font-size: 16px; }
+    a { color: #075985; text-decoration: none; }
+    a:hover { text-decoration: underline; }
     .network { color: var(--muted); margin-top: 6px; }
     .badge {
       display: inline-flex;
@@ -261,9 +416,9 @@ var explorerTemplate = template.Must(template.New("explorer").Parse(`<!doctype h
           <tbody>
             {{range .Blocks}}
             <tr>
-              <td>{{.Height}}</td>
-              <td><div class="hash">{{.Hash}}</div></td>
-              <td><div class="hash">{{.Proposer}}</div></td>
+              <td><a href="{{.URL}}">{{.Height}}</a></td>
+              <td><div class="hash"><a href="{{.URL}}">{{.Hash}}</a></div></td>
+              <td><div class="hash"><a href="{{.ProposerURL}}">{{.Proposer}}</a></div></td>
               <td>{{.TransactionCount}}</td>
             </tr>
             {{end}}
@@ -275,7 +430,7 @@ var explorerTemplate = template.Must(template.New("explorer").Parse(`<!doctype h
         <h2>Validators</h2>
         <ul class="list">
           {{range .Validators}}
-          <li class="row"><span class="hash">{{.}}</span></li>
+          <li class="row"><a class="hash" href="/explorer/account/{{.}}">{{.}}</a></li>
           {{end}}
         </ul>
       </aside>
@@ -289,8 +444,8 @@ var explorerTemplate = template.Must(template.New("explorer").Parse(`<!doctype h
           {{range .Head.Transactions}}
           <li class="row">
             <span><span class="pill">{{.Type}}</span> value {{.Value}}</span>
-            <span class="hash">{{.Hash}}</span>
-            <span class="hash">{{.From}} -> {{.To}}</span>
+            <a class="hash" href="{{.URL}}">{{.Hash}}</a>
+            <span class="hash"><a href="{{.FromURL}}">{{.From}}</a> -> {{if .ToURL}}<a href="{{.ToURL}}">{{.To}}</a>{{else}}-{{end}}</span>
           </li>
           {{end}}
         </ul>
@@ -301,13 +456,13 @@ var explorerTemplate = template.Must(template.New("explorer").Parse(`<!doctype h
 
       <aside class="section">
         <h2>Mempool</h2>
-        {{if .Mempool.Pending}}
+        {{if .PendingTransactions}}
         <ul class="list">
-          {{range .Mempool.Pending}}
+          {{range .PendingTransactions}}
           <li class="row">
             <span><span class="pill warn">{{.Type}}</span> value {{.Value}}</span>
-            <span class="hash">{{.Hash}}</span>
-            <span class="hash">{{.From}} -> {{.To}}</span>
+            <a class="hash" href="{{.URL}}">{{.Hash}}</a>
+            <span class="hash"><a href="{{.FromURL}}">{{.From}}</a> -> {{if .ToURL}}<a href="{{.ToURL}}">{{.To}}</a>{{else}}-{{end}}</span>
           </li>
           {{end}}
         </ul>
@@ -319,3 +474,205 @@ var explorerTemplate = template.Must(template.New("explorer").Parse(`<!doctype h
   </main>
 </body>
 </html>`))
+
+func explorerDetailHTML(title string, body string) string {
+	return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>` + title + ` - ChainLab Explorer</title>
+  <style>
+    :root {
+      --bg: #f6f8fb;
+      --panel: #ffffff;
+      --ink: #172033;
+      --muted: #5f6b7a;
+      --line: #d9e0ea;
+      --accent: #0f766e;
+      --accent-soft: #d9f2ed;
+      --code: #263141;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .shell { max-width: 1060px; margin: 0 auto; padding: 24px; }
+    header {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: flex-start;
+      padding: 14px 0 22px;
+      border-bottom: 1px solid var(--line);
+    }
+    h1 { margin: 0; font-size: 28px; line-height: 1.1; }
+    h2 { margin: 0 0 12px; font-size: 16px; }
+    a { color: #075985; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .network { color: var(--muted); margin-top: 6px; }
+    .section {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: 0 1px 2px rgba(23, 32, 51, 0.04);
+      padding: 16px;
+      margin-top: 16px;
+      min-width: 0;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 16px;
+    }
+    .field {
+      display: grid;
+      grid-template-columns: 150px minmax(0, 1fr);
+      gap: 12px;
+      padding: 9px 0;
+      border-top: 1px solid var(--line);
+    }
+    .field:first-child { border-top: 0; }
+    .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0; }
+    .hash {
+      color: var(--code);
+      font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+    .pill {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 2px 8px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 10px 8px; border-top: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { color: var(--muted); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0; }
+    @media (max-width: 760px) {
+      .shell { padding: 16px; }
+      header, .grid { grid-template-columns: 1fr; display: grid; }
+      .field { grid-template-columns: 1fr; gap: 3px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">` + body + `
+  </main>
+</body>
+</html>`
+}
+
+var explorerBlockTemplate = template.Must(template.New("explorer-block").Parse(explorerDetailHTML("Block Details", `
+    <header>
+      <div>
+        <h1>Block Details</h1>
+        <div class="network">{{.ChainID}}</div>
+      </div>
+      <a href="/explorer">Back to Explorer</a>
+    </header>
+
+    <section class="section">
+      <div class="field"><div class="label">Height</div><div>{{.Block.Height}}</div></div>
+      <div class="field"><div class="label">Hash</div><div class="hash">{{.Block.Hash}}</div></div>
+      <div class="field"><div class="label">Parent Hash</div><div class="hash">{{if .Block.ParentURL}}<a href="{{.Block.ParentURL}}">{{.Block.ParentHash}}</a>{{else}}{{.Block.ParentHash}}{{end}}</div></div>
+      <div class="field"><div class="label">Proposer</div><div class="hash"><a href="{{.Block.ProposerURL}}">{{.Block.Proposer}}</a></div></div>
+      <div class="field"><div class="label">State Root</div><div class="hash">{{.Block.StateRoot}}</div></div>
+      <div class="field"><div class="label">Tx Root</div><div class="hash">{{.Block.TxRoot}}</div></div>
+      <div class="field"><div class="label">Receipt Root</div><div class="hash">{{.Block.ReceiptRoot}}</div></div>
+      <div class="field"><div class="label">Transactions</div><div>{{.Block.TransactionCount}}</div></div>
+    </section>
+
+    <section class="section">
+      <h2>Transactions</h2>
+      {{if .Block.Transactions}}
+      <table>
+        <thead><tr><th>Hash</th><th>Type</th><th>From</th><th>To</th><th>Value</th></tr></thead>
+        <tbody>
+          {{range .Block.Transactions}}
+          <tr>
+            <td><a class="hash" href="{{.URL}}">{{.Hash}}</a></td>
+            <td><span class="pill">{{.Type}}</span></td>
+            <td><a class="hash" href="{{.FromURL}}">{{.From}}</a></td>
+            <td>{{if .ToURL}}<a class="hash" href="{{.ToURL}}">{{.To}}</a>{{else}}-{{end}}</td>
+            <td>{{.Value}}</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+      {{else}}
+      <div class="label">No transactions in this block.</div>
+      {{end}}
+    </section>`)))
+
+var explorerTransactionTemplate = template.Must(template.New("explorer-transaction").Parse(explorerDetailHTML("Transaction Details", `
+    <header>
+      <div>
+        <h1>Transaction Details</h1>
+        <div class="network">{{.ChainID}}</div>
+      </div>
+      <a href="/explorer">Back to Explorer</a>
+    </header>
+
+    <section class="grid">
+      <div class="section">
+        <h2>Transaction</h2>
+        <div class="field"><div class="label">Hash</div><div class="hash">{{.Transaction.Hash}}</div></div>
+        <div class="field"><div class="label">Type</div><div><span class="pill">{{.Transaction.Type}}</span></div></div>
+        <div class="field"><div class="label">From</div><div><a class="hash" href="{{.Transaction.FromURL}}">{{.Transaction.From}}</a></div></div>
+        <div class="field"><div class="label">To</div><div>{{if .Transaction.ToURL}}<a class="hash" href="{{.Transaction.ToURL}}">{{.Transaction.To}}</a>{{else}}-{{end}}</div></div>
+        <div class="field"><div class="label">Nonce</div><div>{{.Transaction.Nonce}}</div></div>
+        <div class="field"><div class="label">Value</div><div>{{.Transaction.Value}}</div></div>
+        <div class="field"><div class="label">Gas Limit</div><div>{{.Transaction.GasLimit}}</div></div>
+        <div class="field"><div class="label">Gas Price</div><div>{{.Transaction.GasPrice}}</div></div>
+      </div>
+
+      <div class="section">
+        <h2>Receipt</h2>
+        <div class="field"><div class="label">Status</div><div>{{.Status}}</div></div>
+        <div class="field"><div class="label">Gas Used</div><div>{{.Receipt.GasUsed}}</div></div>
+        <div class="field"><div class="label">Block</div><div><a href="{{.BlockURL}}">{{.BlockHeight}}</a></div></div>
+        <div class="field"><div class="label">Block Hash</div><div class="hash">{{.BlockHash}}</div></div>
+        <div class="field"><div class="label">Index</div><div>{{.Index}}</div></div>
+        {{if .Receipt.ContractAddress}}<div class="field"><div class="label">Contract</div><div><a class="hash" href="/explorer/account/{{.Receipt.ContractAddress}}">{{.Receipt.ContractAddress}}</a></div></div>{{end}}
+        {{if .Receipt.Error}}<div class="field"><div class="label">Error</div><div>{{.Receipt.Error}}</div></div>{{end}}
+      </div>
+    </section>`)))
+
+var explorerAccountTemplate = template.Must(template.New("explorer-account").Parse(explorerDetailHTML("Account Details", `
+    <header>
+      <div>
+        <h1>Account Details</h1>
+        <div class="network">{{.ChainID}}</div>
+      </div>
+      <a href="/explorer">Back to Explorer</a>
+    </header>
+
+    <section class="section">
+      <div class="field"><div class="label">Address</div><div class="hash">{{.Account.Address}}</div></div>
+      <div class="field"><div class="label">Balance</div><div>{{.Account.Balance}}</div></div>
+      <div class="field"><div class="label">Nonce</div><div>{{.Account.Nonce}}</div></div>
+      <div class="field"><div class="label">Stake</div><div>{{.Stake}}</div></div>
+      <div class="field"><div class="label">Validator</div><div>{{.IsValidator}}</div></div>
+      {{if .Account.CodeID}}<div class="field"><div class="label">Code ID</div><div>{{.Account.CodeID}}</div></div>{{end}}
+    </section>
+
+    {{if .Account.Storage}}
+    <section class="section">
+      <h2>Storage</h2>
+      <table>
+        <thead><tr><th>Key</th><th>Value</th></tr></thead>
+        <tbody>
+          {{range $key, $value := .Account.Storage}}
+          <tr><td class="hash">{{$key}}</td><td class="hash">{{$value}}</td></tr>
+          {{end}}
+        </tbody>
+      </table>
+    </section>
+    {{end}}`)))
