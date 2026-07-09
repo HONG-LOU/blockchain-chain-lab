@@ -1808,6 +1808,61 @@ func TestEthCallAndEstimateGas(t *testing.T) {
 	}
 }
 
+func TestEthGetCodeAndStorageAt(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	deploy := signedRPCTransaction(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxDeploy,
+		From:     alice,
+		Nonce:    0,
+		GasLimit: 80_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"code_id": "counter.v1",
+			"initial": "7",
+		},
+	})
+	if err := n.SubmitTx(deploy); err != nil {
+		t.Fatal(err)
+	}
+	deployBlock, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	counter := deployBlock.Receipts[0].ContractAddress
+
+	if got := callRPC(t, server.URL, "eth_getCode", []any{alice, "latest"}); got != "0x" {
+		t.Fatalf("eth_getCode EOA = %v", got)
+	}
+	if got := callRPC(t, server.URL, "eth_getCode", []any{counter, "latest"}); got != hexData("counter.v1") {
+		t.Fatalf("eth_getCode counter = %v", got)
+	}
+	if got := callRPC(t, server.URL, "eth_getStorageAt", []any{counter, "count", "latest"}); got != abiUint256Hex(7) {
+		t.Fatalf("eth_getStorageAt count = %v", got)
+	}
+	if got := callRPC(t, server.URL, "eth_getStorageAt", []any{counter, hexData("count"), "latest"}); got != abiUint256Hex(7) {
+		t.Fatalf("eth_getStorageAt hex count = %v", got)
+	}
+	if got := callRPC(t, server.URL, "eth_getStorageAt", []any{alice, "count", "latest"}); got != abiUint256Hex(0) {
+		t.Fatalf("eth_getStorageAt empty = %v", got)
+	}
+}
+
 func TestRPCBroadcastsTransactionsToPeers(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {

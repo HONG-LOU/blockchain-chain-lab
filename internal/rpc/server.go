@@ -349,6 +349,44 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: quantity(n.Account(address).Nonce)})
+	case "eth_getCode":
+		params, err := rpcParams(request.Params)
+		if err != nil || len(params) < 1 {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "address is required"})
+			return
+		}
+		address, ok := params[0].(string)
+		if !ok || strings.TrimSpace(address) == "" {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "address is required"})
+			return
+		}
+		if err := validateOptionalBlockTag(n, params, 1); err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: codeIDHex(n.Account(address).CodeID)})
+	case "eth_getStorageAt":
+		params, err := rpcParams(request.Params)
+		if err != nil || len(params) < 2 {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "address and storage slot are required"})
+			return
+		}
+		address, ok := params[0].(string)
+		if !ok || strings.TrimSpace(address) == "" {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "address is required"})
+			return
+		}
+		key, err := parseStorageKey(params[1])
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
+			return
+		}
+		if err := validateOptionalBlockTag(n, params, 2); err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
+			return
+		}
+		value := n.Account(address).Storage[key]
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: abiStorageWordHex(value)})
 	case "eth_getTransactionByHash":
 		params, err := rpcParams(request.Params)
 		if err != nil || len(params) < 1 {
@@ -779,6 +817,64 @@ func parseBlockNumber(value any, tags blockTags) (uint64, error) {
 		}
 		return parsed, nil
 	}
+}
+
+func validateOptionalBlockTag(n *node.Node, params []any, index int) error {
+	if len(params) <= index {
+		return nil
+	}
+	finality := n.Finality()
+	_, err := parseBlockNumber(params[index], blockTags{
+		latest:    finality.HeadHeight,
+		safe:      finality.SafeHeight,
+		finalized: finality.FinalizedHeight,
+	})
+	return err
+}
+
+func codeIDHex(codeID string) string {
+	codeID = strings.TrimSpace(codeID)
+	if codeID == "" {
+		return "0x"
+	}
+	return "0x" + hex.EncodeToString([]byte(codeID))
+}
+
+func parseStorageKey(value any) (string, error) {
+	raw, ok := value.(string)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return "", fmt.Errorf("storage slot must be a string")
+	}
+	raw = strings.TrimSpace(raw)
+	if !strings.HasPrefix(raw, "0x") {
+		return raw, nil
+	}
+	encoded := strings.TrimPrefix(raw, "0x")
+	if len(encoded)%2 != 0 {
+		encoded = "0" + encoded
+	}
+	decoded, err := hex.DecodeString(encoded)
+	if err != nil {
+		return "", fmt.Errorf("storage slot hex is invalid")
+	}
+	decoded = bytes.TrimLeft(decoded, "\x00")
+	return string(decoded), nil
+}
+
+func abiStorageWordHex(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return abiUint256Hex(0)
+	}
+	if parsed, err := strconv.ParseUint(trimmed, 10, 64); err == nil {
+		return abiUint256Hex(parsed)
+	}
+	if isHexAddress(trimmed) {
+		return abiAddressHex(trimmed)
+	}
+	word := make([]byte, 32)
+	copy(word, []byte(value))
+	return "0x" + hex.EncodeToString(word)
 }
 
 type callObject struct {
