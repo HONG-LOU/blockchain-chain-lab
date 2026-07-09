@@ -212,11 +212,19 @@ func usage() {
 
 func txCommand(args []string, out io.Writer) {
 	if len(args) < 1 {
-		log.Fatal("usage: chainlab tx <transfer>")
+		log.Fatal("usage: chainlab tx <transfer|stake|validator-join>")
 	}
 	switch args[0] {
 	case "transfer":
 		if err := transferCommand(args[1:], out); err != nil {
+			log.Fatal(err)
+		}
+	case "stake":
+		if err := stakeCommand(args[1:], out); err != nil {
+			log.Fatal(err)
+		}
+	case "validator-join":
+		if err := validatorJoinCommand(args[1:], out); err != nil {
 			log.Fatal(err)
 		}
 	default:
@@ -226,7 +234,7 @@ func txCommand(args []string, out io.Writer) {
 
 func queryCommand(args []string, out io.Writer) {
 	if len(args) < 1 {
-		log.Fatal("usage: chainlab query <account|tx|head|logs>")
+		log.Fatal("usage: chainlab query <account|tx|head|logs|validators>")
 	}
 	var err error
 	switch args[0] {
@@ -238,6 +246,8 @@ func queryCommand(args []string, out io.Writer) {
 		err = headCommand(args[1:], out)
 	case "logs":
 		err = logsCommand(args[1:], out)
+	case "validators":
+		err = validatorsCommand(args[1:], out)
 	default:
 		log.Fatalf("unknown query command %q", args[0])
 	}
@@ -280,12 +290,60 @@ func transferCommand(args []string, out io.Writer) error {
 	return writeTo(out, response)
 }
 
+func stakeCommand(args []string, out io.Writer) error {
+	flags := flag.NewFlagSet("tx stake", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
+	privateKeyHex := flags.String("private-key", "", "sender private key")
+	value := flags.Uint64("value", 0, "stake amount")
+	gasLimit := flags.Uint64("gas-limit", 30_000, "gas limit")
+	gasPrice := flags.Uint64("gas-price", 1, "gas price")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	tx, err := buildSignedTransaction(*rpcURL, *privateKeyHex, types.TxStake, "", *value, *gasLimit, *gasPrice, nil)
+	if err != nil {
+		return err
+	}
+	response, err := submitTransaction(*rpcURL, tx)
+	if err != nil {
+		return err
+	}
+	return writeTo(out, response)
+}
+
+func validatorJoinCommand(args []string, out io.Writer) error {
+	flags := flag.NewFlagSet("tx validator-join", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
+	privateKeyHex := flags.String("private-key", "", "validator private key")
+	gasLimit := flags.Uint64("gas-limit", 40_000, "gas limit")
+	gasPrice := flags.Uint64("gas-price", 1, "gas price")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	tx, err := buildSignedTransaction(*rpcURL, *privateKeyHex, types.TxValidatorJoin, "", 0, *gasLimit, *gasPrice, nil)
+	if err != nil {
+		return err
+	}
+	response, err := submitTransaction(*rpcURL, tx)
+	if err != nil {
+		return err
+	}
+	return writeTo(out, response)
+}
+
 func buildSignedTransfer(rpcURL string, privateKeyHex string, to string, value uint64, gasLimit uint64, gasPrice uint64) (types.Transaction, error) {
 	if privateKeyHex == "" {
 		return types.Transaction{}, fmt.Errorf("private key is required")
 	}
 	if to == "" {
 		return types.Transaction{}, fmt.Errorf("recipient is required")
+	}
+	return buildSignedTransaction(rpcURL, privateKeyHex, types.TxTransfer, to, value, gasLimit, gasPrice, nil)
+}
+
+func buildSignedTransaction(rpcURL string, privateKeyHex string, txType types.TxType, to string, value uint64, gasLimit uint64, gasPrice uint64, payload map[string]string) (types.Transaction, error) {
+	if privateKeyHex == "" {
+		return types.Transaction{}, fmt.Errorf("private key is required")
 	}
 	key, err := crypto.PrivateKeyFromHex(privateKeyHex)
 	if err != nil {
@@ -307,13 +365,14 @@ func buildSignedTransfer(rpcURL string, privateKeyHex string, to string, value u
 	}
 	tx := types.Transaction{
 		ChainID:  chainID,
-		Type:     types.TxTransfer,
+		Type:     txType,
 		From:     from,
 		To:       to,
 		Nonce:    nonce,
 		Value:    value,
 		GasLimit: gasLimit,
 		GasPrice: gasPrice,
+		Payload:  payload,
 	}
 	signature, err := crypto.Sign(key, tx.SigningBytes())
 	if err != nil {
@@ -444,6 +503,28 @@ func logsCommand(args []string, out io.Writer) error {
 		return err
 	}
 	return writeTo(out, logs)
+}
+
+func validatorsCommand(args []string, out io.Writer) error {
+	flags := flag.NewFlagSet("query validators", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	resp, err := http.Get(trimSlash(*rpcURL) + "/validators")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("validators query failed: status %d: %s", resp.StatusCode, string(body))
+	}
+	var validators []string
+	if err := json.NewDecoder(resp.Body).Decode(&validators); err != nil {
+		return err
+	}
+	return writeTo(out, validators)
 }
 
 func produceCommand(args []string, out io.Writer) error {

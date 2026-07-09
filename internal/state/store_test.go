@@ -67,3 +67,36 @@ func TestRootIsDeterministic(t *testing.T) {
 		t.Fatalf("same logical state must have same root: %s != %s", left.Root(), right.Root())
 	}
 }
+
+func TestValidatorsArePartOfSnapshotAndRoot(t *testing.T) {
+	validatorA := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	validatorB := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+	store := state.NewStore()
+	store.SetValidators([]string{validatorA})
+	if err := store.AddValidator(validatorB); err != nil {
+		t.Fatal(err)
+	}
+
+	validators := store.Validators()
+	if len(validators) != 2 || validators[0] != validatorA || validators[1] != validatorB {
+		t.Fatalf("validators = %#v", validators)
+	}
+
+	restored := state.NewStoreFromSnapshot(store.Snapshot())
+	restoredValidators := restored.Validators()
+	if len(restoredValidators) != 2 || restoredValidators[0] != validatorA || restoredValidators[1] != validatorB {
+		t.Fatalf("restored validators = %#v", restoredValidators)
+	}
+	if restored.Root() != store.Root() {
+		t.Fatal("validator set should be included in state root")
+	}
+
+	changed := store.Clone()
+	if err := changed.AddValidator("0xcccccccccccccccccccccccccccccccccccccccc"); err != nil {
+		t.Fatal(err)
+	}
+	if changed.Root() == store.Root() {
+		t.Fatal("changing validators should change state root")
+	}
+}

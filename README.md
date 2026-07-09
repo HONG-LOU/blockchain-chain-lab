@@ -8,6 +8,7 @@ It currently implements:
 - secp256k1 signatures and Ethereum-style 20-byte addresses
 - transfers, staking, unstaking, and governance voting
 - local proof-of-authority block production with deterministic multi-validator proposer rotation
+- dynamic validator joins through staked `validator.join` transactions, with validator set committed into state roots and snapshots
 - transaction, receipt, and state roots
 - native smart-contract runtime with `counter.v1` and `token.v1`
 - HTTP REST endpoints and a small JSON-RPC-style endpoint
@@ -84,6 +85,13 @@ Submit a signed transfer through a running node:
 go run ./cmd/chainlab tx transfer --rpc http://127.0.0.1:8547 --private-key <hex-private-key> --to <address> --value 100
 ```
 
+Stake and join the validator set:
+
+```powershell
+go run ./cmd/chainlab tx stake --rpc http://127.0.0.1:8547 --private-key <hex-private-key> --value 500
+go run ./cmd/chainlab tx validator-join --rpc http://127.0.0.1:8547 --private-key <hex-private-key>
+```
+
 Produce a block:
 
 ```powershell
@@ -97,6 +105,7 @@ go run ./cmd/chainlab query head --rpc http://127.0.0.1:8547
 go run ./cmd/chainlab query account --rpc http://127.0.0.1:8547 --address <address>
 go run ./cmd/chainlab query tx --rpc http://127.0.0.1:8547 --hash <tx-hash>
 go run ./cmd/chainlab query logs --rpc http://127.0.0.1:8547 --from-block 0x1 --to-block latest --address <contract-address> --topic <topic0>
+go run ./cmd/chainlab query validators --rpc http://127.0.0.1:8547
 ```
 
 ## HTTP API
@@ -105,19 +114,20 @@ go run ./cmd/chainlab query logs --rpc http://127.0.0.1:8547 --from-block 0x1 --
 - `GET /chain/head`
 - `GET /chain/block/{height}`
 - `GET /account/{address}`
+- `GET /validators`
 - `GET /tx/{hash}`
 - `POST /tx`
 - `POST /chain/produce`
 - `POST /peer/tx`
 - `POST /peer/block`
-- `POST /rpc` with methods `chain_head`, `chain_getAccount`, and `chain_sendTx`
+- `POST /rpc` with methods `chain_head`, `chain_getAccount`, `chain_validators`, and `chain_sendTx`
 - `POST /rpc` with EVM-style methods `eth_chainId`, `eth_blockNumber`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`, and `eth_getLogs`
 
 ## Roadmap
 
 Next useful milestones:
 
-- validator-set change transactions and stronger fork-choice or finality rules
+- validator leave/slashing transactions and stronger fork-choice or finality rules
 - WASM contract runtime
 - block explorer UI
 - production-framework migration decision: OP Stack, Cosmos SDK, Avalanche L1, or another appchain stack

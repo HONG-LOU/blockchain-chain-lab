@@ -82,6 +82,10 @@ func New(config Config) (*Node, error) {
 				return nil, errors.New("persisted chain id does not match config")
 			}
 			n.state = state.NewStoreFromSnapshot(loaded.State)
+			if len(n.state.Validators()) == 0 {
+				n.state.SetValidators(validators)
+			}
+			n.refreshConsensusLocked()
 			n.blocks = append([]types.Block(nil), loaded.Blocks...)
 			if len(n.blocks) == 0 {
 				return nil, errors.New("persisted chain has no blocks")
@@ -95,8 +99,10 @@ func New(config Config) (*Node, error) {
 	for address, balance := range config.GenesisBalance {
 		store.SetBalance(address, balance)
 	}
+	store.SetValidators(validators)
 	genesis := types.GenesisBlock(config.ChainID, store.Root())
 	n.state = store
+	n.refreshConsensusLocked()
 	n.blocks = []types.Block{genesis}
 	if err := n.persistLocked(); err != nil {
 		return nil, err
@@ -158,6 +164,7 @@ func (n *Node) ProduceBlock() (types.Block, error) {
 	}
 
 	n.state.ReplaceWith(working)
+	n.refreshConsensusLocked()
 	n.blocks = append(n.blocks, block)
 	n.indexBlock(block)
 	n.mempool = nil
@@ -203,6 +210,7 @@ func (n *Node) ImportBlock(block types.Block) error {
 	}
 
 	n.state.ReplaceWith(working)
+	n.refreshConsensusLocked()
 	n.blocks = append(n.blocks, block)
 	n.indexBlock(block)
 	n.removeMempoolTransactions(block.Transactions)
@@ -255,10 +263,20 @@ func (n *Node) StakeOf(address string) uint64 {
 	return n.state.StakeOf(address)
 }
 
+func (n *Node) Validators() []string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.state.Validators()
+}
+
 func (n *Node) Proposal(id string) types.Proposal {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return n.state.Proposal(id)
+}
+
+func (n *Node) refreshConsensusLocked() {
+	n.consensus = consensus.NewPOA(n.state.Validators())
 }
 
 func (n *Node) rebuildTxIndex() {

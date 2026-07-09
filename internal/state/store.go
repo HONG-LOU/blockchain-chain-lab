@@ -10,15 +10,17 @@ import (
 )
 
 type Store struct {
-	accounts  map[string]types.Account
-	stakes    map[string]uint64
-	proposals map[string]types.Proposal
+	accounts   map[string]types.Account
+	stakes     map[string]uint64
+	proposals  map[string]types.Proposal
+	validators []string
 }
 
 type Snapshot struct {
-	Accounts  map[string]types.Account  `json:"accounts"`
-	Stakes    map[string]uint64         `json:"stakes"`
-	Proposals map[string]types.Proposal `json:"proposals"`
+	Accounts   map[string]types.Account  `json:"accounts"`
+	Stakes     map[string]uint64         `json:"stakes"`
+	Proposals  map[string]types.Proposal `json:"proposals"`
+	Validators []string                  `json:"validators,omitempty"`
 }
 
 func NewStore() *Store {
@@ -47,6 +49,7 @@ func NewStoreFromSnapshot(snapshot Snapshot) *Store {
 		proposal.Voters = cloneStringMap(proposal.Voters)
 		store.proposals[id] = proposal
 	}
+	store.SetValidators(snapshot.Validators)
 	return store
 }
 
@@ -64,14 +67,16 @@ func (s *Store) Clone() *Store {
 		proposal.Voters = cloneStringMap(proposal.Voters)
 		clone.proposals[id] = proposal
 	}
+	clone.validators = cloneStringSlice(s.validators)
 	return clone
 }
 
 func (s *Store) Snapshot() Snapshot {
 	snapshot := Snapshot{
-		Accounts:  make(map[string]types.Account, len(s.accounts)),
-		Stakes:    cloneUint64Map(s.stakes),
-		Proposals: make(map[string]types.Proposal, len(s.proposals)),
+		Accounts:   make(map[string]types.Account, len(s.accounts)),
+		Stakes:     cloneUint64Map(s.stakes),
+		Proposals:  make(map[string]types.Proposal, len(s.proposals)),
+		Validators: cloneStringSlice(s.validators),
 	}
 	for address, account := range s.accounts {
 		account.Storage = cloneStringMap(account.Storage)
@@ -90,6 +95,7 @@ func (s *Store) ReplaceWith(other *Store) {
 	s.accounts = replacement.accounts
 	s.stakes = replacement.stakes
 	s.proposals = replacement.proposals
+	s.validators = replacement.validators
 }
 
 func (s *Store) GetAccount(address string) types.Account {
@@ -183,6 +189,21 @@ func (s *Store) StakeOf(address string) uint64 {
 	return s.stakes[normalize(address)]
 }
 
+func (s *Store) SetValidators(validators []string) {
+	s.validators = nil
+	for _, validator := range validators {
+		_ = s.addValidator(validator)
+	}
+}
+
+func (s *Store) AddValidator(address string) error {
+	return s.addValidator(address)
+}
+
+func (s *Store) Validators() []string {
+	return cloneStringSlice(s.validators)
+}
+
 func (s *Store) RecordVote(proposalID string, voter string, choice string, power uint64) {
 	proposal := s.Proposal(proposalID)
 	previousChoice, voted := proposal.Voters[normalize(voter)]
@@ -215,13 +236,15 @@ func (s *Store) Proposal(id string) types.Proposal {
 
 func (s *Store) Root() string {
 	snapshot := struct {
-		Accounts  map[string]types.Account  `json:"accounts"`
-		Stakes    map[string]uint64         `json:"stakes"`
-		Proposals map[string]types.Proposal `json:"proposals"`
+		Accounts   map[string]types.Account  `json:"accounts"`
+		Stakes     map[string]uint64         `json:"stakes"`
+		Proposals  map[string]types.Proposal `json:"proposals"`
+		Validators []string                  `json:"validators"`
 	}{
-		Accounts:  make(map[string]types.Account, len(s.accounts)),
-		Stakes:    cloneUint64Map(s.stakes),
-		Proposals: make(map[string]types.Proposal, len(s.proposals)),
+		Accounts:   make(map[string]types.Account, len(s.accounts)),
+		Stakes:     cloneUint64Map(s.stakes),
+		Proposals:  make(map[string]types.Proposal, len(s.proposals)),
+		Validators: cloneStringSlice(s.validators),
 	}
 	for address, account := range s.accounts {
 		account.Storage = cloneStringMap(account.Storage)
@@ -233,6 +256,20 @@ func (s *Store) Root() string {
 		snapshot.Proposals[id] = proposal
 	}
 	return hash.MustHex(snapshot)
+}
+
+func (s *Store) addValidator(address string) error {
+	address = normalize(address)
+	if address == "" {
+		return errors.New("validator address is required")
+	}
+	for _, validator := range s.validators {
+		if validator == address {
+			return errors.New("validator already exists")
+		}
+	}
+	s.validators = append(s.validators, address)
+	return nil
 }
 
 func (s *Store) account(address string) types.Account {
@@ -249,7 +286,7 @@ func (s *Store) account(address string) types.Account {
 }
 
 func normalize(address string) string {
-	return strings.ToLower(address)
+	return strings.ToLower(strings.TrimSpace(address))
 }
 
 func cloneStringMap(input map[string]string) map[string]string {
@@ -266,4 +303,8 @@ func cloneUint64Map(input map[string]uint64) map[string]uint64 {
 		output[key] = value
 	}
 	return output
+}
+
+func cloneStringSlice(input []string) []string {
+	return append([]string(nil), input...)
 }

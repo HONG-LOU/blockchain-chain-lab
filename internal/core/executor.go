@@ -104,6 +104,14 @@ func (e *Executor) Execute(store *state.Store, tx types.Transaction) (types.Rece
 		}
 		working.RecordVote(proposal, tx.From, choice, power)
 		receipt.Events = append(receipt.Events, types.Event{Type: "governance.vote", Attributes: map[string]string{"proposal": proposal, "choice": choice}})
+	case types.TxValidatorJoin:
+		if working.StakeOf(tx.From) == 0 {
+			return types.Receipt{}, errors.New("validator join requires stake")
+		}
+		if err := working.AddValidator(tx.From); err != nil {
+			return types.Receipt{}, err
+		}
+		receipt.Events = append(receipt.Events, types.Event{Type: "validator.joined", Attributes: map[string]string{"validator": tx.From}})
 	case types.TxDeploy:
 		codeID := tx.Payload["code_id"]
 		if codeID == "" {
@@ -154,6 +162,8 @@ func requiredGas(txType types.TxType) (uint64, error) {
 		return 30_000, nil
 	case types.TxVote:
 		return 25_000, nil
+	case types.TxValidatorJoin:
+		return 40_000, nil
 	case types.TxDeploy:
 		return 80_000, nil
 	case types.TxCall:

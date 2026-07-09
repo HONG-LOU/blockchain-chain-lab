@@ -265,6 +265,67 @@ func TestSubmitTransferCommandSendsSignedTx(t *testing.T) {
 	}
 }
 
+func TestStakeAndValidatorJoinCommandsSendSignedTx(t *testing.T) {
+	proposerKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validatorKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposer := crypto.AddressFromPrivateKey(proposerKey)
+	validator := crypto.AddressFromPrivateKey(validatorKey)
+	n, err := node.New(node.Config{
+		ChainID:     "chainlab-local",
+		ProposerKey: proposerKey,
+		GenesisBalance: map[string]uint64{
+			proposer:  1_000_000,
+			validator: 1_000_000,
+		},
+		Validators: []string{proposer},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	var stakeOut bytes.Buffer
+	if err := stakeCommand([]string{
+		"--rpc", server.URL,
+		"--private-key", crypto.PrivateKeyToHex(validatorKey),
+		"--value", "500",
+	}, &stakeOut); err != nil {
+		t.Fatal(err)
+	}
+	stakeBlock, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stakeBlock.Transactions) != 1 || stakeBlock.Transactions[0].Type != types.TxStake {
+		t.Fatalf("stake block transactions = %#v", stakeBlock.Transactions)
+	}
+
+	var joinOut bytes.Buffer
+	if err := validatorJoinCommand([]string{
+		"--rpc", server.URL,
+		"--private-key", crypto.PrivateKeyToHex(validatorKey),
+	}, &joinOut); err != nil {
+		t.Fatal(err)
+	}
+	joinBlock, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(joinBlock.Transactions) != 1 || joinBlock.Transactions[0].Type != types.TxValidatorJoin {
+		t.Fatalf("join block transactions = %#v", joinBlock.Transactions)
+	}
+	if len(joinBlock.Receipts) != 1 || len(joinBlock.Receipts[0].Events) != 1 || joinBlock.Receipts[0].Events[0].Type != "validator.joined" {
+		t.Fatalf("join receipt = %#v", joinBlock.Receipts)
+	}
+}
+
 func TestQueryAccountAndProduceCommands(t *testing.T) {
 	key, err := crypto.GenerateKey()
 	if err != nil {
@@ -304,6 +365,18 @@ func TestQueryAccountAndProduceCommands(t *testing.T) {
 	}
 	if block.Header.Height != 1 {
 		t.Fatalf("produced height = %d", block.Header.Height)
+	}
+
+	var validatorsOut bytes.Buffer
+	if err := validatorsCommand([]string{"--rpc", server.URL}, &validatorsOut); err != nil {
+		t.Fatal(err)
+	}
+	var validators []string
+	if err := json.Unmarshal(validatorsOut.Bytes(), &validators); err != nil {
+		t.Fatal(err)
+	}
+	if len(validators) != 1 || validators[0] != alice {
+		t.Fatalf("validators = %#v", validators)
 	}
 }
 

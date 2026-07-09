@@ -152,3 +152,52 @@ func TestStakeUnstakeAndVote(t *testing.T) {
 		t.Fatalf("stake after unstake = %d", got)
 	}
 }
+
+func TestValidatorJoinRequiresStake(t *testing.T) {
+	store, executor, key, alice, _ := newExecutorFixture(t)
+
+	joinWithoutStake := signedTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxValidatorJoin,
+		From:     alice,
+		Nonce:    0,
+		GasLimit: 40_000,
+		GasPrice: 1,
+	})
+	if _, err := executor.Execute(store, joinWithoutStake); err == nil {
+		t.Fatal("validator join without stake should fail")
+	}
+
+	stake := signedTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxStake,
+		From:     alice,
+		Nonce:    0,
+		Value:    500,
+		GasLimit: 30_000,
+		GasPrice: 1,
+	})
+	if _, err := executor.Execute(store, stake); err != nil {
+		t.Fatal(err)
+	}
+
+	join := signedTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxValidatorJoin,
+		From:     alice,
+		Nonce:    1,
+		GasLimit: 40_000,
+		GasPrice: 1,
+	})
+	receipt, err := executor.Execute(store, join)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validators := store.Validators()
+	if len(validators) != 1 || validators[0] != alice {
+		t.Fatalf("validators = %#v", validators)
+	}
+	if len(receipt.Events) != 1 || receipt.Events[0].Type != "validator.joined" {
+		t.Fatalf("events = %#v", receipt.Events)
+	}
+}

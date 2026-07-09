@@ -69,6 +69,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /account/{address}", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, s.node.Account(r.PathValue("address")))
 	})
+	mux.HandleFunc("GET /validators", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, s.node.Validators())
+	})
 	mux.HandleFunc("GET /tx/{hash}", func(w http.ResponseWriter, r *http.Request) {
 		record, ok := s.node.Transaction(r.PathValue("hash"))
 		if !ok {
@@ -291,6 +294,8 @@ func handleJSONRPC(w http.ResponseWriter, r *http.Request, n *node.Node) {
 			return
 		}
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: n.Account(params.Address)})
+	case "chain_validators":
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: n.Validators()})
 	case "chain_sendTx":
 		var tx types.Transaction
 		if err := json.Unmarshal(request.Params, &tx); err != nil {

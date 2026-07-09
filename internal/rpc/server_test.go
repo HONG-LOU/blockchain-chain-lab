@@ -181,6 +181,43 @@ func TestEVMCompatibleJSONRPCSubset(t *testing.T) {
 	}
 }
 
+func TestRPCExposesValidatorSet(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validator := chaincrypto.AddressFromPrivateKey(key)
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{validator: 1_000_000},
+		Validators:     []string{validator},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/validators")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var validators []string
+	if err := json.NewDecoder(resp.Body).Decode(&validators); err != nil {
+		t.Fatal(err)
+	}
+	if len(validators) != 1 || validators[0] != validator {
+		t.Fatalf("validators = %#v", validators)
+	}
+
+	result := callRPC(t, server.URL, "chain_validators", []any{})
+	rpcValidators, ok := result.([]any)
+	if !ok || len(rpcValidators) != 1 || rpcValidators[0] != validator {
+		t.Fatalf("rpc validators = %#v", result)
+	}
+}
+
 func TestEthGetLogsFiltersContractEvents(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {

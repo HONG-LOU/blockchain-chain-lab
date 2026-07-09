@@ -38,6 +38,7 @@ Phase 1 creates a runnable local blockchain with these capabilities:
 - Account model with balances, nonces, optional contract code id, and key-value storage.
 - Secp256k1 transaction signatures and Ethereum-style 20-byte addresses.
 - Transaction types for transfer, contract deployment, contract calls, staking, unstaking, and governance voting.
+- Validator lifecycle starts with staked validator join transactions. The active validator set is committed into state roots.
 - Gas accounting with gas limit, gas price, and deterministic fee charging.
 - Block production with deterministic transaction, receipt, and state roots.
 - Local proof-of-authority validation with a validator set.
@@ -74,7 +75,7 @@ All consensus-critical hashes use deterministic JSON encoding over normalized st
 
 ### `internal/state`
 
-Maintains accounts, native balances, contract storage, staking records, governance proposals, and deterministic state roots.
+Maintains accounts, native balances, contract storage, staking records, governance proposals, active validators, and deterministic state roots.
 
 The phase 1 backend is in-memory with snapshot cloning for tests. A disk backend can be added behind the same store interface.
 
@@ -122,6 +123,7 @@ Exposes HTTP endpoints:
 - `GET /chain/head`
 - `GET /chain/block/{height}`
 - `GET /account/{address}`
+- `GET /validators`
 - `POST /tx`
 - `POST /rpc` for JSON-RPC-style calls
 - EVM-style read calls include account, block, transaction, receipt, and log queries.
@@ -190,6 +192,7 @@ Phase 2 progress:
 - CLI wallet-style commands can fetch nonce over RPC, sign and submit transfers, produce blocks, and query head/account/transaction records.
 - Genesis files include a `validators` array, and `chainlab node --private-key` can start a different local validator from the same genesis file.
 - PoA now enforces deterministic proposer rotation and treats repeated imports of already-known canonical blocks as idempotent peer sync events.
+- Staked accounts can submit `validator.join`; accepted joins update the active validator set for subsequent block scheduling, are included in state roots, persist in snapshots, and can be queried over REST, JSON-RPC, and CLI.
 
 Phase 3:
 

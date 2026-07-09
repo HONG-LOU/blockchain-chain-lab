@@ -250,6 +250,101 @@ func TestNodeProducesOnlyWhenLocalValidatorIsScheduled(t *testing.T) {
 	}
 }
 
+func TestValidatorJoinUpdatesNextBlockScheduleAndPersists(t *testing.T) {
+	keyA, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyB, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validatorA := chaincrypto.AddressFromPrivateKey(keyA)
+	validatorB := chaincrypto.AddressFromPrivateKey(keyB)
+	genesisBalances := map[string]uint64{
+		validatorA: 1_000_000,
+		validatorB: 1_000_000,
+	}
+	dataDirA := t.TempDir()
+	dataDirB := t.TempDir()
+
+	nodeA, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    keyA,
+		GenesisBalance: genesisBalances,
+		Validators:     []string{validatorA},
+		DataDir:        dataDirA,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeB, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    keyB,
+		GenesisBalance: genesisBalances,
+		Validators:     []string{validatorA},
+		DataDir:        dataDirB,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stake := signedNodeTx(t, keyB, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxStake,
+		From:     validatorB,
+		Nonce:    0,
+		Value:    500,
+		GasLimit: 30_000,
+		GasPrice: 1,
+	})
+	join := signedNodeTx(t, keyB, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxValidatorJoin,
+		From:     validatorB,
+		Nonce:    1,
+		GasLimit: 40_000,
+		GasPrice: 1,
+	})
+	if err := nodeA.SubmitTx(stake); err != nil {
+		t.Fatal(err)
+	}
+	if err := nodeA.SubmitTx(join); err != nil {
+		t.Fatal(err)
+	}
+	block1, err := nodeA.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if block1.Header.Proposer != validatorA {
+		t.Fatalf("height 1 proposer = %q", block1.Header.Proposer)
+	}
+	if _, err := nodeA.ProduceBlock(); err == nil {
+		t.Fatal("validator A should not produce height 2 after validator B joins")
+	}
+
+	if err := nodeB.ImportBlock(block1); err != nil {
+		t.Fatal(err)
+	}
+	reloadedB, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    keyB,
+		GenesisBalance: genesisBalances,
+		Validators:     []string{validatorA},
+		DataDir:        dataDirB,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	block2, err := reloadedB.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if block2.Header.Height != 2 || block2.Header.Proposer != validatorB {
+		t.Fatalf("height 2 block = %+v", block2.Header)
+	}
+}
+
 func TestNodeImportKnownCanonicalBlockIsIdempotent(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {
@@ -279,6 +374,16 @@ func TestNodeImportKnownCanonicalBlockIsIdempotent(t *testing.T) {
 	if n.Head().Header.Height != 2 {
 		t.Fatalf("head height = %d", n.Head().Header.Height)
 	}
+}
+
+func signedNodeTx(t *testing.T, key chaincrypto.PrivateKey, tx types.Transaction) types.Transaction {
+	t.Helper()
+	sig, err := chaincrypto.Sign(key, tx.SigningBytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx.Signature = sig
+	return tx
 }
 
 func TestNodeRejectsImportedBlockWithBadStateRoot(t *testing.T) {
