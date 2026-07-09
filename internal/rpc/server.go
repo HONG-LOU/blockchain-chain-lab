@@ -21,17 +21,19 @@ func NewServer(n *node.Node) http.Handler {
 
 func NewServerWithPeers(n *node.Node, peers []string) http.Handler {
 	server := &Server{
-		node:   n,
-		peers:  append([]string(nil), peers...),
-		client: &http.Client{Timeout: 5 * time.Second},
+		node:    n,
+		peers:   append([]string(nil), peers...),
+		client:  &http.Client{Timeout: 5 * time.Second},
+		filters: newLogFilterStore(),
 	}
 	return server.routes()
 }
 
 type Server struct {
-	node   *node.Node
-	peers  []string
-	client *http.Client
+	node    *node.Node
+	peers   []string
+	client  *http.Client
+	filters *logFilterStore
 }
 
 func (s *Server) routes() http.Handler {
@@ -173,9 +175,7 @@ func (s *Server) routes() http.Handler {
 		}
 		writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted", "hash": block.Hash()})
 	})
-	mux.HandleFunc("POST /rpc", func(w http.ResponseWriter, r *http.Request) {
-		handleJSONRPC(w, r, s.node)
-	})
+	mux.HandleFunc("POST /rpc", s.handleJSONRPC)
 	return mux
 }
 
@@ -271,12 +271,13 @@ type rpcResponse struct {
 	Error  string `json:"error,omitempty"`
 }
 
-func handleJSONRPC(w http.ResponseWriter, r *http.Request, n *node.Node) {
+func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 	var request rpcRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		writeJSON(w, http.StatusBadRequest, rpcResponse{Error: "invalid json"})
 		return
 	}
+	n := s.node
 	switch request.Method {
 	case "eth_chainId":
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: quantity(chainNumber(n.ChainID()))})
@@ -400,6 +401,69 @@ func handleJSONRPC(w http.ResponseWriter, r *http.Request, n *node.Node) {
 		}
 		logs := evmLogs(n, filter)
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: logs})
+	case "eth_newFilter":
+		params, err := rpcParams(request.Params)
+		if err != nil || len(params) < 1 {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "filter is required"})
+			return
+		}
+		finality := n.Finality()
+		filter, nextBlock, err := parseNewLogFilter(params[0], blockTags{
+			latest:    finality.HeadHeight,
+			safe:      finality.SafeHeight,
+			finalized: finality.FinalizedHeight,
+		})
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: s.registerLogFilter(filter, nextBlock)})
+	case "eth_getFilterLogs":
+		params, err := rpcParams(request.Params)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "filter id is required"})
+			return
+		}
+		filterID, err := filterIDParam(params)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
+			return
+		}
+		logs, ok := s.logFilterLogs(filterID)
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "filter not found"})
+			return
+		}
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: logs})
+	case "eth_getFilterChanges":
+		params, err := rpcParams(request.Params)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "filter id is required"})
+			return
+		}
+		filterID, err := filterIDParam(params)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
+			return
+		}
+		logs, ok := s.logFilterChanges(filterID)
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "filter not found"})
+			return
+		}
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: logs})
+	case "eth_uninstallFilter":
+		params, err := rpcParams(request.Params)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "filter id is required"})
+			return
+		}
+		filterID, err := filterIDParam(params)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: s.uninstallLogFilter(filterID)})
 	case "eth_call":
 		params, err := rpcParams(request.Params)
 		if err != nil || len(params) < 1 {

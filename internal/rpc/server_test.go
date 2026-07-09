@@ -1302,6 +1302,131 @@ func TestEthGetLogsFiltersContractEvents(t *testing.T) {
 	}
 }
 
+func TestEthLogFilterTracksIncrementalChanges(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	deploy := signedRPCTransaction(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxDeploy,
+		From:     alice,
+		Nonce:    0,
+		GasLimit: 80_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"code_id": "counter.v1",
+			"initial": "0",
+		},
+	})
+	if err := n.SubmitTx(deploy); err != nil {
+		t.Fatal(err)
+	}
+	deployBlock, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	counter := deployBlock.Receipts[0].ContractAddress
+	topic := hash.KeccakHex([]byte("counter.incremented"))
+
+	filterID, ok := callRPC(t, server.URL, "eth_newFilter", []any{map[string]any{
+		"fromBlock": "0x2",
+		"address":   counter,
+		"topics":    []any{topic},
+	}}).(string)
+	if !ok || !strings.HasPrefix(filterID, "0x") {
+		t.Fatalf("filter id = %#v", filterID)
+	}
+
+	firstCall := signedRPCTransaction(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxCall,
+		From:     alice,
+		To:       counter,
+		Nonce:    1,
+		GasLimit: 50_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"method": "increment",
+			"amount": "2",
+		},
+	})
+	if err := n.SubmitTx(firstCall); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+
+	changes := callRPC(t, server.URL, "eth_getFilterChanges", []any{filterID})
+	changeLogs, ok := changes.([]any)
+	if !ok || len(changeLogs) != 1 {
+		t.Fatalf("first filter changes = %#v", changes)
+	}
+	firstLog, ok := changeLogs[0].(map[string]any)
+	if !ok || firstLog["transactionHash"] != firstCall.Hash() || firstLog["blockNumber"] != "0x2" {
+		t.Fatalf("first filter log = %#v", changeLogs[0])
+	}
+
+	if empty := callRPC(t, server.URL, "eth_getFilterChanges", []any{filterID}); len(empty.([]any)) != 0 {
+		t.Fatalf("second filter changes = %#v", empty)
+	}
+
+	secondCall := signedRPCTransaction(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxCall,
+		From:     alice,
+		To:       counter,
+		Nonce:    2,
+		GasLimit: 50_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"method": "increment",
+			"amount": "1",
+		},
+	})
+	if err := n.SubmitTx(secondCall); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+
+	allLogs := callRPC(t, server.URL, "eth_getFilterLogs", []any{filterID})
+	all, ok := allLogs.([]any)
+	if !ok || len(all) != 2 {
+		t.Fatalf("filter logs = %#v", allLogs)
+	}
+	secondChanges := callRPC(t, server.URL, "eth_getFilterChanges", []any{filterID})
+	secondChangeLogs, ok := secondChanges.([]any)
+	if !ok || len(secondChangeLogs) != 1 {
+		t.Fatalf("third filter changes = %#v", secondChanges)
+	}
+	secondLog, ok := secondChangeLogs[0].(map[string]any)
+	if !ok || secondLog["transactionHash"] != secondCall.Hash() || secondLog["blockNumber"] != "0x3" {
+		t.Fatalf("second filter log = %#v", secondChangeLogs[0])
+	}
+
+	if uninstalled := callRPC(t, server.URL, "eth_uninstallFilter", []any{filterID}); uninstalled != true {
+		t.Fatalf("uninstall filter = %#v", uninstalled)
+	}
+	if uninstalled := callRPC(t, server.URL, "eth_uninstallFilter", []any{filterID}); uninstalled != false {
+		t.Fatalf("second uninstall filter = %#v", uninstalled)
+	}
+}
+
 func TestEthCallAndEstimateGas(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {

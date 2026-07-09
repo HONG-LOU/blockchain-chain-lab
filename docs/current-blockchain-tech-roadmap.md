@@ -14,7 +14,7 @@ As of 2026-07-09, the practical way to build a serious chain is not to copy one 
 
 1. Keep ChainLab as a learning and prototype chain. The goal is to understand the state transition function, blocks, receipts, roots, mempool, signatures, RPC, contract VM boundary, and local validator operations.
 2. Add advanced concepts in small verified slices: uploaded WASM, deterministic resource metering, ABI encoding, richer event indexing, BFT finality simulation, and EVM-style raw transactions.
-   - Current ChainLab progress includes uploaded WASM code, deterministic WASM host-resource gas, an EIP-1559-style local fee market, native paymaster-sponsored gas, native batched user operations, native single-owner and multisig smart contract accounts, validator set changes, and an explicit governance proposal lifecycle for parameter changes.
+   - Current ChainLab progress includes uploaded WASM code, deterministic WASM host-resource gas, an EIP-1559-style local fee market, native paymaster-sponsored gas, native batched user operations, native single-owner and multisig smart contract accounts, EVM-style log filter polling, validator set changes, and an explicit governance proposal lifecycle for parameter changes.
 3. Once the product target is clear, choose a production base instead of shipping the custom dev chain as a mainnet:
    - OP Stack or another Ethereum rollup stack if liquidity, Solidity, and wallet compatibility matter most.
    - Cosmos SDK if the chain needs sovereign governance, IBC, and custom modules.
@@ -28,7 +28,7 @@ As of 2026-07-09, the practical way to build a serious chain is not to copy one 
 - Cryptography: secp256k1/ed25519 signatures, Keccak/SHA-2/SHA-3, BLS basics, VRFs, multisig, threshold signatures, and post-quantum migration awareness.
 - Consensus and networking: PoA for devnets, Tendermint/HotStuff-style BFT, fork choice, finality, p2p gossip, mempool policy, peer scoring, and validator operations.
 - Execution: EVM/Solidity/Foundry, WASM/wazero or Wasmtime, CosmWasm, Solana Rust/sBPF, ABI design, gas/resource metering, deterministic host functions, and VM sandboxing.
-- Data and indexing: LevelDB/RocksDB/Pebble, pruning, archive nodes, event/log indexing, block explorers, JSON-RPC compatibility, and tracing.
+- Data and indexing: LevelDB/RocksDB/Pebble, pruning, archive nodes, event/log indexing, filter polling/subscriptions, block explorers, JSON-RPC compatibility, and tracing.
 - Security and economics: gas markets, spam resistance, slashing, governance upgrades, bridge risk, MEV, audits, fuzzing, property tests, formal specs, and incident response.
 - Product layer: wallets, account abstraction, paymasters/sponsored fees, stablecoins, token standards, NFT/RWA primitives, oracles, bridges, and compliance boundaries.
 

@@ -29,6 +29,7 @@ It currently implements:
 - devnet faucet that creates a normal proposer-signed transfer into the mempool
 - local block explorer pages for head, finality, recent blocks, transactions, accounts, validators, and mempool
 - EVM-style contract event logs projected from native receipts, with block range, address, and topic filtering
+- EVM-style log filter polling with `eth_newFilter`, `eth_getFilterLogs`, `eth_getFilterChanges`, and `eth_uninstallFilter`
 - local multi-node devnet sync over HTTP peers: transaction relay, block import, and produced-block broadcast
 - CLI commands for keys, genesis, nodes, signed transfers, block production, queries, and demos
 
@@ -257,7 +258,7 @@ go run ./cmd/chainlab query estimate-gas --rpc http://127.0.0.1:8547 --type call
 - `POST /peer/tx`
 - `POST /peer/block`
 - `POST /rpc` with methods `chain_head`, `chain_finality`, `chain_feeMarket`, `chain_getAccount`, `chain_validators`, `chain_proposal`, `chain_param`, `chain_sendTx`, `chain_sendUserOperation`, and `chain_faucet`
-- `POST /rpc` with EVM-style methods `eth_chainId`, `eth_blockNumber`, `eth_gasPrice`, `eth_maxPriorityFeePerGas`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`, `eth_getLogs`, `eth_call`, `eth_estimateGas`, and `eth_sendRawTransaction`. Block range tags support `earliest`, `latest`, `safe`, `finalized`, and hex quantities. `eth_getTransactionCount` also supports `pending` for mempool-aware nonce calculation.
+- `POST /rpc` with EVM-style methods `eth_chainId`, `eth_blockNumber`, `eth_gasPrice`, `eth_maxPriorityFeePerGas`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`, `eth_getLogs`, `eth_newFilter`, `eth_getFilterLogs`, `eth_getFilterChanges`, `eth_uninstallFilter`, `eth_call`, `eth_estimateGas`, and `eth_sendRawTransaction`. Block range tags support `earliest`, `latest`, `safe`, `finalized`, and hex quantities. `eth_getTransactionCount` also supports `pending` for mempool-aware nonce calculation.
 - `POST /rpc` with txpool-style methods `txpool_status` and `txpool_content`
 
 ## Roadmap
@@ -267,6 +268,6 @@ Next useful milestones:
 - real BFT finality and richer fork-choice safety rules
 - broader WASM ABI with CPU instruction/fuel metering
 - richer account abstraction, including policy-based paymasters, social recovery/session-key smart accounts, and ERC-4337/EIP-7702 compatibility experiments
-- richer contract explorer views with decoded native contract state and events
+- richer contract explorer views with decoded native contract state, event pages, and longer-lived external indexer support
 - richer governance thresholds, quorum rules, deposits, and upgrade proposal handlers
 - production-framework migration decision: OP Stack, Cosmos SDK, Avalanche L1, or another appchain stack

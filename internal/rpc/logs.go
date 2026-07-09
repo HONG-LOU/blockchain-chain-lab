@@ -11,10 +11,11 @@ import (
 )
 
 type logFilter struct {
-	fromBlock uint64
-	toBlock   uint64
-	addresses map[string]struct{}
-	topics    []topicCriterion
+	fromBlock     uint64
+	toBlock       uint64
+	toBlockLatest bool
+	addresses     map[string]struct{}
+	topics        []topicCriterion
 }
 
 type topicCriterion struct {
@@ -57,6 +58,34 @@ func parseLogFilter(value any, tags blockTags) (logFilter, error) {
 		filter.topics = topics
 	}
 	return filter, nil
+}
+
+func parseNewLogFilter(value any, tags blockTags) (logFilter, uint64, error) {
+	raw, ok := value.(map[string]any)
+	if !ok {
+		return logFilter{}, 0, fmt.Errorf("filter must be an object")
+	}
+	filter, err := parseLogFilter(value, tags)
+	if err != nil {
+		return logFilter{}, 0, err
+	}
+	nextBlock := filter.fromBlock
+	if _, ok := raw["fromBlock"]; !ok {
+		filter.fromBlock = tags.latest
+		nextBlock = tags.latest + 1
+	}
+	if _, ok := raw["toBlock"]; !ok {
+		filter.toBlockLatest = true
+	}
+	return filter, nextBlock, nil
+}
+
+func (filter logFilter) resolvedToBlock(latest uint64) logFilter {
+	if filter.toBlockLatest {
+		filter.toBlock = latest
+		filter.toBlockLatest = false
+	}
+	return filter
 }
 
 func parseLogAddresses(value any) (map[string]struct{}, error) {
