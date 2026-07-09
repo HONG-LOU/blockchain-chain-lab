@@ -1485,6 +1485,127 @@ func TestNodeRecordsFinalityEquivocationEvidence(t *testing.T) {
 	}
 }
 
+func TestNodeAutoSlashesFinalityEquivocationEvidence(t *testing.T) {
+	keyA, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyB, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validatorA := chaincrypto.AddressFromPrivateKey(keyA)
+	validatorB := chaincrypto.AddressFromPrivateKey(keyB)
+	validators := []string{validatorA, validatorB}
+	genesisBalances := map[string]uint64{
+		validatorA: 1_000_000,
+		validatorB: 1_000_000,
+	}
+
+	producerA, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    keyA,
+		GenesisBalance: genesisBalances,
+		Validators:     validators,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observerB, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    keyB,
+		GenesisBalance: genesisBalances,
+		Validators:     validators,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stakeA := signedNodeTx(t, keyA, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxStake,
+		From:     validatorA,
+		Nonce:    0,
+		Value:    500,
+		GasLimit: 30_000,
+		GasPrice: 1,
+	})
+	if err := producerA.SubmitTx(stakeA); err != nil {
+		t.Fatal(err)
+	}
+	commonBlock1, err := producerA.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := observerB.ImportBlock(commonBlock1); err != nil {
+		t.Fatal(err)
+	}
+	if got := observerB.StakeOf(validatorA); got != 500 {
+		t.Fatalf("validator A stake = %d", got)
+	}
+
+	blockA2, err := observerB.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	voteA2, err := consensus.SignFinalityVote(keyA, blockA2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := observerB.SubmitFinalityVote(voteA2); err != nil {
+		t.Fatal(err)
+	}
+
+	blockB2 := signedEmptyNodeBlock(t, keyB, commonBlock1, validatorB, 2, blockA2.Header.TimeUnix+10)
+	blockB3 := signedEmptyNodeBlock(t, keyA, blockB2, validatorA, 3, blockA2.Header.TimeUnix+20)
+	if err := observerB.ImportBlock(blockB2); err != nil {
+		t.Fatal(err)
+	}
+	if err := observerB.ImportBlock(blockB3); err != nil {
+		t.Fatal(err)
+	}
+	if observerB.Head().Hash() != blockB3.Hash() {
+		t.Fatal("longer branch should become canonical before conflicting vote")
+	}
+
+	voteB2, err := consensus.SignFinalityVote(keyA, blockB2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = observerB.SubmitFinalityVote(voteB2)
+	if err == nil || !strings.Contains(err.Error(), "equivocation") {
+		t.Fatalf("conflicting finality vote error = %v", err)
+	}
+	pool := observerB.Mempool()
+	if len(pool) != 1 {
+		t.Fatalf("mempool = %#v", pool)
+	}
+	slashTx := pool[0]
+	if slashTx.Type != types.TxValidatorSlash || slashTx.From != validatorB {
+		t.Fatalf("auto slash tx = %+v", slashTx)
+	}
+	if slashTx.Payload["target"] != validatorA || slashTx.Payload["amount"] != "500" || !strings.Contains(slashTx.Payload["evidence"], blockB2.Hash()) {
+		t.Fatalf("auto slash payload = %+v", slashTx.Payload)
+	}
+	if !chaincrypto.Verify(validatorB, slashTx.SigningBytes(), slashTx.Signature) {
+		t.Fatal("auto slash tx should be signed by local validator")
+	}
+
+	slashBlock, err := observerB.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(slashBlock.Transactions) != 1 || slashBlock.Transactions[0].Type != types.TxValidatorSlash {
+		t.Fatalf("slash block transactions = %+v", slashBlock.Transactions)
+	}
+	if got := observerB.StakeOf(validatorA); got != 0 {
+		t.Fatalf("validator A stake after auto slash = %d", got)
+	}
+	if validators := observerB.Validators(); len(validators) != 1 || validators[0] != validatorB {
+		t.Fatalf("validators after auto slash = %#v", validators)
+	}
+}
+
 func TestNodePendingAccountIncludesMempoolTransactions(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -727,9 +728,17 @@ func (n *Node) recordFinalityVoteLocked(block types.Block, vote types.FinalitySi
 		SecondBlockHash: blockHash,
 		SecondSignature: vote.Signature,
 	}
-	n.finalityEvidence[finalityEvidenceKey(evidence.Height, evidence.Validator)] = evidence
+	evidenceKey := finalityEvidenceKey(evidence.Height, evidence.Validator)
+	var slashErr error
+	if _, exists := n.finalityEvidence[evidenceKey]; !exists {
+		n.finalityEvidence[evidenceKey] = evidence
+		slashErr = n.enqueueFinalityEvidenceSlashLocked(evidence)
+	}
 	if err := n.persistLocked(); err != nil {
 		return err
+	}
+	if slashErr != nil {
+		return fmt.Errorf("finality equivocation: validator %s signed height %d for %s and %s; automatic slash skipped: %w", vote.Validator, block.Header.Height, existing.BlockHash, blockHash, slashErr)
 	}
 	return fmt.Errorf("finality equivocation: validator %s signed height %d for %s and %s", vote.Validator, block.Header.Height, existing.BlockHash, blockHash)
 }
@@ -750,6 +759,55 @@ func (n *Node) recordFinalityVoteInIndex(block types.Block, vote types.FinalityS
 
 func finalityEvidenceKey(height uint64, validator string) string {
 	return fmt.Sprintf("%d:%s", height, strings.ToLower(strings.TrimSpace(validator)))
+}
+
+func (n *Node) enqueueFinalityEvidenceSlashLocked(evidence types.FinalityEquivocationEvidence) error {
+	target := strings.ToLower(strings.TrimSpace(evidence.Validator))
+	if target == "" {
+		return errors.New("slash evidence validator is required")
+	}
+	working, err := n.pendingStateLocked()
+	if err != nil {
+		return err
+	}
+	amount := working.StakeOf(target)
+	if amount == 0 {
+		return errors.New("slash target has no stake")
+	}
+	reporter := strings.ToLower(strings.TrimSpace(n.proposer))
+	account := working.GetAccount(reporter)
+	gasLimit, err := core.EstimateGas(types.TxValidatorSlash)
+	if err != nil {
+		return err
+	}
+	tx := types.Transaction{
+		ChainID:  n.chainID,
+		Type:     types.TxValidatorSlash,
+		From:     reporter,
+		Nonce:    account.Nonce,
+		GasLimit: gasLimit,
+		GasPrice: n.suggestedGasPriceLocked(),
+		Payload: map[string]string{
+			"target":   target,
+			"amount":   strconv.FormatUint(amount, 10),
+			"evidence": finalityEvidenceReference(evidence),
+		},
+	}
+	signature, err := chaincrypto.Sign(n.proposerKey, tx.SigningBytes())
+	if err != nil {
+		return err
+	}
+	tx.Signature = signature
+	return n.submitTxLocked(tx)
+}
+
+func finalityEvidenceReference(evidence types.FinalityEquivocationEvidence) string {
+	return fmt.Sprintf("finality-equivocation:%d:%s:%s:%s",
+		evidence.Height,
+		strings.ToLower(strings.TrimSpace(evidence.Validator)),
+		evidence.FirstBlockHash,
+		evidence.SecondBlockHash,
+	)
 }
 
 func (n *Node) pendingStateLocked() (*state.Store, error) {
