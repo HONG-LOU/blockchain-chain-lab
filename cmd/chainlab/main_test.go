@@ -326,6 +326,55 @@ func TestStakeAndValidatorJoinCommandsSendSignedTx(t *testing.T) {
 	}
 }
 
+func TestValidatorLeaveCommandSendsSignedTx(t *testing.T) {
+	proposerKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validatorKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposer := crypto.AddressFromPrivateKey(proposerKey)
+	validator := crypto.AddressFromPrivateKey(validatorKey)
+	n, err := node.New(node.Config{
+		ChainID:     "chainlab-local",
+		ProposerKey: proposerKey,
+		GenesisBalance: map[string]uint64{
+			proposer:  1_000_000,
+			validator: 1_000_000,
+		},
+		Validators: []string{proposer, validator},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	var leaveOut bytes.Buffer
+	if err := validatorLeaveCommand([]string{
+		"--rpc", server.URL,
+		"--private-key", crypto.PrivateKeyToHex(validatorKey),
+	}, &leaveOut); err != nil {
+		t.Fatal(err)
+	}
+	leaveBlock, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leaveBlock.Transactions) != 1 || leaveBlock.Transactions[0].Type != types.TxValidatorLeave {
+		t.Fatalf("leave block transactions = %#v", leaveBlock.Transactions)
+	}
+	if len(leaveBlock.Receipts) != 1 || len(leaveBlock.Receipts[0].Events) != 1 || leaveBlock.Receipts[0].Events[0].Type != "validator.left" {
+		t.Fatalf("leave receipt = %#v", leaveBlock.Receipts)
+	}
+	validators := n.Validators()
+	if len(validators) != 1 || validators[0] != proposer {
+		t.Fatalf("validators = %#v", validators)
+	}
+}
+
 func TestDeployAndContractCallCommandsSendSignedTx(t *testing.T) {
 	key, err := crypto.GenerateKey()
 	if err != nil {

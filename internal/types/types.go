@@ -7,13 +7,14 @@ import (
 type TxType string
 
 const (
-	TxTransfer      TxType = "transfer"
-	TxDeploy        TxType = "deploy"
-	TxCall          TxType = "call"
-	TxStake         TxType = "stake"
-	TxUnstake       TxType = "unstake"
-	TxVote          TxType = "vote"
-	TxValidatorJoin TxType = "validator.join"
+	TxTransfer       TxType = "transfer"
+	TxDeploy         TxType = "deploy"
+	TxCall           TxType = "call"
+	TxStake          TxType = "stake"
+	TxUnstake        TxType = "unstake"
+	TxVote           TxType = "vote"
+	TxValidatorJoin  TxType = "validator.join"
+	TxValidatorLeave TxType = "validator.leave"
 )
 
 type Account struct {

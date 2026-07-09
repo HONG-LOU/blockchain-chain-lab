@@ -214,7 +214,7 @@ func usage() {
 
 func txCommand(args []string, out io.Writer) {
 	if len(args) < 1 {
-		log.Fatal("usage: chainlab tx <transfer|deploy|call|stake|validator-join>")
+		log.Fatal("usage: chainlab tx <transfer|deploy|call|stake|validator-join|validator-leave>")
 	}
 	switch args[0] {
 	case "transfer":
@@ -235,6 +235,10 @@ func txCommand(args []string, out io.Writer) {
 		}
 	case "validator-join":
 		if err := validatorJoinCommand(args[1:], out); err != nil {
+			log.Fatal(err)
+		}
+	case "validator-leave":
+		if err := validatorLeaveCommand(args[1:], out); err != nil {
 			log.Fatal(err)
 		}
 	default:
@@ -335,6 +339,26 @@ func validatorJoinCommand(args []string, out io.Writer) error {
 		return err
 	}
 	tx, err := buildSignedTransaction(*rpcURL, *privateKeyHex, types.TxValidatorJoin, "", 0, *gasLimit, *gasPrice, nil)
+	if err != nil {
+		return err
+	}
+	response, err := submitTransaction(*rpcURL, tx)
+	if err != nil {
+		return err
+	}
+	return writeTo(out, response)
+}
+
+func validatorLeaveCommand(args []string, out io.Writer) error {
+	flags := flag.NewFlagSet("tx validator-leave", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
+	privateKeyHex := flags.String("private-key", "", "validator private key")
+	gasLimit := flags.Uint64("gas-limit", 40_000, "gas limit")
+	gasPrice := flags.Uint64("gas-price", 1, "gas price")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	tx, err := buildSignedTransaction(*rpcURL, *privateKeyHex, types.TxValidatorLeave, "", 0, *gasLimit, *gasPrice, nil)
 	if err != nil {
 		return err
 	}

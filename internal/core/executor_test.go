@@ -201,3 +201,46 @@ func TestValidatorJoinRequiresStake(t *testing.T) {
 		t.Fatalf("events = %#v", receipt.Events)
 	}
 }
+
+func TestValidatorLeaveRemovesActiveValidator(t *testing.T) {
+	store, executor, key, alice, _ := newExecutorFixture(t)
+	keyB, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validatorB := chaincrypto.AddressFromPrivateKey(keyB)
+	store.SetBalance(validatorB, 1_000_000)
+	store.SetValidators([]string{alice, validatorB})
+
+	leave := signedTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxValidatorLeave,
+		From:     alice,
+		Nonce:    0,
+		GasLimit: 40_000,
+		GasPrice: 1,
+	})
+	receipt, err := executor.Execute(store, leave)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validators := store.Validators()
+	if len(validators) != 1 || validators[0] != validatorB {
+		t.Fatalf("validators = %#v", validators)
+	}
+	if len(receipt.Events) != 1 || receipt.Events[0].Type != "validator.left" {
+		t.Fatalf("events = %#v", receipt.Events)
+	}
+
+	leaveLast := signedTx(t, keyB, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxValidatorLeave,
+		From:     validatorB,
+		Nonce:    0,
+		GasLimit: 40_000,
+		GasPrice: 1,
+	})
+	if _, err := executor.Execute(store, leaveLast); err == nil {
+		t.Fatal("last validator should not be able to leave")
+	}
+}

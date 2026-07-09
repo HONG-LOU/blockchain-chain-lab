@@ -100,3 +100,32 @@ func TestValidatorsArePartOfSnapshotAndRoot(t *testing.T) {
 		t.Fatal("changing validators should change state root")
 	}
 }
+
+func TestRemoveValidatorUpdatesSnapshotAndRoot(t *testing.T) {
+	validatorA := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	validatorB := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+	store := state.NewStore()
+	store.SetValidators([]string{validatorA, validatorB})
+	before := store.Root()
+
+	if err := store.RemoveValidator(validatorB); err != nil {
+		t.Fatal(err)
+	}
+	validators := store.Validators()
+	if len(validators) != 1 || validators[0] != validatorA {
+		t.Fatalf("validators = %#v", validators)
+	}
+	if store.Root() == before {
+		t.Fatal("removing validator should change state root")
+	}
+
+	restored := state.NewStoreFromSnapshot(store.Snapshot())
+	restoredValidators := restored.Validators()
+	if len(restoredValidators) != 1 || restoredValidators[0] != validatorA {
+		t.Fatalf("restored validators = %#v", restoredValidators)
+	}
+	if err := restored.RemoveValidator(validatorA); err == nil {
+		t.Fatal("removing the last validator should fail")
+	}
+}

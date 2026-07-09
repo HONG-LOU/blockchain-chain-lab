@@ -200,6 +200,23 @@ func (s *Store) AddValidator(address string) error {
 	return s.addValidator(address)
 }
 
+func (s *Store) RemoveValidator(address string) error {
+	address = normalize(address)
+	if address == "" {
+		return errors.New("validator address is required")
+	}
+	if len(s.validators) <= 1 {
+		return errors.New("cannot remove the last validator")
+	}
+	for i, validator := range s.validators {
+		if validator == address {
+			s.validators = append(s.validators[:i], s.validators[i+1:]...)
+			return nil
+		}
+	}
+	return errors.New("validator is not active")
+}
+
 func (s *Store) Validators() []string {
 	return cloneStringSlice(s.validators)
 }

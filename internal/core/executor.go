@@ -112,6 +112,11 @@ func (e *Executor) Execute(store *state.Store, tx types.Transaction) (types.Rece
 			return types.Receipt{}, err
 		}
 		receipt.Events = append(receipt.Events, types.Event{Type: "validator.joined", Attributes: map[string]string{"validator": tx.From}})
+	case types.TxValidatorLeave:
+		if err := working.RemoveValidator(tx.From); err != nil {
+			return types.Receipt{}, err
+		}
+		receipt.Events = append(receipt.Events, types.Event{Type: "validator.left", Attributes: map[string]string{"validator": tx.From}})
 	case types.TxDeploy:
 		codeID := tx.Payload["code_id"]
 		if codeID == "" {
@@ -162,7 +167,7 @@ func EstimateGas(txType types.TxType) (uint64, error) {
 		return 30_000, nil
 	case types.TxVote:
 		return 25_000, nil
-	case types.TxValidatorJoin:
+	case types.TxValidatorJoin, types.TxValidatorLeave:
 		return 40_000, nil
 	case types.TxDeploy:
 		return 80_000, nil
