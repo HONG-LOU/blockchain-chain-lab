@@ -35,6 +35,7 @@ func NewServerWithPeers(n *node.Node, peers []string) http.Handler {
 		client:     &http.Client{Timeout: 5 * time.Second},
 		filters:    newLogFilterStore(),
 		wsNewHeads: make(map[string]chan types.Block),
+		wsLogs:     make(map[string]*wsLogSubscription),
 	}
 	return server.routes()
 }
@@ -47,6 +48,12 @@ type Server struct {
 	wsMu       sync.Mutex
 	nextWSID   uint64
 	wsNewHeads map[string]chan types.Block
+	wsLogs     map[string]*wsLogSubscription
+}
+
+type wsLogSubscription struct {
+	filter logFilter
+	events chan map[string]any
 }
 
 func (s *Server) routes() http.Handler {
@@ -88,6 +95,7 @@ func (s *Server) routes() http.Handler {
 			return
 		}
 		s.notifyNewHead(block)
+		s.notifyLogs(block)
 		peerErrors := s.broadcastBlock(block)
 		if len(peerErrors) > 0 {
 			writeJSON(w, http.StatusOK, map[string]any{"block": block, "peer_errors": peerErrors})
@@ -193,6 +201,7 @@ func (s *Server) routes() http.Handler {
 		}
 		if head := s.node.Head(); head.Hash() == block.Hash() {
 			s.notifyNewHead(block)
+			s.notifyLogs(block)
 		}
 		writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted", "hash": block.Hash()})
 	})
@@ -341,7 +350,7 @@ func (s *Server) handleWebSocketJSONRPC(w http.ResponseWriter, r *http.Request) 
 	localSubscriptions := make(map[string]struct{})
 	defer func() {
 		for id := range localSubscriptions {
-			s.unregisterNewHeadSubscription(id)
+			s.unregisterWebSocketSubscription(id)
 		}
 	}()
 	var writeMu sync.Mutex
@@ -363,14 +372,29 @@ func (s *Server) handleWebSocketJSONRPC(w http.ResponseWriter, r *http.Request) 
 				continue
 			}
 			subscriptionType, ok := params[0].(string)
-			if !ok || subscriptionType != "newHeads" {
+			if !ok {
 				writeWebSocketRPCResponse(conn, &writeMu, rpcResponse{ID: request.ID, Error: "unsupported subscription"})
 				continue
 			}
-			id, events := s.registerNewHeadSubscription()
-			localSubscriptions[id] = struct{}{}
-			go s.writeNewHeadNotifications(conn, &writeMu, id, events)
-			writeWebSocketRPCResponse(conn, &writeMu, rpcResponse{ID: request.ID, Result: id})
+			switch subscriptionType {
+			case "newHeads":
+				id, events := s.registerNewHeadSubscription()
+				localSubscriptions[id] = struct{}{}
+				go s.writeNewHeadNotifications(conn, &writeMu, id, events)
+				writeWebSocketRPCResponse(conn, &writeMu, rpcResponse{ID: request.ID, Result: id})
+			case "logs":
+				filter, err := s.parseWebSocketLogSubscription(params)
+				if err != nil {
+					writeWebSocketRPCResponse(conn, &writeMu, rpcResponse{ID: request.ID, Error: err.Error()})
+					continue
+				}
+				id, events := s.registerLogSubscription(filter)
+				localSubscriptions[id] = struct{}{}
+				go s.writeLogNotifications(conn, &writeMu, id, events)
+				writeWebSocketRPCResponse(conn, &writeMu, rpcResponse{ID: request.ID, Result: id})
+			default:
+				writeWebSocketRPCResponse(conn, &writeMu, rpcResponse{ID: request.ID, Error: "unsupported subscription"})
+			}
 		case "eth_unsubscribe":
 			params, err := rpcParams(request.Params)
 			if err != nil || len(params) < 1 {
@@ -386,7 +410,7 @@ func (s *Server) handleWebSocketJSONRPC(w http.ResponseWriter, r *http.Request) 
 			if local {
 				delete(localSubscriptions, id)
 			}
-			writeWebSocketRPCResponse(conn, &writeMu, rpcResponse{ID: request.ID, Result: local && s.unregisterNewHeadSubscription(id)})
+			writeWebSocketRPCResponse(conn, &writeMu, rpcResponse{ID: request.ID, Result: local && s.unregisterWebSocketSubscription(id)})
 		default:
 			writeWebSocketRPCResponse(conn, &writeMu, rpcResponse{ID: request.ID, Error: "unknown method"})
 		}
@@ -509,6 +533,35 @@ func (s *Server) unregisterNewHeadSubscription(id string) bool {
 	return true
 }
 
+func (s *Server) registerLogSubscription(filter logFilter) (string, <-chan map[string]any) {
+	s.wsMu.Lock()
+	defer s.wsMu.Unlock()
+	s.nextWSID++
+	id := quantity(s.nextWSID)
+	events := make(chan map[string]any, 16)
+	s.wsLogs[id] = &wsLogSubscription{filter: filter, events: events}
+	return id, events
+}
+
+func (s *Server) unregisterLogSubscription(id string) bool {
+	s.wsMu.Lock()
+	defer s.wsMu.Unlock()
+	subscription, ok := s.wsLogs[id]
+	if !ok {
+		return false
+	}
+	delete(s.wsLogs, id)
+	close(subscription.events)
+	return true
+}
+
+func (s *Server) unregisterWebSocketSubscription(id string) bool {
+	if s.unregisterNewHeadSubscription(id) {
+		return true
+	}
+	return s.unregisterLogSubscription(id)
+}
+
 func (s *Server) notifyNewHead(block types.Block) {
 	s.wsMu.Lock()
 	defer s.wsMu.Unlock()
@@ -516,6 +569,19 @@ func (s *Server) notifyNewHead(block types.Block) {
 		select {
 		case events <- block:
 		default:
+		}
+	}
+}
+
+func (s *Server) notifyLogs(block types.Block) {
+	s.wsMu.Lock()
+	defer s.wsMu.Unlock()
+	for _, subscription := range s.wsLogs {
+		for _, log := range evmBlockLogs(block, subscription.filter) {
+			select {
+			case subscription.events <- log:
+			default:
+			}
 		}
 	}
 }
@@ -531,6 +597,31 @@ func (s *Server) writeNewHeadNotifications(conn net.Conn, writeMu *sync.Mutex, i
 			},
 		})
 	}
+}
+
+func (s *Server) writeLogNotifications(conn net.Conn, writeMu *sync.Mutex, id string, events <-chan map[string]any) {
+	for log := range events {
+		writeWebSocketJSON(conn, writeMu, map[string]any{
+			"jsonrpc": "2.0",
+			"method":  "eth_subscription",
+			"params": map[string]any{
+				"subscription": id,
+				"result":       log,
+			},
+		})
+	}
+}
+
+func (s *Server) parseWebSocketLogSubscription(params []any) (logFilter, error) {
+	if len(params) < 2 || params[1] == nil {
+		return logFilter{}, nil
+	}
+	finality := s.node.Finality()
+	return parseLogFilter(params[1], blockTags{
+		latest:    finality.HeadHeight,
+		safe:      finality.SafeHeight,
+		finalized: finality.FinalizedHeight,
+	})
 }
 
 func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {

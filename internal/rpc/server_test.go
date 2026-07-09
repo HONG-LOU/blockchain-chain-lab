@@ -361,6 +361,125 @@ func TestWebSocketEthSubscribeNewHeadsPublishesProducedBlocks(t *testing.T) {
 	}
 }
 
+func TestWebSocketEthSubscribeLogsPublishesMatchingContractLogs(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	deploy := signedRPCTransaction(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxDeploy,
+		From:     alice,
+		Nonce:    0,
+		GasLimit: 80_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"code_id": "counter.v1",
+			"initial": "0",
+		},
+	})
+	if err := n.SubmitTx(deploy); err != nil {
+		t.Fatal(err)
+	}
+	deployBlock, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	counter := deployBlock.Receipts[0].ContractAddress
+	topic := hash.KeccakHex([]byte("counter.incremented"))
+
+	conn, reader := openWebSocket(t, server.URL, "/rpc/ws")
+	defer conn.Close()
+	subscribeBody, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "eth_subscribe",
+		"params": []any{"logs", map[string]any{
+			"address": counter,
+			"topics":  []any{topic},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeWebSocketText(t, conn, string(subscribeBody))
+	subscribeRaw := readWebSocketText(t, conn, reader)
+	var subscribeResp struct {
+		ID     int    `json:"id"`
+		Result string `json:"result"`
+		Error  string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(subscribeRaw), &subscribeResp); err != nil {
+		t.Fatal(err)
+	}
+	if subscribeResp.ID != 1 || subscribeResp.Error != "" || subscribeResp.Result == "" {
+		t.Fatalf("subscribe logs response = %#v raw=%s", subscribeResp, subscribeRaw)
+	}
+
+	call := signedRPCTransaction(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxCall,
+		From:     alice,
+		To:       counter,
+		Nonce:    1,
+		GasLimit: 50_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"method": "increment",
+			"amount": "2",
+		},
+	})
+	if err := n.SubmitTx(call); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post(server.URL+"/chain/produce", "application/json", bytes.NewReader([]byte("{}")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("produce status = %d", resp.StatusCode)
+	}
+
+	notificationRaw := readWebSocketText(t, conn, reader)
+	var notification struct {
+		Method string `json:"method"`
+		Params struct {
+			Subscription string         `json:"subscription"`
+			Result       map[string]any `json:"result"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal([]byte(notificationRaw), &notification); err != nil {
+		t.Fatal(err)
+	}
+	if notification.Method != "eth_subscription" || notification.Params.Subscription != subscribeResp.Result {
+		t.Fatalf("log notification envelope = %#v raw=%s", notification, notificationRaw)
+	}
+	logMap := notification.Params.Result
+	if logMap["address"] != counter || logMap["transactionHash"] != call.Hash() || logMap["blockNumber"] != "0x2" {
+		t.Fatalf("log payload = %#v", logMap)
+	}
+	topics, ok := logMap["topics"].([]any)
+	if !ok || len(topics) != 1 || topics[0] != topic {
+		t.Fatalf("log topics = %#v", logMap["topics"])
+	}
+	if logMap["transactionIndex"] != "0x0" || logMap["logIndex"] != "0x0" {
+		t.Fatalf("log indexes = tx %v log %v", logMap["transactionIndex"], logMap["logIndex"])
+	}
+}
+
 func TestEVMBlockHashAndIndexedTransactionReads(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {
