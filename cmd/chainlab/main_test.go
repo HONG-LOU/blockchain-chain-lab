@@ -591,6 +591,45 @@ func TestQueryAccountAndProduceCommands(t *testing.T) {
 	}
 }
 
+func TestQueryFinalityCommand(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := crypto.AddressFromPrivateKey(key)
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := n.ProduceBlock(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	var out bytes.Buffer
+	if err := finalityCommand([]string{"--rpc", server.URL}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var finality struct {
+		HeadHeight      uint64 `json:"head_height"`
+		SafeHeight      uint64 `json:"safe_height"`
+		FinalizedHeight uint64 `json:"finalized_height"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &finality); err != nil {
+		t.Fatal(err)
+	}
+	if finality.HeadHeight != 3 || finality.SafeHeight != 2 || finality.FinalizedHeight != 1 {
+		t.Fatalf("finality = %+v", finality)
+	}
+}
+
 func TestQueryLogsCommand(t *testing.T) {
 	key, err := crypto.GenerateKey()
 	if err != nil {

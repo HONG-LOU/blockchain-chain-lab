@@ -42,6 +42,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /chain/head", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, s.node.Head())
 	})
+	mux.HandleFunc("GET /chain/finality", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, s.node.Finality())
+	})
 	mux.HandleFunc("GET /chain/block/{height}", func(w http.ResponseWriter, r *http.Request) {
 		height, err := strconv.ParseUint(r.PathValue("height"), 10, 64)
 		if err != nil {
@@ -255,7 +258,12 @@ func handleJSONRPC(w http.ResponseWriter, r *http.Request, n *node.Node) {
 			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "block number is required"})
 			return
 		}
-		height, err := parseBlockNumber(params[0], n.Head().Header.Height)
+		finality := n.Finality()
+		height, err := parseBlockNumber(params[0], blockTags{
+			latest:    finality.HeadHeight,
+			safe:      finality.SafeHeight,
+			finalized: finality.FinalizedHeight,
+		})
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
 			return
@@ -278,7 +286,12 @@ func handleJSONRPC(w http.ResponseWriter, r *http.Request, n *node.Node) {
 			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "filter is required"})
 			return
 		}
-		filter, err := parseLogFilter(params[0], n.Head().Header.Height)
+		finality := n.Finality()
+		filter, err := parseLogFilter(params[0], blockTags{
+			latest:    finality.HeadHeight,
+			safe:      finality.SafeHeight,
+			finalized: finality.FinalizedHeight,
+		})
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
 			return
@@ -321,6 +334,8 @@ func handleJSONRPC(w http.ResponseWriter, r *http.Request, n *node.Node) {
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: quantity(gas)})
 	case "chain_head":
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: n.Head()})
+	case "chain_finality":
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: n.Finality()})
 	case "chain_getAccount":
 		var params struct {
 			Address string `json:"address"`
@@ -377,14 +392,24 @@ func chainNumber(chainID string) uint64 {
 	return value
 }
 
-func parseBlockNumber(value any, latest uint64) (uint64, error) {
+type blockTags struct {
+	latest    uint64
+	safe      uint64
+	finalized uint64
+}
+
+func parseBlockNumber(value any, tags blockTags) (uint64, error) {
 	raw, ok := value.(string)
 	if !ok {
 		return 0, fmt.Errorf("block number must be a string")
 	}
 	switch raw {
 	case "latest":
-		return latest, nil
+		return tags.latest, nil
+	case "safe":
+		return tags.safe, nil
+	case "finalized":
+		return tags.finalized, nil
 	case "earliest":
 		return 0, nil
 	default:

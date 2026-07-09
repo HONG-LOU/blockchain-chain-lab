@@ -9,11 +9,13 @@ It currently implements:
 - transfers, staking, unstaking, and governance voting
 - local proof-of-authority block production with deterministic multi-validator proposer rotation
 - dynamic validator joins, leaves, and slashing through `validator.join` / `validator.leave` / `validator.slash` transactions, with validator set committed into state roots and snapshots
+- deterministic local `safe` and `finalized` chain checkpoints using conservative block-depth rules
 - transaction, receipt, and state roots
 - native smart-contract runtime with `counter.v1` and `token.v1`
 - HTTP REST endpoints and a small JSON-RPC-style endpoint
 - persistent node snapshots with committed blocks, state, and transaction index
 - EVM-compatible JSON-RPC read subset: `eth_chainId`, `eth_blockNumber`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`, `eth_getLogs`, `eth_call`, `eth_estimateGas`
+- EVM-style `safe` and `finalized` block tags for block and log reads
 - EVM-style contract event logs projected from native receipts, with block range, address, and topic filtering
 - local multi-node devnet sync over HTTP peers: transaction relay, block import, and produced-block broadcast
 - CLI commands for keys, genesis, nodes, signed transfers, block production, queries, and demos
@@ -111,6 +113,7 @@ Query chain state:
 
 ```powershell
 go run ./cmd/chainlab query head --rpc http://127.0.0.1:8547
+go run ./cmd/chainlab query finality --rpc http://127.0.0.1:8547
 go run ./cmd/chainlab query account --rpc http://127.0.0.1:8547 --address <address>
 go run ./cmd/chainlab query tx --rpc http://127.0.0.1:8547 --hash <tx-hash>
 go run ./cmd/chainlab query logs --rpc http://127.0.0.1:8547 --from-block 0x1 --to-block latest --address <contract-address> --topic <topic0>
@@ -123,6 +126,7 @@ go run ./cmd/chainlab query estimate-gas --rpc http://127.0.0.1:8547 --type call
 
 - `GET /health`
 - `GET /chain/head`
+- `GET /chain/finality`
 - `GET /chain/block/{height}`
 - `GET /account/{address}`
 - `GET /validators`
@@ -131,14 +135,14 @@ go run ./cmd/chainlab query estimate-gas --rpc http://127.0.0.1:8547 --type call
 - `POST /chain/produce`
 - `POST /peer/tx`
 - `POST /peer/block`
-- `POST /rpc` with methods `chain_head`, `chain_getAccount`, `chain_validators`, and `chain_sendTx`
-- `POST /rpc` with EVM-style methods `eth_chainId`, `eth_blockNumber`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`, `eth_getLogs`, `eth_call`, and `eth_estimateGas`
+- `POST /rpc` with methods `chain_head`, `chain_finality`, `chain_getAccount`, `chain_validators`, and `chain_sendTx`
+- `POST /rpc` with EVM-style methods `eth_chainId`, `eth_blockNumber`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`, `eth_getLogs`, `eth_call`, and `eth_estimateGas`. Block range tags support `earliest`, `latest`, `safe`, `finalized`, and hex quantities.
 
 ## Roadmap
 
 Next useful milestones:
 
-- stronger fork-choice or finality rules
+- stronger fork-choice rules and real BFT finality
 - WASM contract runtime
 - block explorer UI
 - production-framework migration decision: OP Stack, Cosmos SDK, Avalanche L1, or another appchain stack

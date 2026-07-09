@@ -42,6 +42,7 @@ Phase 1 creates a runnable local blockchain with these capabilities:
 - Gas accounting with gas limit, gas price, and deterministic fee charging.
 - Block production with deterministic transaction, receipt, and state roots.
 - Local proof-of-authority validation with a validator set.
+- Local safe/finalized checkpoints derived from conservative block depths. This models modern read semantics but is not a replacement for BFT finality.
 - Mempool that validates signatures, nonces, balances, and gas before inclusion.
 - Native deterministic contract runtime with built-in example contracts.
 - Modules for staking and governance.
@@ -192,6 +193,7 @@ Phase 2 progress:
 - Local devnet peers can relay submitted transactions, produce a block through `POST /chain/produce`, broadcast produced blocks, and import peer blocks after replaying transactions and checking receipt root, state root, PoA signature, height, and parent hash.
 - CLI nodes accept repeated `--peer` URLs for HTTP peer sync.
 - CLI wallet-style commands can fetch nonce over RPC, sign and submit transfers, native contract deploys, native contract write calls, produce blocks, and query head/account/transaction records.
+- Nodes expose deterministic `safe` and `finalized` checkpoints through `GET /chain/finality`, JSON-RPC `chain_finality`, CLI `query finality`, and EVM-style `safe` / `finalized` block tags. The current local policy marks `safe` as head minus one block and `finalized` as head minus two blocks, clamped to genesis.
 - Genesis files include a `validators` array, and `chainlab node --private-key` can start a different local validator from the same genesis file.
 - PoA now enforces deterministic proposer rotation and treats repeated imports of already-known canonical blocks as idempotent peer sync events.
 - Staked accounts can submit `validator.join`; accepted joins update the active validator set for subsequent block scheduling, are included in state roots, persist in snapshots, and can be queried over REST, JSON-RPC, and CLI.

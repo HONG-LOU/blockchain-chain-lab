@@ -219,6 +219,88 @@ func TestRPCExposesValidatorSet(t *testing.T) {
 	}
 }
 
+func TestRPCExposesSafeAndFinalizedHeads(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validator := chaincrypto.AddressFromPrivateKey(key)
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{validator: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var blocks []types.Block
+	for i := 0; i < 4; i++ {
+		block, err := n.ProduceBlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+		blocks = append(blocks, block)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/chain/finality")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("finality status = %d", resp.StatusCode)
+	}
+	var finality struct {
+		HeadHeight      uint64 `json:"head_height"`
+		HeadHash        string `json:"head_hash"`
+		SafeHeight      uint64 `json:"safe_height"`
+		SafeHash        string `json:"safe_hash"`
+		SafeDepth       uint64 `json:"safe_depth"`
+		FinalizedHeight uint64 `json:"finalized_height"`
+		FinalizedHash   string `json:"finalized_hash"`
+		FinalizedDepth  uint64 `json:"finalized_depth"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&finality); err != nil {
+		t.Fatal(err)
+	}
+	if finality.HeadHeight != 4 || finality.HeadHash != blocks[3].Hash() {
+		t.Fatalf("head finality = %+v", finality)
+	}
+	if finality.SafeHeight != 3 || finality.SafeHash != blocks[2].Hash() || finality.SafeDepth != 1 {
+		t.Fatalf("safe finality = %+v", finality)
+	}
+	if finality.FinalizedHeight != 2 || finality.FinalizedHash != blocks[1].Hash() || finality.FinalizedDepth != 2 {
+		t.Fatalf("finalized finality = %+v", finality)
+	}
+
+	rpcFinality := callRPC(t, server.URL, "chain_finality", []any{})
+	rpcMap, ok := rpcFinality.(map[string]any)
+	if !ok {
+		t.Fatalf("rpc finality type = %T", rpcFinality)
+	}
+	if rpcMap["finalized_height"] != float64(2) || rpcMap["safe_height"] != float64(3) {
+		t.Fatalf("rpc finality = %#v", rpcMap)
+	}
+
+	finalizedBlock := callRPC(t, server.URL, "eth_getBlockByNumber", []any{"finalized", false})
+	finalizedMap, ok := finalizedBlock.(map[string]any)
+	if !ok {
+		t.Fatalf("finalized block type = %T", finalizedBlock)
+	}
+	if finalizedMap["number"] != "0x2" || finalizedMap["hash"] != blocks[1].Hash() {
+		t.Fatalf("finalized block = %#v", finalizedMap)
+	}
+	safeBlock := callRPC(t, server.URL, "eth_getBlockByNumber", []any{"safe", false})
+	safeMap, ok := safeBlock.(map[string]any)
+	if !ok {
+		t.Fatalf("safe block type = %T", safeBlock)
+	}
+	if safeMap["number"] != "0x3" || safeMap["hash"] != blocks[2].Hash() {
+		t.Fatalf("safe block = %#v", safeMap)
+	}
+}
+
 func TestEthGetLogsFiltersContractEvents(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {

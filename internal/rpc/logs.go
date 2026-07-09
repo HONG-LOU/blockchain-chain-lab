@@ -22,21 +22,21 @@ type topicCriterion struct {
 	allowed map[string]struct{}
 }
 
-func parseLogFilter(value any, latest uint64) (logFilter, error) {
+func parseLogFilter(value any, tags blockTags) (logFilter, error) {
 	raw, ok := value.(map[string]any)
 	if !ok {
 		return logFilter{}, fmt.Errorf("filter must be an object")
 	}
-	filter := logFilter{fromBlock: 0, toBlock: latest}
+	filter := logFilter{fromBlock: 0, toBlock: tags.latest}
 	if value, ok := raw["fromBlock"]; ok {
-		height, err := parseBlockNumber(value, latest)
+		height, err := parseBlockNumber(value, tags)
 		if err != nil {
 			return logFilter{}, err
 		}
 		filter.fromBlock = height
 	}
 	if value, ok := raw["toBlock"]; ok {
-		height, err := parseBlockNumber(value, latest)
+		height, err := parseBlockNumber(value, tags)
 		if err != nil {
 			return logFilter{}, err
 		}

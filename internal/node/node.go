@@ -39,6 +39,22 @@ type Node struct {
 	dataDir     string
 }
 
+const (
+	SafeBlockDepth      uint64 = 1
+	FinalizedBlockDepth uint64 = 2
+)
+
+type FinalityCheckpoint struct {
+	HeadHeight      uint64 `json:"head_height"`
+	HeadHash        string `json:"head_hash"`
+	SafeHeight      uint64 `json:"safe_height"`
+	SafeHash        string `json:"safe_hash"`
+	SafeDepth       uint64 `json:"safe_depth"`
+	FinalizedHeight uint64 `json:"finalized_height"`
+	FinalizedHash   string `json:"finalized_hash"`
+	FinalizedDepth  uint64 `json:"finalized_depth"`
+}
+
 type diskSnapshot struct {
 	ChainID string         `json:"chain_id"`
 	State   state.Snapshot `json:"state"`
@@ -232,6 +248,25 @@ func (n *Node) Block(height uint64) (types.Block, bool) {
 	return n.blocks[height], true
 }
 
+func (n *Node) Finality() FinalityCheckpoint {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	head := n.blocks[len(n.blocks)-1]
+	safe := n.blockAtDepthLocked(SafeBlockDepth)
+	finalized := n.blockAtDepthLocked(FinalizedBlockDepth)
+	return FinalityCheckpoint{
+		HeadHeight:      head.Header.Height,
+		HeadHash:        head.Hash(),
+		SafeHeight:      safe.Header.Height,
+		SafeHash:        safe.Hash(),
+		SafeDepth:       SafeBlockDepth,
+		FinalizedHeight: finalized.Header.Height,
+		FinalizedHash:   finalized.Hash(),
+		FinalizedDepth:  FinalizedBlockDepth,
+	}
+}
+
 func (n *Node) Transaction(hash string) (types.TransactionRecord, bool) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -280,6 +315,14 @@ func (n *Node) Proposal(id string) types.Proposal {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return n.state.Proposal(id)
+}
+
+func (n *Node) blockAtDepthLocked(depth uint64) types.Block {
+	headHeight := uint64(len(n.blocks) - 1)
+	if headHeight <= depth {
+		return n.blocks[0]
+	}
+	return n.blocks[headHeight-depth]
 }
 
 func (n *Node) refreshConsensusLocked() {

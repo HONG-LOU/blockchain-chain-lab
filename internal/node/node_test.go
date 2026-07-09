@@ -562,6 +562,54 @@ func TestNodeImportKnownCanonicalBlockIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestNodeFinalityUsesConservativeBlockDepths(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validator := chaincrypto.AddressFromPrivateKey(key)
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{validator: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	genesis := n.Head()
+
+	initial := n.Finality()
+	if initial.HeadHeight != 0 || initial.FinalizedHeight != 0 || initial.SafeHeight != 0 {
+		t.Fatalf("initial finality = %+v", initial)
+	}
+	if initial.FinalizedHash != genesis.Hash() || initial.SafeHash != genesis.Hash() {
+		t.Fatalf("initial hashes = %+v, genesis hash %s", initial, genesis.Hash())
+	}
+
+	var blocks []types.Block
+	for i := 0; i < 4; i++ {
+		block, err := n.ProduceBlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+		blocks = append(blocks, block)
+	}
+
+	finality := n.Finality()
+	if finality.HeadHeight != 4 || finality.HeadHash != blocks[3].Hash() {
+		t.Fatalf("head finality = %+v", finality)
+	}
+	if finality.SafeHeight != 3 || finality.SafeHash != blocks[2].Hash() {
+		t.Fatalf("safe finality = %+v, want height 3 hash %s", finality, blocks[2].Hash())
+	}
+	if finality.FinalizedHeight != 2 || finality.FinalizedHash != blocks[1].Hash() {
+		t.Fatalf("finalized finality = %+v, want height 2 hash %s", finality, blocks[1].Hash())
+	}
+	if finality.SafeDepth != 1 || finality.FinalizedDepth != 2 {
+		t.Fatalf("depths = safe %d finalized %d", finality.SafeDepth, finality.FinalizedDepth)
+	}
+}
+
 func signedNodeTx(t *testing.T, key chaincrypto.PrivateKey, tx types.Transaction) types.Transaction {
 	t.Helper()
 	sig, err := chaincrypto.Sign(key, tx.SigningBytes())
