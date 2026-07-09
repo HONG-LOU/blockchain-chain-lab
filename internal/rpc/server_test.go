@@ -877,6 +877,64 @@ func TestRPCSendFinalityVoteCertifiesBlock(t *testing.T) {
 	}
 }
 
+func TestRPCExposesFinalityEquivocationEvidence(t *testing.T) {
+	keyA, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyB, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyC, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validatorA := chaincrypto.AddressFromPrivateKey(keyA)
+	validatorB := chaincrypto.AddressFromPrivateKey(keyB)
+	validatorC := chaincrypto.AddressFromPrivateKey(keyC)
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    keyA,
+		GenesisBalance: map[string]uint64{validatorA: 1_000_000},
+		Validators:     []string{validatorA, validatorB, validatorC},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := seedFinalityEquivocationEvidence(t, n, keyA, keyB, validatorA, validatorB)
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/chain/finality/evidence")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("evidence status = %d", resp.StatusCode)
+	}
+	var evidence []types.FinalityEquivocationEvidence
+	if err := json.NewDecoder(resp.Body).Decode(&evidence); err != nil {
+		t.Fatal(err)
+	}
+	if len(evidence) != 1 || evidence[0].SecondBlockHash != expected.SecondBlockHash {
+		t.Fatalf("rest evidence = %+v, want %+v", evidence, expected)
+	}
+
+	rpcEvidence := callRPC(t, server.URL, "chain_finalityEvidence", []any{})
+	items, ok := rpcEvidence.([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("rpc evidence = %#v", rpcEvidence)
+	}
+	item, ok := items[0].(map[string]any)
+	if !ok {
+		t.Fatalf("rpc evidence item = %#v", items[0])
+	}
+	if item["validator"] != expected.Validator || item["second_block_hash"] != expected.SecondBlockHash {
+		t.Fatalf("rpc evidence item = %#v, want %+v", item, expected)
+	}
+}
+
 func TestRPCExposesTxPoolAndPendingNonce(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {
@@ -1848,6 +1906,68 @@ func authorizedRPCTransaction(t *testing.T, keys []chaincrypto.PrivateKey, tx ty
 		tx.Authorizations[i].Signature = signature
 	}
 	return tx
+}
+
+func seedFinalityEquivocationEvidence(t *testing.T, n *node.Node, keyA chaincrypto.PrivateKey, keyB chaincrypto.PrivateKey, validatorA string, validatorB string) types.FinalityEquivocationEvidence {
+	t.Helper()
+	blockA1, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	voteA1, err := consensus.SignFinalityVote(keyA, blockA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := n.SubmitFinalityVote(voteA1); err != nil {
+		t.Fatal(err)
+	}
+	genesis, ok := n.Block(0)
+	if !ok {
+		t.Fatal("genesis should exist")
+	}
+	blockB1 := signedEmptyRPCBlock(t, keyA, genesis, validatorA, 1, blockA1.Header.TimeUnix+10)
+	blockB2 := signedEmptyRPCBlock(t, keyB, blockB1, validatorB, 2, blockA1.Header.TimeUnix+20)
+	if err := n.ImportBlock(blockB1); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.ImportBlock(blockB2); err != nil {
+		t.Fatal(err)
+	}
+	voteB1, err := consensus.SignFinalityVote(keyA, blockB1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := n.SubmitFinalityVote(voteB1); err == nil {
+		t.Fatal("conflicting finality vote should be rejected")
+	}
+	evidence := n.FinalityEvidence()
+	if len(evidence) != 1 {
+		t.Fatalf("evidence = %+v", evidence)
+	}
+	return evidence[0]
+}
+
+func signedEmptyRPCBlock(t *testing.T, key chaincrypto.PrivateKey, parent types.Block, proposer string, height uint64, timeUnix int64) types.Block {
+	t.Helper()
+	block := types.Block{
+		Header: types.BlockHeader{
+			ChainID:       parent.Header.ChainID,
+			Height:        height,
+			ParentHash:    parent.Hash(),
+			TimeUnix:      timeUnix,
+			Proposer:      proposer,
+			GasLimit:      node.DefaultBlockGasLimit,
+			GasUsed:       0,
+			BaseFeePerGas: node.NextBaseFee(parent, node.DefaultBlockGasLimit),
+			TxRoot:        types.TransactionRoot(nil),
+			ReceiptRoot:   types.ReceiptRoot(nil),
+			StateRoot:     parent.Header.StateRoot,
+		},
+	}
+	if err := consensus.SignBlock(key, &block); err != nil {
+		t.Fatal(err)
+	}
+	return block
 }
 
 func assertRPCResult(t *testing.T, url string, method string, params []any, expected any) {

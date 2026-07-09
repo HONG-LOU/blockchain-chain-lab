@@ -14,7 +14,7 @@ As of 2026-07-09, the practical way to build a serious chain is not to copy one 
 
 1. Keep ChainLab as a learning and prototype chain. The goal is to understand the state transition function, blocks, receipts, roots, mempool, signatures, RPC, contract VM boundary, and local validator operations.
 2. Add advanced concepts in small verified slices: uploaded WASM, deterministic resource metering, ABI encoding, richer event indexing, BFT finality simulation, and EVM-style raw transactions.
-   - Current ChainLab progress includes uploaded WASM code, deterministic WASM host-resource gas, an EIP-1559-style local fee market, native paymaster-sponsored gas, native batched user operations, native single-owner and multisig smart contract accounts, EVM-style log filter polling, validator set changes, BFT-style finality certificates over PoA blocks, HTTP peer relay for finality votes, and an explicit governance proposal lifecycle for parameter changes.
+   - Current ChainLab progress includes uploaded WASM code, deterministic WASM host-resource gas, an EIP-1559-style local fee market, native paymaster-sponsored gas, native batched user operations, native single-owner and multisig smart contract accounts, EVM-style log filter polling, validator set changes, BFT-style finality certificates over PoA blocks, HTTP peer relay for finality votes, finality double-vote evidence capture, and an explicit governance proposal lifecycle for parameter changes.
 3. Once the product target is clear, choose a production base instead of shipping the custom dev chain as a mainnet:
    - OP Stack or another Ethereum rollup stack if liquidity, Solidity, and wallet compatibility matter most.
    - Cosmos SDK if the chain needs sovereign governance, IBC, and custom modules.
@@ -36,7 +36,7 @@ As of 2026-07-09, the practical way to build a serious chain is not to copy one 
 
 - Make the state transition function deterministic and replayable before adding networking complexity.
 - Commit contract code, validator sets, and governance state into state roots; never rely on node-local registries for consensus behavior.
-- Separate finality certificate semantics from full consensus claims. ChainLab can now attach >2/3 validator commit signatures to a PoA block, relay those votes across configured HTTP peers, and expose certified blocks as `safe`/`finalized`; production BFT still needs rounds/timeouts, equivocation handling, fork-choice integration, and slashing evidence.
+- Separate finality certificate semantics from full consensus claims. ChainLab can now attach >2/3 validator commit signatures to a PoA block, relay those votes across configured HTTP peers, expose certified blocks as `safe`/`finalized`, and record evidence when a validator double-votes for conflicting hashes at the same height; production BFT still needs rounds/timeouts, fork-choice integration, and automated evidence-to-slashing flows.
 - Keep VM host functions minimal: no filesystem, network, clock, randomness, or global mutable process state.
 - Charge deterministic fees for every consensus-relevant resource: bytecode size, storage growth, CPU steps, memory, logs, and state reads/writes.
 - Keep fee and metering honest about scope: ChainLab now has a local EIP-1559-style base fee, base fee burn, priority fee rewards, uploaded WASM bytecode fees, and host ABI storage/event/arg/return resource gas; CPU instruction/fuel metering and Ethereum type-2 raw transaction compatibility remain separate milestones.

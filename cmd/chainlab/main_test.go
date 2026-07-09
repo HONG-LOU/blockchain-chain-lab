@@ -1368,6 +1368,48 @@ func TestQueryFinalityCommand(t *testing.T) {
 	}
 }
 
+func TestQueryFinalityEvidenceCommand(t *testing.T) {
+	keyA, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyB, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyC, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validatorA := crypto.AddressFromPrivateKey(keyA)
+	validatorB := crypto.AddressFromPrivateKey(keyB)
+	validatorC := crypto.AddressFromPrivateKey(keyC)
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    keyA,
+		GenesisBalance: map[string]uint64{validatorA: 1_000_000},
+		Validators:     []string{validatorA, validatorB, validatorC},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := seedCommandFinalityEquivocationEvidence(t, n, keyA, keyB, validatorA, validatorB)
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	var out bytes.Buffer
+	if err := finalityEvidenceCommand([]string{"--rpc", server.URL}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var evidence []types.FinalityEquivocationEvidence
+	if err := json.Unmarshal(out.Bytes(), &evidence); err != nil {
+		t.Fatal(err)
+	}
+	if len(evidence) != 1 || evidence[0].SecondBlockHash != expected.SecondBlockHash {
+		t.Fatalf("command evidence = %+v, want %+v", evidence, expected)
+	}
+}
+
 func TestChainFinalityVoteCommandSignsAndSubmitsVote(t *testing.T) {
 	keyA, err := crypto.GenerateKey()
 	if err != nil {
@@ -1650,4 +1692,66 @@ func signedCLITx(t *testing.T, key crypto.PrivateKey, tx types.Transaction) type
 	}
 	tx.Signature = signature
 	return tx
+}
+
+func seedCommandFinalityEquivocationEvidence(t *testing.T, n *node.Node, keyA crypto.PrivateKey, keyB crypto.PrivateKey, validatorA string, validatorB string) types.FinalityEquivocationEvidence {
+	t.Helper()
+	blockA1, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	voteA1, err := consensus.SignFinalityVote(keyA, blockA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := n.SubmitFinalityVote(voteA1); err != nil {
+		t.Fatal(err)
+	}
+	genesis, ok := n.Block(0)
+	if !ok {
+		t.Fatal("genesis should exist")
+	}
+	blockB1 := signedEmptyCLIBlock(t, keyA, genesis, validatorA, 1, blockA1.Header.TimeUnix+10)
+	blockB2 := signedEmptyCLIBlock(t, keyB, blockB1, validatorB, 2, blockA1.Header.TimeUnix+20)
+	if err := n.ImportBlock(blockB1); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.ImportBlock(blockB2); err != nil {
+		t.Fatal(err)
+	}
+	voteB1, err := consensus.SignFinalityVote(keyA, blockB1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := n.SubmitFinalityVote(voteB1); err == nil {
+		t.Fatal("conflicting finality vote should be rejected")
+	}
+	evidence := n.FinalityEvidence()
+	if len(evidence) != 1 {
+		t.Fatalf("evidence = %+v", evidence)
+	}
+	return evidence[0]
+}
+
+func signedEmptyCLIBlock(t *testing.T, key crypto.PrivateKey, parent types.Block, proposer string, height uint64, timeUnix int64) types.Block {
+	t.Helper()
+	block := types.Block{
+		Header: types.BlockHeader{
+			ChainID:       parent.Header.ChainID,
+			Height:        height,
+			ParentHash:    parent.Hash(),
+			TimeUnix:      timeUnix,
+			Proposer:      proposer,
+			GasLimit:      node.DefaultBlockGasLimit,
+			GasUsed:       0,
+			BaseFeePerGas: node.NextBaseFee(parent, node.DefaultBlockGasLimit),
+			TxRoot:        types.TransactionRoot(nil),
+			ReceiptRoot:   types.ReceiptRoot(nil),
+			StateRoot:     parent.Header.StateRoot,
+		},
+	}
+	if err := consensus.SignBlock(key, &block); err != nil {
+		t.Fatal(err)
+	}
+	return block
 }

@@ -332,7 +332,7 @@ func txCommand(args []string, out io.Writer) {
 
 func queryCommand(args []string, out io.Writer) {
 	if len(args) < 1 {
-		log.Fatal("usage: chainlab query <account|tx|head|finality|fees|mempool|logs|validators|proposal|param|call|estimate-gas>")
+		log.Fatal("usage: chainlab query <account|tx|head|finality|finality-evidence|fees|mempool|logs|validators|proposal|param|call|estimate-gas>")
 	}
 	var err error
 	switch args[0] {
@@ -344,6 +344,8 @@ func queryCommand(args []string, out io.Writer) {
 		err = headCommand(args[1:], out)
 	case "finality":
 		err = finalityCommand(args[1:], out)
+	case "finality-evidence":
+		err = finalityEvidenceCommand(args[1:], out)
 	case "fees":
 		err = feesCommand(args[1:], out)
 	case "mempool":
@@ -1136,6 +1138,28 @@ func finalityCommand(args []string, out io.Writer) error {
 		return err
 	}
 	return writeTo(out, finality)
+}
+
+func finalityEvidenceCommand(args []string, out io.Writer) error {
+	flags := flag.NewFlagSet("query finality-evidence", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	resp, err := http.Get(trimSlash(*rpcURL) + "/chain/finality/evidence")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("finality evidence query failed: status %d: %s", resp.StatusCode, string(body))
+	}
+	var evidence []types.FinalityEquivocationEvidence
+	if err := json.NewDecoder(resp.Body).Decode(&evidence); err != nil {
+		return err
+	}
+	return writeTo(out, evidence)
 }
 
 func feesCommand(args []string, out io.Writer) error {

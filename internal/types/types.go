@@ -185,6 +185,15 @@ type FinalityCertificate struct {
 	Signatures []FinalitySignature `json:"signatures"`
 }
 
+type FinalityEquivocationEvidence struct {
+	Validator       string `json:"validator"`
+	Height          uint64 `json:"height"`
+	FirstBlockHash  string `json:"first_block_hash"`
+	FirstSignature  string `json:"first_signature"`
+	SecondBlockHash string `json:"second_block_hash"`
+	SecondSignature string `json:"second_signature"`
+}
+
 type finalityVotePayload struct {
 	ChainID   string `json:"chain_id"`
 	Height    uint64 `json:"height"`

@@ -10,6 +10,7 @@ It currently implements:
 - local proof-of-authority block production with deterministic multi-validator proposer rotation
 - dynamic validator joins, leaves, and slashing through `validator.join` / `validator.leave` / `validator.slash` transactions, with validator set committed into state roots and snapshots
 - BFT-style finality certificates from validator commit signatures, with conservative block-depth fallback when no certificate exists
+- finality double-vote evidence detection for validators that sign conflicting block hashes at the same height
 - transaction, receipt, and state roots
 - native smart-contract runtime with `counter.v1` and `token.v1`
 - sandboxed WASM contract runtime with built-in `wasm.echo.v1` and chain-state uploaded modules through `wasm.upload`
@@ -228,11 +229,14 @@ When more than two thirds of the active validators sign the same block hash, Cha
 
 Nodes started with `--peer` relay submitted finality votes to their configured HTTP peers through `/peer/finality-vote`, so a devnet peer that already imported the block can independently assemble the same certificate.
 
+If a validator submits finality votes for two different block hashes at the same height, the second vote is rejected and a `FinalityEquivocationEvidence` record is stored in the node snapshot.
+
 Query chain state:
 
 ```powershell
 go run ./cmd/chainlab query head --rpc http://127.0.0.1:8547
 go run ./cmd/chainlab query finality --rpc http://127.0.0.1:8547
+go run ./cmd/chainlab query finality-evidence --rpc http://127.0.0.1:8547
 go run ./cmd/chainlab query fees --rpc http://127.0.0.1:8547
 go run ./cmd/chainlab query mempool --rpc http://127.0.0.1:8547
 go run ./cmd/chainlab query account --rpc http://127.0.0.1:8547 --address <address>
@@ -254,6 +258,7 @@ go run ./cmd/chainlab query estimate-gas --rpc http://127.0.0.1:8547 --type call
 - `GET /explorer/account/{address}`
 - `GET /chain/head`
 - `GET /chain/finality`
+- `GET /chain/finality/evidence`
 - `GET /chain/block/{height}`
 - `GET /account/{address}`
 - `GET /validators`
@@ -268,7 +273,7 @@ go run ./cmd/chainlab query estimate-gas --rpc http://127.0.0.1:8547 --type call
 - `POST /peer/tx`
 - `POST /peer/block`
 - `POST /peer/finality-vote`
-- `POST /rpc` with methods `chain_head`, `chain_finality`, `chain_sendFinalityVote`, `chain_feeMarket`, `chain_getAccount`, `chain_validators`, `chain_proposal`, `chain_param`, `chain_sendTx`, `chain_sendUserOperation`, and `chain_faucet`
+- `POST /rpc` with methods `chain_head`, `chain_finality`, `chain_finalityEvidence`, `chain_sendFinalityVote`, `chain_feeMarket`, `chain_getAccount`, `chain_validators`, `chain_proposal`, `chain_param`, `chain_sendTx`, `chain_sendUserOperation`, and `chain_faucet`
 - `POST /rpc` with EVM-style methods `eth_chainId`, `eth_blockNumber`, `eth_gasPrice`, `eth_maxPriorityFeePerGas`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`, `eth_getLogs`, `eth_newFilter`, `eth_getFilterLogs`, `eth_getFilterChanges`, `eth_uninstallFilter`, `eth_call`, `eth_estimateGas`, and `eth_sendRawTransaction`. Block range tags support `earliest`, `latest`, `safe`, `finalized`, and hex quantities. `eth_getTransactionCount` also supports `pending` for mempool-aware nonce calculation.
 - `POST /rpc` with txpool-style methods `txpool_status` and `txpool_content`
 
@@ -276,7 +281,7 @@ go run ./cmd/chainlab query estimate-gas --rpc http://127.0.0.1:8547 --type call
 
 Next useful milestones:
 
-- BFT timeout/round handling, equivocation evidence, and richer fork-choice safety rules
+- BFT timeout/round handling, automatic evidence transactions, and richer fork-choice safety rules
 - broader WASM ABI with CPU instruction/fuel metering
 - richer account abstraction, including policy-based paymasters, social recovery/session-key smart accounts, and ERC-4337/EIP-7702 compatibility experiments
 - richer contract explorer views with decoded native contract state, event pages, and longer-lived external indexer support

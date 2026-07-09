@@ -51,6 +51,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /chain/finality", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, s.node.Finality())
 	})
+	mux.HandleFunc("GET /chain/finality/evidence", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, s.node.FinalityEvidence())
+	})
 	mux.HandleFunc("GET /chain/block/{height}", func(w http.ResponseWriter, r *http.Request) {
 		height, err := strconv.ParseUint(r.PathValue("height"), 10, 64)
 		if err != nil {
@@ -552,6 +555,8 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: n.Head()})
 	case "chain_finality":
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: n.Finality()})
+	case "chain_finalityEvidence":
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: n.FinalityEvidence()})
 	case "chain_sendFinalityVote":
 		vote, err := parseRPCFinalityVoteParam(request.Params)
 		if err != nil {

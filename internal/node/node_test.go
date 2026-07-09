@@ -2,6 +2,7 @@ package node_test
 
 import (
 	"encoding/hex"
+	"strings"
 	"testing"
 
 	"chainlab/internal/consensus"
@@ -1386,6 +1387,104 @@ func TestNodeFinalityUsesBFTCertificateWhenQuorumVotesCommitBlock(t *testing.T) 
 	}
 }
 
+func TestNodeRecordsFinalityEquivocationEvidence(t *testing.T) {
+	keyA, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyB, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyC, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validatorA := chaincrypto.AddressFromPrivateKey(keyA)
+	validatorB := chaincrypto.AddressFromPrivateKey(keyB)
+	validatorC := chaincrypto.AddressFromPrivateKey(keyC)
+	validators := []string{validatorA, validatorB, validatorC}
+	dataDir := t.TempDir()
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    keyA,
+		GenesisBalance: map[string]uint64{validatorA: 1_000_000},
+		Validators:     validators,
+		DataDir:        dataDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	blockA1, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	voteA1, err := consensus.SignFinalityVote(keyA, blockA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := n.SubmitFinalityVote(voteA1); err != nil {
+		t.Fatal(err)
+	}
+
+	genesis, ok := n.Block(0)
+	if !ok {
+		t.Fatal("genesis should exist")
+	}
+	blockB1 := signedEmptyNodeBlock(t, keyA, genesis, validatorA, 1, blockA1.Header.TimeUnix+10)
+	blockB2 := signedEmptyNodeBlock(t, keyB, blockB1, validatorB, 2, blockA1.Header.TimeUnix+20)
+	if err := n.ImportBlock(blockB1); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.ImportBlock(blockB2); err != nil {
+		t.Fatal(err)
+	}
+	if n.Head().Hash() != blockB2.Hash() {
+		t.Fatal("longer branch should become canonical before conflicting vote")
+	}
+
+	voteB1, err := consensus.SignFinalityVote(keyA, blockB1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = n.SubmitFinalityVote(voteB1)
+	if err == nil || !strings.Contains(err.Error(), "equivocation") {
+		t.Fatalf("conflicting finality vote error = %v", err)
+	}
+	evidence := n.FinalityEvidence()
+	if len(evidence) != 1 {
+		t.Fatalf("evidence = %+v", evidence)
+	}
+	got := evidence[0]
+	if got.Validator != validatorA || got.Height != 1 {
+		t.Fatalf("evidence identity = %+v", got)
+	}
+	if got.FirstBlockHash != blockA1.Hash() || got.SecondBlockHash != blockB1.Hash() {
+		t.Fatalf("evidence hashes = %+v, want %s then %s", got, blockA1.Hash(), blockB1.Hash())
+	}
+	if got.FirstSignature != voteA1.Signature || got.SecondSignature != voteB1.Signature {
+		t.Fatalf("evidence signatures = %+v", got)
+	}
+
+	reloaded, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    keyA,
+		GenesisBalance: map[string]uint64{validatorA: 1_000_000},
+		Validators:     validators,
+		DataDir:        dataDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloadedEvidence := reloaded.FinalityEvidence(); len(reloadedEvidence) != 1 || reloadedEvidence[0].SecondBlockHash != blockB1.Hash() {
+		t.Fatalf("reloaded evidence = %+v", reloadedEvidence)
+	}
+	if err := reloaded.SubmitFinalityVote(voteB1); err == nil || !strings.Contains(err.Error(), "equivocation") {
+		t.Fatalf("reloaded conflicting finality vote error = %v", err)
+	}
+}
+
 func TestNodePendingAccountIncludesMempoolTransactions(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {
@@ -1514,6 +1613,29 @@ func authorizedNodeTx(t *testing.T, keys []chaincrypto.PrivateKey, tx types.Tran
 		tx.Authorizations[i].Signature = signature
 	}
 	return tx
+}
+
+func signedEmptyNodeBlock(t *testing.T, key chaincrypto.PrivateKey, parent types.Block, proposer string, height uint64, timeUnix int64) types.Block {
+	t.Helper()
+	block := types.Block{
+		Header: types.BlockHeader{
+			ChainID:       parent.Header.ChainID,
+			Height:        height,
+			ParentHash:    parent.Hash(),
+			TimeUnix:      timeUnix,
+			Proposer:      proposer,
+			GasLimit:      node.DefaultBlockGasLimit,
+			GasUsed:       0,
+			BaseFeePerGas: node.NextBaseFee(parent, node.DefaultBlockGasLimit),
+			TxRoot:        types.TransactionRoot(nil),
+			ReceiptRoot:   types.ReceiptRoot(nil),
+			StateRoot:     parent.Header.StateRoot,
+		},
+	}
+	if err := consensus.SignBlock(key, &block); err != nil {
+		t.Fatal(err)
+	}
+	return block
 }
 
 func TestNodeRejectsImportedBlockWithBadStateRoot(t *testing.T) {

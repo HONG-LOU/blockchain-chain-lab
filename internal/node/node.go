@@ -3,6 +3,7 @@ package node
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -30,21 +31,28 @@ type Config struct {
 }
 
 type Node struct {
-	mu            sync.Mutex
-	chainID       string
-	proposerKey   chaincrypto.PrivateKey
-	proposer      string
-	state         *state.Store
-	executor      *core.Executor
-	consensus     *consensus.POA
-	blocks        []types.Block
-	genesisState  state.Snapshot
-	knownBlocks   map[string]types.Block
-	finalityVotes map[string]map[string]types.FinalitySignature
-	mempool       []types.Transaction
-	txIndex       map[string]types.TransactionRecord
-	dataDir       string
-	blockGasLimit uint64
+	mu                sync.Mutex
+	chainID           string
+	proposerKey       chaincrypto.PrivateKey
+	proposer          string
+	state             *state.Store
+	executor          *core.Executor
+	consensus         *consensus.POA
+	blocks            []types.Block
+	genesisState      state.Snapshot
+	knownBlocks       map[string]types.Block
+	finalityVotes     map[string]map[string]types.FinalitySignature
+	finalityVoteIndex map[uint64]map[string]finalityVoteRecord
+	finalityEvidence  map[string]types.FinalityEquivocationEvidence
+	mempool           []types.Transaction
+	txIndex           map[string]types.TransactionRecord
+	dataDir           string
+	blockGasLimit     uint64
+}
+
+type finalityVoteRecord struct {
+	BlockHash string
+	Signature string
 }
 
 const (
@@ -89,11 +97,12 @@ type FeeMarketSnapshot struct {
 }
 
 type diskSnapshot struct {
-	ChainID      string         `json:"chain_id"`
-	GenesisState state.Snapshot `json:"genesis_state,omitempty"`
-	State        state.Snapshot `json:"state"`
-	Blocks       []types.Block  `json:"blocks"`
-	KnownBlocks  []types.Block  `json:"known_blocks,omitempty"`
+	ChainID          string                               `json:"chain_id"`
+	GenesisState     state.Snapshot                       `json:"genesis_state,omitempty"`
+	State            state.Snapshot                       `json:"state"`
+	Blocks           []types.Block                        `json:"blocks"`
+	KnownBlocks      []types.Block                        `json:"known_blocks,omitempty"`
+	FinalityEvidence []types.FinalityEquivocationEvidence `json:"finality_evidence,omitempty"`
 }
 
 func New(config Config) (*Node, error) {
@@ -118,16 +127,18 @@ func New(config Config) (*Node, error) {
 	}
 
 	n := &Node{
-		chainID:       config.ChainID,
-		proposerKey:   config.ProposerKey,
-		proposer:      proposer,
-		executor:      core.NewExecutor(config.ChainID, feeCollector, contracts.NewRuntimeWithDefaults()),
-		consensus:     consensus.NewPOA(validators),
-		knownBlocks:   make(map[string]types.Block),
-		finalityVotes: make(map[string]map[string]types.FinalitySignature),
-		txIndex:       make(map[string]types.TransactionRecord),
-		dataDir:       config.DataDir,
-		blockGasLimit: blockGasLimit,
+		chainID:           config.ChainID,
+		proposerKey:       config.ProposerKey,
+		proposer:          proposer,
+		executor:          core.NewExecutor(config.ChainID, feeCollector, contracts.NewRuntimeWithDefaults()),
+		consensus:         consensus.NewPOA(validators),
+		knownBlocks:       make(map[string]types.Block),
+		finalityVotes:     make(map[string]map[string]types.FinalitySignature),
+		finalityVoteIndex: make(map[uint64]map[string]finalityVoteRecord),
+		finalityEvidence:  make(map[string]types.FinalityEquivocationEvidence),
+		txIndex:           make(map[string]types.TransactionRecord),
+		dataDir:           config.DataDir,
+		blockGasLimit:     blockGasLimit,
 	}
 	genesisStore := newGenesisStore(config.GenesisBalance, validators)
 	genesisState := genesisStore.Snapshot()
@@ -160,6 +171,10 @@ func New(config Config) (*Node, error) {
 			for _, block := range n.blocks {
 				n.knownBlocks[block.Hash()] = block
 			}
+			for _, evidence := range loaded.FinalityEvidence {
+				n.finalityEvidence[finalityEvidenceKey(evidence.Height, evidence.Validator)] = evidence
+			}
+			n.rebuildFinalityVoteIndex()
 			n.rebuildTxIndex()
 			return n, nil
 		}
@@ -380,6 +395,9 @@ func (n *Node) SubmitFinalityVote(vote types.FinalitySignature) error {
 		return err
 	}
 	blockHash := block.Hash()
+	if err := n.recordFinalityVoteLocked(block, vote); err != nil {
+		return err
+	}
 	if n.finalityVotes == nil {
 		n.finalityVotes = make(map[string]map[string]types.FinalitySignature)
 	}
@@ -415,6 +433,23 @@ func (n *Node) SubmitFinalityVote(vote types.FinalitySignature) error {
 	n.blocks[certified.Header.Height] = certified
 	n.knownBlocks[blockHash] = certified
 	return n.persistLocked()
+}
+
+func (n *Node) FinalityEvidence() []types.FinalityEquivocationEvidence {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	evidence := make([]types.FinalityEquivocationEvidence, 0, len(n.finalityEvidence))
+	for _, item := range n.finalityEvidence {
+		evidence = append(evidence, item)
+	}
+	sort.Slice(evidence, func(i int, j int) bool {
+		if evidence[i].Height != evidence[j].Height {
+			return evidence[i].Height < evidence[j].Height
+		}
+		return evidence[i].Validator < evidence[j].Validator
+	})
+	return evidence
 }
 
 func (n *Node) Finality() FinalityCheckpoint {
@@ -632,6 +667,89 @@ func sortedFinalitySignatures(votes map[string]types.FinalitySignature) []types.
 		signatures = append(signatures, vote)
 	}
 	return signatures
+}
+
+func (n *Node) rebuildFinalityVoteIndex() {
+	n.finalityVoteIndex = make(map[uint64]map[string]finalityVoteRecord)
+	for _, block := range n.knownBlocks {
+		if block.FinalityCertificate == nil {
+			continue
+		}
+		for _, vote := range block.FinalityCertificate.Signatures {
+			n.recordFinalityVoteInIndex(block, types.FinalitySignature{
+				Validator: strings.ToLower(strings.TrimSpace(vote.Validator)),
+				Signature: vote.Signature,
+			})
+		}
+	}
+	for _, evidence := range n.finalityEvidence {
+		validator := strings.ToLower(strings.TrimSpace(evidence.Validator))
+		heightVotes := n.finalityVoteIndex[evidence.Height]
+		if heightVotes == nil {
+			heightVotes = make(map[string]finalityVoteRecord)
+			n.finalityVoteIndex[evidence.Height] = heightVotes
+		}
+		if _, ok := heightVotes[validator]; !ok {
+			heightVotes[validator] = finalityVoteRecord{
+				BlockHash: evidence.FirstBlockHash,
+				Signature: evidence.FirstSignature,
+			}
+		}
+	}
+}
+
+func (n *Node) recordFinalityVoteLocked(block types.Block, vote types.FinalitySignature) error {
+	if n.finalityVoteIndex == nil {
+		n.finalityVoteIndex = make(map[uint64]map[string]finalityVoteRecord)
+	}
+	if n.finalityEvidence == nil {
+		n.finalityEvidence = make(map[string]types.FinalityEquivocationEvidence)
+	}
+	heightVotes := n.finalityVoteIndex[block.Header.Height]
+	if heightVotes == nil {
+		heightVotes = make(map[string]finalityVoteRecord)
+		n.finalityVoteIndex[block.Header.Height] = heightVotes
+	}
+	existing, ok := heightVotes[vote.Validator]
+	blockHash := block.Hash()
+	if !ok {
+		heightVotes[vote.Validator] = finalityVoteRecord{BlockHash: blockHash, Signature: vote.Signature}
+		return nil
+	}
+	if existing.BlockHash == blockHash {
+		return nil
+	}
+	evidence := types.FinalityEquivocationEvidence{
+		Validator:       vote.Validator,
+		Height:          block.Header.Height,
+		FirstBlockHash:  existing.BlockHash,
+		FirstSignature:  existing.Signature,
+		SecondBlockHash: blockHash,
+		SecondSignature: vote.Signature,
+	}
+	n.finalityEvidence[finalityEvidenceKey(evidence.Height, evidence.Validator)] = evidence
+	if err := n.persistLocked(); err != nil {
+		return err
+	}
+	return fmt.Errorf("finality equivocation: validator %s signed height %d for %s and %s", vote.Validator, block.Header.Height, existing.BlockHash, blockHash)
+}
+
+func (n *Node) recordFinalityVoteInIndex(block types.Block, vote types.FinalitySignature) {
+	if vote.Validator == "" {
+		return
+	}
+	heightVotes := n.finalityVoteIndex[block.Header.Height]
+	if heightVotes == nil {
+		heightVotes = make(map[string]finalityVoteRecord)
+		n.finalityVoteIndex[block.Header.Height] = heightVotes
+	}
+	if _, ok := heightVotes[vote.Validator]; !ok {
+		heightVotes[vote.Validator] = finalityVoteRecord{BlockHash: block.Hash(), Signature: vote.Signature}
+	}
+}
+
+func finalityEvidenceKey(height uint64, validator string) string {
+	return fmt.Sprintf("%d:%s", height, strings.ToLower(strings.TrimSpace(validator)))
 }
 
 func (n *Node) pendingStateLocked() (*state.Store, error) {
@@ -861,11 +979,12 @@ func (n *Node) persistLocked() error {
 		return err
 	}
 	snapshot := diskSnapshot{
-		ChainID:      n.chainID,
-		GenesisState: n.genesisState,
-		State:        n.state.Snapshot(),
-		Blocks:       n.blocks,
-		KnownBlocks:  n.knownBlockListLocked(),
+		ChainID:          n.chainID,
+		GenesisState:     n.genesisState,
+		State:            n.state.Snapshot(),
+		Blocks:           n.blocks,
+		KnownBlocks:      n.knownBlockListLocked(),
+		FinalityEvidence: n.finalityEvidenceListLocked(),
 	}
 	raw, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
@@ -891,6 +1010,20 @@ func (n *Node) knownBlockListLocked() []types.Block {
 		return blocks[i].Hash() < blocks[j].Hash()
 	})
 	return blocks
+}
+
+func (n *Node) finalityEvidenceListLocked() []types.FinalityEquivocationEvidence {
+	evidence := make([]types.FinalityEquivocationEvidence, 0, len(n.finalityEvidence))
+	for _, item := range n.finalityEvidence {
+		evidence = append(evidence, item)
+	}
+	sort.Slice(evidence, func(i int, j int) bool {
+		if evidence[i].Height != evidence[j].Height {
+			return evidence[i].Height < evidence[j].Height
+		}
+		return evidence[i].Validator < evidence[j].Validator
+	})
+	return evidence
 }
 
 func loadDiskSnapshot(dataDir string) (*diskSnapshot, error) {
