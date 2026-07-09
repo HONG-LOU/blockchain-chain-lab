@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"chainlab/internal/contracts"
+	"chainlab/internal/core"
 	chaincrypto "chainlab/internal/crypto"
 	"chainlab/internal/hash"
 	"chainlab/internal/node"
@@ -880,6 +883,19 @@ func TestEthCallAndEstimateGas(t *testing.T) {
 	}})
 	if estimateTransfer != "0x5208" {
 		t.Fatalf("transfer gas estimate = %v", estimateTransfer)
+	}
+
+	wasmBytecode := contracts.WasmEchoCode()
+	estimateUpload := callRPC(t, server.URL, "eth_estimateGas", []any{map[string]any{
+		"type": string(types.TxWASMUpload),
+		"from": alice,
+		"payload": map[string]any{
+			"bytecode": "0x" + hex.EncodeToString(wasmBytecode),
+		},
+	}})
+	wantUploadGas := fmt.Sprintf("0x%x", core.EstimateWASMUploadGas(wasmBytecode))
+	if estimateUpload != wantUploadGas {
+		t.Fatalf("wasm upload gas estimate = %v, want %s", estimateUpload, wantUploadGas)
 	}
 }
 

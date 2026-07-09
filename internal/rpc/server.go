@@ -407,7 +407,7 @@ func handleJSONRPC(w http.ResponseWriter, r *http.Request, n *node.Node) {
 			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
 			return
 		}
-		gas, err := core.EstimateGas(call.txType)
+		gas, err := core.EstimateGasForPayload(call.txType, call.payload)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
 			return

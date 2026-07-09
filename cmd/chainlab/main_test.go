@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"chainlab/internal/contracts"
+	"chainlab/internal/core"
 	"chainlab/internal/crypto"
 	"chainlab/internal/hash"
 	"chainlab/internal/node"
@@ -806,6 +807,41 @@ func TestReadWASMUploadBytecodeLoadsExample(t *testing.T) {
 	}
 	if !bytes.Equal(bytecode, contracts.WasmEchoCode()) {
 		t.Fatal("echo example bytecode should match built-in wasm echo module")
+	}
+}
+
+func TestWASMUploadCommandUsesMeteredDefaultGasLimit(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := crypto.AddressFromPrivateKey(key)
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	var out bytes.Buffer
+	if err := wasmUploadCommand([]string{
+		"--rpc", server.URL,
+		"--private-key", crypto.PrivateKeyToHex(key),
+		"--example", "echo",
+	}, &out); err != nil {
+		t.Fatal(err)
+	}
+	pool := n.TxPool()
+	if pool.PendingCount != 1 {
+		t.Fatalf("txpool = %+v", pool)
+	}
+	wantGas := core.EstimateWASMUploadGas(contracts.WasmEchoCode())
+	if pool.Pending[0].GasLimit != wantGas {
+		t.Fatalf("upload gas limit = %d, want %d", pool.Pending[0].GasLimit, wantGas)
 	}
 }
 

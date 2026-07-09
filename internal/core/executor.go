@@ -43,29 +43,19 @@ func (e *Executor) Execute(store *state.Store, tx types.Transaction) (types.Rece
 		return types.Receipt{}, fmt.Errorf("bad nonce: got %d want %d", tx.Nonce, account.Nonce)
 	}
 
-	gasUsed, err := EstimateGas(tx.Type)
-	if err != nil {
-		return types.Receipt{}, err
-	}
-	if tx.GasLimit < gasUsed {
-		return types.Receipt{}, errors.New("gas limit too low")
-	}
-	fee, err := checkedMul(gasUsed, tx.GasPrice)
+	baseGas, err := EstimateGas(tx.Type)
 	if err != nil {
 		return types.Receipt{}, err
 	}
 
 	working := store.Clone()
-	if err := e.chargeFee(working, tx.From, fee); err != nil {
-		return types.Receipt{}, err
-	}
 	working.IncrementNonce(tx.From)
 
 	receipt := types.Receipt{
 		TxHash:  tx.Hash(),
 		Success: true,
-		GasUsed: gasUsed,
 	}
+	gasUsed := baseGas
 
 	switch tx.Type {
 	case types.TxTransfer:
@@ -160,6 +150,7 @@ func (e *Executor) Execute(store *state.Store, tx types.Transaction) (types.Rece
 		if err != nil {
 			return types.Receipt{}, err
 		}
+		gasUsed = EstimateWASMUploadGas(bytecode)
 		if err := contracts.ValidateWasmCode(bytecode); err != nil {
 			return types.Receipt{}, err
 		}
@@ -181,7 +172,11 @@ func (e *Executor) Execute(store *state.Store, tx types.Transaction) (types.Rece
 		if codeID == "" {
 			return types.Receipt{}, errors.New("deploy requires code_id")
 		}
-		address, events, err := e.runtime.Deploy(working, tx.From, codeID, tx.Hash(), tx.Payload)
+		address, events, resourceGas, err := e.runtime.DeployMetered(working, tx.From, codeID, tx.Hash(), tx.Payload)
+		if err != nil {
+			return types.Receipt{}, err
+		}
+		gasUsed, err = checkedAdd(gasUsed, resourceGas)
 		if err != nil {
 			return types.Receipt{}, err
 		}
@@ -192,7 +187,11 @@ func (e *Executor) Execute(store *state.Store, tx types.Transaction) (types.Rece
 		if tx.To == "" || method == "" {
 			return types.Receipt{}, errors.New("call requires to and method")
 		}
-		events, err := e.runtime.Call(working, tx.To, tx.From, method, tx.Payload)
+		events, resourceGas, err := e.runtime.CallMetered(working, tx.To, tx.From, method, tx.Payload)
+		if err != nil {
+			return types.Receipt{}, err
+		}
+		gasUsed, err = checkedAdd(gasUsed, resourceGas)
 		if err != nil {
 			return types.Receipt{}, err
 		}
@@ -201,6 +200,17 @@ func (e *Executor) Execute(store *state.Store, tx types.Transaction) (types.Rece
 		return types.Receipt{}, fmt.Errorf("unsupported transaction type %q", tx.Type)
 	}
 
+	if tx.GasLimit < gasUsed {
+		return types.Receipt{}, errors.New("gas limit too low")
+	}
+	fee, err := checkedMul(gasUsed, tx.GasPrice)
+	if err != nil {
+		return types.Receipt{}, err
+	}
+	if err := e.chargeFee(working, tx.From, fee); err != nil {
+		return types.Receipt{}, err
+	}
+	receipt.GasUsed = gasUsed
 	store.ReplaceWith(working)
 	return receipt, nil
 }
@@ -239,6 +249,33 @@ func EstimateGas(txType types.TxType) (uint64, error) {
 	default:
 		return 0, fmt.Errorf("unsupported transaction type %q", txType)
 	}
+}
+
+func EstimateGasForPayload(txType types.TxType, payload map[string]string) (uint64, error) {
+	if txType == types.TxWASMUpload {
+		bytecode, err := parseWASMUploadPayload(payload)
+		if err != nil {
+			return 0, err
+		}
+		return EstimateWASMUploadGas(bytecode), nil
+	}
+	return EstimateGas(txType)
+}
+
+func EstimateWASMUploadGas(bytecode []byte) uint64 {
+	base, _ := EstimateGas(types.TxWASMUpload)
+	size := uint64(len(bytecode))
+	if size > (math.MaxUint64-base)/4 {
+		return math.MaxUint64
+	}
+	return base + size*4
+}
+
+func checkedAdd(left uint64, right uint64) (uint64, error) {
+	if math.MaxUint64-left < right {
+		return 0, errors.New("gas overflow")
+	}
+	return left + right, nil
 }
 
 func checkedMul(left uint64, right uint64) (uint64, error) {

@@ -13,6 +13,12 @@ import (
 
 const wasmHostModule = "chainlab"
 
+const (
+	wasmInstantiateGas = 100
+	wasmHostCallGas    = 100
+	wasmByteGas        = 1
+)
+
 type WasmContract struct {
 	code []byte
 }
@@ -93,6 +99,9 @@ func newWasmInvocation(ctx Context, args map[string]string) *wasmInvocation {
 }
 
 func (i *wasmInvocation) call(code []byte, export string) error {
+	if !i.charge(wasmInstantiateGas + uint64(len(code))*wasmByteGas/32) {
+		return i.err
+	}
 	ctx := context.Background()
 	runtime := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().WithMemoryLimitPages(1))
 	defer runtime.Close(ctx)
@@ -126,7 +135,11 @@ func (i *wasmInvocation) argCopy(ctx context.Context, module api.Module, keyPtr 
 	if !ok {
 		return 0
 	}
-	return i.writeString(module, dstPtr, i.args[key])
+	value := i.args[key]
+	if !i.charge(wasmHostCallGas + uint64(len(key)+len(value))*wasmByteGas) {
+		return 0
+	}
+	return i.writeString(module, dstPtr, value)
 }
 
 func (i *wasmInvocation) storageCopy(ctx context.Context, module api.Module, keyPtr uint32, keyLen uint32, dstPtr uint32) uint32 {
@@ -134,13 +147,20 @@ func (i *wasmInvocation) storageCopy(ctx context.Context, module api.Module, key
 	if !ok {
 		return 0
 	}
-	return i.writeString(module, dstPtr, i.contractCtx.Store.GetStorage(i.contractCtx.Address, key))
+	value := i.contractCtx.Store.GetStorage(i.contractCtx.Address, key)
+	if !i.charge(wasmHostCallGas + uint64(len(key)+len(value))*wasmByteGas) {
+		return 0
+	}
+	return i.writeString(module, dstPtr, value)
 }
 
 func (i *wasmInvocation) storageSet(ctx context.Context, module api.Module, keyPtr uint32, keyLen uint32, valuePtr uint32, valueLen uint32) uint32 {
 	key, keyOK := i.readString(module, keyPtr, keyLen)
 	value, valueOK := i.readString(module, valuePtr, valueLen)
 	if !keyOK || !valueOK {
+		return 1
+	}
+	if !i.charge(wasmHostCallGas + uint64(len(key)+len(value))*wasmByteGas) {
 		return 1
 	}
 	i.contractCtx.Store.SetStorage(i.contractCtx.Address, key, value)
@@ -152,6 +172,9 @@ func (i *wasmInvocation) returnSet(ctx context.Context, module api.Module, value
 	if !ok {
 		return 1
 	}
+	if !i.charge(wasmHostCallGas + uint64(len(value))*wasmByteGas) {
+		return 1
+	}
 	i.returnValue = value
 	return 0
 }
@@ -161,6 +184,9 @@ func (i *wasmInvocation) emitEvent(ctx context.Context, module api.Module, typeP
 	key, keyOK := i.readString(module, keyPtr, keyLen)
 	value, valueOK := i.readString(module, valuePtr, valueLen)
 	if !typeOK || !keyOK || !valueOK {
+		return 1
+	}
+	if !i.charge(wasmHostCallGas + uint64(len(eventType)+len(key)+len(value))*wasmByteGas) {
 		return 1
 	}
 	i.events = append(i.events, types.Event{Type: eventType, Attributes: map[string]string{key: value}})
@@ -198,6 +224,17 @@ func (i *wasmInvocation) writeString(module api.Module, ptr uint32, value string
 		return 0
 	}
 	return uint32(len(value))
+}
+
+func (i *wasmInvocation) charge(amount uint64) bool {
+	if i.err != nil {
+		return false
+	}
+	if err := i.contractCtx.Meter.Charge(amount); err != nil {
+		i.err = err
+		return false
+	}
+	return true
 }
 
 func wasmEchoModule() []byte {

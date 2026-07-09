@@ -21,6 +21,7 @@ type Context struct {
 	Store   *state.Store
 	Address string
 	Caller  string
+	Meter   *Meter
 }
 
 type Runtime struct {
@@ -44,16 +45,22 @@ func (r *Runtime) Register(codeID string, contract Contract) {
 }
 
 func (r *Runtime) Deploy(store *state.Store, creator string, codeID string, seed string, args map[string]string) (string, []types.Event, error) {
+	address, events, _, err := r.DeployMetered(store, creator, codeID, seed, args)
+	return address, events, err
+}
+
+func (r *Runtime) DeployMetered(store *state.Store, creator string, codeID string, seed string, args map[string]string) (string, []types.Event, uint64, error) {
 	contract, err := r.contractFor(store, codeID)
 	if err != nil {
-		return "", nil, err
+		return "", nil, 0, err
 	}
 	address := contractAddress(creator, codeID, seed)
 	store.SetCodeID(address, codeID)
-	ctx := Context{Store: store, Address: address, Caller: strings.ToLower(creator)}
+	meter := NewMeter()
+	ctx := Context{Store: store, Address: address, Caller: strings.ToLower(creator), Meter: meter}
 	events, err := contract.Deploy(ctx, args)
 	if err != nil {
-		return "", nil, err
+		return "", nil, meter.GasUsed(), err
 	}
 	events = append([]types.Event{{
 		Type: "contract.deployed",
@@ -63,20 +70,27 @@ func (r *Runtime) Deploy(store *state.Store, creator string, codeID string, seed
 			"creator": strings.ToLower(creator),
 		},
 	}}, events...)
-	return address, events, nil
+	return address, events, meter.GasUsed(), nil
 }
 
 func (r *Runtime) Call(store *state.Store, address string, caller string, method string, args map[string]string) ([]types.Event, error) {
+	events, _, err := r.CallMetered(store, address, caller, method, args)
+	return events, err
+}
+
+func (r *Runtime) CallMetered(store *state.Store, address string, caller string, method string, args map[string]string) ([]types.Event, uint64, error) {
 	account := store.GetAccount(address)
 	if account.CodeID == "" {
-		return nil, errors.New("target account is not a contract")
+		return nil, 0, errors.New("target account is not a contract")
 	}
 	contract, err := r.contractFor(store, account.CodeID)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	ctx := Context{Store: store, Address: strings.ToLower(address), Caller: strings.ToLower(caller)}
-	return contract.Call(ctx, method, args)
+	meter := NewMeter()
+	ctx := Context{Store: store, Address: strings.ToLower(address), Caller: strings.ToLower(caller), Meter: meter}
+	events, err := contract.Call(ctx, method, args)
+	return events, meter.GasUsed(), err
 }
 
 func (r *Runtime) Read(store *state.Store, address string, caller string, method string, args map[string]string) (string, error) {

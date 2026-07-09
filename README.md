@@ -13,6 +13,7 @@ It currently implements:
 - transaction, receipt, and state roots
 - native smart-contract runtime with `counter.v1` and `token.v1`
 - sandboxed WASM contract runtime with built-in `wasm.echo.v1` and chain-state uploaded modules through `wasm.upload`
+- deterministic WASM resource metering for uploaded bytecode size and ChainLab host ABI storage/event/arg/return usage
 - HTTP REST endpoints and a small JSON-RPC-style endpoint
 - persistent node snapshots with committed blocks, state, and transaction index
 - local fork-choice that stores known branches and reorgs to a longer validated branch
@@ -135,6 +136,8 @@ The upload receipt contains `receipt.code_id`; use that value in the deploy comm
 
 Uploaded WASM runs inside a restricted wazero sandbox and only receives ChainLab host functions for args, contract storage, return data, and events. The module must implement ChainLab's current `deploy`, `call`, and `read` exports. This is not CosmWasm compatibility yet.
 
+WASM upload gas scales with bytecode size. WASM deploy and write-call receipts include deterministic extra gas for ChainLab host ABI usage, including module instantiation, argument copies, storage reads/writes, return data, and emitted event bytes.
+
 Stake, join, and leave the validator set:
 
 ```powershell
@@ -193,6 +196,6 @@ go run ./cmd/chainlab query estimate-gas --rpc http://127.0.0.1:8547 --type call
 Next useful milestones:
 
 - real BFT finality and richer fork-choice safety rules
-- broader WASM ABI with deterministic resource metering
+- broader WASM ABI with CPU instruction/fuel metering
 - richer contract explorer views with decoded native contract state and events
 - production-framework migration decision: OP Stack, Cosmos SDK, Avalanche L1, or another appchain stack

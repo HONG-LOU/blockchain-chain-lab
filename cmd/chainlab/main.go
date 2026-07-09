@@ -16,6 +16,7 @@ import (
 
 	"chainlab/examples"
 	"chainlab/internal/contracts"
+	"chainlab/internal/core"
 	"chainlab/internal/crypto"
 	"chainlab/internal/node"
 	chainrpc "chainlab/internal/rpc"
@@ -410,7 +411,7 @@ func wasmUploadCommand(args []string, out io.Writer) error {
 	wasmFile := flags.String("wasm-file", "", "path to a wasm module")
 	bytecodeHex := flags.String("bytecode", "", "0x-prefixed wasm bytecode")
 	example := flags.String("example", "", "built-in example module to upload: echo")
-	gasLimit := flags.Uint64("gas-limit", 120_000, "gas limit")
+	gasLimit := flags.Uint64("gas-limit", 0, "gas limit; defaults to metered upload gas")
 	gasPrice := flags.Uint64("gas-price", 1, "gas price")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -419,8 +420,12 @@ func wasmUploadCommand(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	limit := *gasLimit
+	if limit == 0 {
+		limit = core.EstimateWASMUploadGas(bytecode)
+	}
 	payload := map[string]string{"bytecode": "0x" + hex.EncodeToString(bytecode)}
-	tx, err := buildSignedTransaction(*rpcURL, *privateKeyHex, types.TxWASMUpload, "", 0, *gasLimit, *gasPrice, payload)
+	tx, err := buildSignedTransaction(*rpcURL, *privateKeyHex, types.TxWASMUpload, "", 0, limit, *gasPrice, payload)
 	if err != nil {
 		return err
 	}
@@ -578,7 +583,7 @@ func deployCommand(args []string, out io.Writer) error {
 	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
 	privateKeyHex := flags.String("private-key", "", "deployer private key")
 	codeID := flags.String("code-id", "", "native contract code id")
-	gasLimit := flags.Uint64("gas-limit", 80_000, "gas limit")
+	gasLimit := flags.Uint64("gas-limit", 90_000, "gas limit")
 	gasPrice := flags.Uint64("gas-price", 1, "gas price")
 	var deployArgs stringListFlag
 	flags.Var(&deployArgs, "arg", "deployment argument key=value; can be repeated")
@@ -610,7 +615,7 @@ func contractCallCommand(args []string, out io.Writer) error {
 	privateKeyHex := flags.String("private-key", "", "caller private key")
 	to := flags.String("to", "", "contract address")
 	method := flags.String("method", "", "contract write method")
-	gasLimit := flags.Uint64("gas-limit", 50_000, "gas limit")
+	gasLimit := flags.Uint64("gas-limit", 60_000, "gas limit")
 	gasPrice := flags.Uint64("gas-price", 1, "gas price")
 	var callArgs stringListFlag
 	flags.Var(&callArgs, "arg", "method argument key=value; can be repeated")

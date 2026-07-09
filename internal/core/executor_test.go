@@ -369,7 +369,7 @@ func TestWASMUploadStoresCodeAndDeploysByUploadedCodeID(t *testing.T) {
 		Type:     types.TxWASMUpload,
 		From:     alice,
 		Nonce:    0,
-		GasLimit: 120_000,
+		GasLimit: core.EstimateWASMUploadGas(bytecode),
 		GasPrice: 1,
 		Payload: map[string]string{
 			"bytecode": "0x" + hex.EncodeToString(bytecode),
@@ -398,7 +398,7 @@ func TestWASMUploadStoresCodeAndDeploysByUploadedCodeID(t *testing.T) {
 		Type:     types.TxDeploy,
 		From:     alice,
 		Nonce:    1,
-		GasLimit: 80_000,
+		GasLimit: 90_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"code_id": uploadReceipt.CodeID,
@@ -419,7 +419,7 @@ func TestWASMUploadStoresCodeAndDeploysByUploadedCodeID(t *testing.T) {
 		From:     alice,
 		To:       deployReceipt.ContractAddress,
 		Nonce:    2,
-		GasLimit: 50_000,
+		GasLimit: 60_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"method":  "set",
@@ -436,5 +436,140 @@ func TestWASMUploadStoresCodeAndDeploysByUploadedCodeID(t *testing.T) {
 	}
 	if value != "world" {
 		t.Fatalf("uploaded wasm read = %q", value)
+	}
+}
+
+func TestWASMUploadGasScalesWithBytecodeSizeAndRequiresLimit(t *testing.T) {
+	store, executor, key, alice, _ := newExecutorFixture(t)
+	bytecode := contracts.WasmEchoCode()
+	baseGas, err := core.EstimateGas(types.TxWASMUpload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meteredGas := core.EstimateWASMUploadGas(bytecode)
+	if meteredGas <= baseGas {
+		t.Fatalf("metered upload gas = %d, base = %d", meteredGas, baseGas)
+	}
+
+	tooLow := signedTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxWASMUpload,
+		From:     alice,
+		Nonce:    0,
+		GasLimit: baseGas,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"bytecode": "0x" + hex.EncodeToString(bytecode),
+		},
+	})
+	if _, err := executor.Execute(store, tooLow); err == nil {
+		t.Fatal("upload with only base gas should fail")
+	}
+
+	ok := signedTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxWASMUpload,
+		From:     alice,
+		Nonce:    0,
+		GasLimit: meteredGas,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"bytecode": "0x" + hex.EncodeToString(bytecode),
+		},
+	})
+	receipt, err := executor.Execute(store, ok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.GasUsed != meteredGas {
+		t.Fatalf("upload gas used = %d, want %d", receipt.GasUsed, meteredGas)
+	}
+	if got := store.GetAccount("0xfee0000000000000000000000000000000000000").Balance; got != meteredGas {
+		t.Fatalf("fee collector balance = %d, want %d", got, meteredGas)
+	}
+}
+
+func TestWASMCallGasIncludesHostResourcesAndEnforcesLimit(t *testing.T) {
+	store, executor, key, alice, _ := newExecutorFixture(t)
+	bytecode := contracts.WasmEchoCode()
+	upload := signedTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxWASMUpload,
+		From:     alice,
+		Nonce:    0,
+		GasLimit: core.EstimateWASMUploadGas(bytecode),
+		GasPrice: 1,
+		Payload: map[string]string{
+			"bytecode": "0x" + hex.EncodeToString(bytecode),
+		},
+	})
+	uploadReceipt, err := executor.Execute(store, upload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deploy := signedTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxDeploy,
+		From:     alice,
+		Nonce:    1,
+		GasLimit: 90_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"code_id": uploadReceipt.CodeID,
+			"message": "hello",
+		},
+	})
+	deployReceipt, err := executor.Execute(store, deploy)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lowCall := signedTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxCall,
+		From:     alice,
+		To:       deployReceipt.ContractAddress,
+		Nonce:    2,
+		GasLimit: 50_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"method":  "set",
+			"message": "world",
+		},
+	})
+	if _, err := executor.Execute(store, lowCall); err == nil {
+		t.Fatal("wasm call with only base gas should fail")
+	}
+	value, err := contracts.NewRuntimeWithDefaults().Read(store, deployReceipt.ContractAddress, alice, "get", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value != "hello" {
+		t.Fatalf("failed low-gas call should not mutate storage, got %q", value)
+	}
+
+	okCall := signedTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxCall,
+		From:     alice,
+		To:       deployReceipt.ContractAddress,
+		Nonce:    2,
+		GasLimit: 60_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"method":  "set",
+			"message": "world",
+		},
+	})
+	receipt, err := executor.Execute(store, okCall)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseGas, err := core.EstimateGas(types.TxCall)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.GasUsed <= baseGas {
+		t.Fatalf("wasm call gas used = %d, base = %d", receipt.GasUsed, baseGas)
 	}
 }

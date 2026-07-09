@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 
 	"chainlab/internal/contracts"
+	"chainlab/internal/core"
 	"chainlab/internal/crypto"
 	"chainlab/internal/node"
 	"chainlab/internal/types"
@@ -134,15 +135,16 @@ func RunDemo() (Summary, error) {
 		return Summary{}, err
 	}
 
+	wasmBytecode := contracts.WasmEchoCode()
 	wasmUploadBlock, err := submitAndProduce(n, key, types.Transaction{
 		ChainID:  "chainlab-local",
 		Type:     types.TxWASMUpload,
 		From:     alice,
 		Nonce:    6,
-		GasLimit: 120_000,
+		GasLimit: core.EstimateWASMUploadGas(wasmBytecode),
 		GasPrice: 1,
 		Payload: map[string]string{
-			"bytecode": "0x" + hex.EncodeToString(contracts.WasmEchoCode()),
+			"bytecode": "0x" + hex.EncodeToString(wasmBytecode),
 		},
 	})
 	if err != nil {
@@ -155,7 +157,7 @@ func RunDemo() (Summary, error) {
 		Type:     types.TxDeploy,
 		From:     alice,
 		Nonce:    7,
-		GasLimit: 80_000,
+		GasLimit: 90_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"code_id": wasmCodeID,
@@ -173,7 +175,7 @@ func RunDemo() (Summary, error) {
 		From:     alice,
 		To:       wasmContract,
 		Nonce:    8,
-		GasLimit: 50_000,
+		GasLimit: 60_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"method":  "set",

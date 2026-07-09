@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"chainlab/internal/contracts"
+	"chainlab/internal/core"
 	chaincrypto "chainlab/internal/crypto"
 	"chainlab/internal/node"
 	"chainlab/internal/types"
@@ -150,15 +151,16 @@ func TestNodePersistsUploadedWASMCode(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	bytecode := contracts.WasmEchoCode()
 	upload := signedNodeTx(t, key, types.Transaction{
 		ChainID:  "chainlab-local",
 		Type:     types.TxWASMUpload,
 		From:     alice,
 		Nonce:    0,
-		GasLimit: 120_000,
+		GasLimit: core.EstimateWASMUploadGas(bytecode),
 		GasPrice: 1,
 		Payload: map[string]string{
-			"bytecode": "0x" + hex.EncodeToString(contracts.WasmEchoCode()),
+			"bytecode": "0x" + hex.EncodeToString(bytecode),
 		},
 	})
 	if err := first.SubmitTx(upload); err != nil {
@@ -178,7 +180,7 @@ func TestNodePersistsUploadedWASMCode(t *testing.T) {
 		Type:     types.TxDeploy,
 		From:     alice,
 		Nonce:    1,
-		GasLimit: 80_000,
+		GasLimit: 90_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"code_id": codeID,
