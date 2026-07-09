@@ -21,7 +21,7 @@ It currently implements:
 - ChainLab-native smart contract accounts through `account.v1`: a contract account holds the balance and nonce while its stored owner signs with the transaction `signer`
 - ChainLab-native multisig smart accounts through `multisig.v1`: a contract account enforces an owner threshold with multiple transaction authorizations
 - ChainLab-native EIP-7702-style delegated EOAs through `set_code`: an EOA keeps its address, balance, and nonce while delegating authorization to `account.v1`
-- ChainLab-native transfer session keys for `account.v1` and delegated EOAs: an owner installs a limited key with value cap, optional recipient allowlist, and optional block-height expiry
+- ChainLab-native session keys for `account.v1` and delegated EOAs: an owner installs a limited key for capped transfers or one allowed contract method, with optional block-height expiry
 - HTTP REST endpoints and a small JSON-RPC-style endpoint with single-request and batch-request bodies
 - persistent node snapshots with committed blocks, state, transaction index, and a canonical event index rebuilt on restart or reorg
 - local fork-choice that stores known branches and reorgs to a longer validated branch
@@ -168,7 +168,15 @@ go run ./cmd/chainlab tx transfer --rpc http://127.0.0.1:8547 --from <account-or
 go run ./cmd/chainlab tx session-key --rpc http://127.0.0.1:8547 --from <account-or-delegated-eoa> --private-key <owner-private-key> --key <session-key-address> --revoke
 ```
 
-Session key policy is stored in account storage under `session:<key>:...` keys and is committed into state roots and snapshots. This first slice only authorizes value transfers, tracks transferred value against `limit`, optionally restricts the recipient with `--to`, and optionally expires after a block height. It does not implement ERC-4337 `UserOperation`, ERC-7579 modules, social recovery, contract-call session policies, or a general policy engine.
+Install a contract-call session key that can only call one contract method:
+
+```powershell
+go run ./cmd/chainlab tx session-key --rpc http://127.0.0.1:8547 --from <account-or-delegated-eoa> --private-key <owner-private-key> --key <session-key-address> --call-to <contract-address> --call-method increment --expires 50
+go run ./cmd/chainlab chain produce --rpc http://127.0.0.1:8547
+go run ./cmd/chainlab tx call --rpc http://127.0.0.1:8547 --from <account-or-delegated-eoa> --private-key <session-private-key> --to <contract-address> --method increment --arg amount=1
+```
+
+Session key policy is stored in account storage under `session:<key>:...` keys and is committed into state roots and snapshots. Transfer policies track transferred value against `limit`, optionally restrict the recipient with `--to`, and optionally expire after a block height. Contract-call policies restrict the key to one `--call-to` contract address and one `--call-method`; the session key cannot call other contracts or methods. ChainLab still does not implement ERC-4337 `UserOperation`, ERC-7579 modules, social recovery, batch session-key policies, parameter-level call policies, or a general policy engine.
 
 Build a signed raw ChainLab transaction without broadcasting, then submit it later:
 
@@ -310,7 +318,7 @@ Next useful milestones:
 
 - BFT timeout/round handling, richer fork-choice safety rules, and production-grade slashing economics
 - broader WASM ABI with deterministic runtime step limits, full calldata ABI parsing, and richer host functions
-- richer account abstraction, including policy-based paymasters, social recovery, broader session-key policies, ERC-4337 compatibility, and fuller Ethereum EIP-7702 type-4 raw transaction compatibility
+- richer account abstraction, including policy-based paymasters, social recovery, batch/parameter session-key policies, ERC-4337 compatibility, and fuller Ethereum EIP-7702 type-4 raw transaction compatibility
 - richer contract explorer views with decoded native contract state and longer-lived external indexer support
 - richer governance thresholds, quorum rules, deposits, and upgrade proposal handlers
 - production-framework migration decision: OP Stack, Cosmos SDK, Avalanche L1, or another appchain stack
