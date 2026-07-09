@@ -329,6 +329,78 @@ func TestRPCExposesFeeMarketFields(t *testing.T) {
 	}
 }
 
+func TestRPCExposesFeeHistory(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		BlockGasLimit:  42_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	for nonce, to := range []string{bob, carol} {
+		tx := signedRPCTransaction(t, key, types.Transaction{
+			ChainID:  "chainlab-local",
+			Type:     types.TxTransfer,
+			From:     alice,
+			To:       to,
+			Nonce:    uint64(nonce),
+			Value:    1,
+			GasLimit: 21_000,
+			GasPrice: 2,
+		})
+		if err := n.SubmitTx(tx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+
+	result := callRPC(t, server.URL, "eth_feeHistory", []any{"0x2", "latest", []any{50.0}})
+	history, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("fee history type = %T", result)
+	}
+	if history["oldestBlock"] != "0x1" {
+		t.Fatalf("oldestBlock = %#v", history["oldestBlock"])
+	}
+	baseFees, ok := history["baseFeePerGas"].([]any)
+	if !ok || len(baseFees) != 3 || baseFees[0] != "0x1" || baseFees[1] != "0x2" || baseFees[2] != "0x2" {
+		t.Fatalf("baseFeePerGas = %#v", history["baseFeePerGas"])
+	}
+	ratios, ok := history["gasUsedRatio"].([]any)
+	if !ok || len(ratios) != 2 || ratios[0] != float64(1) || ratios[1] != float64(0) {
+		t.Fatalf("gasUsedRatio = %#v", history["gasUsedRatio"])
+	}
+	rewards, ok := history["reward"].([]any)
+	if !ok || len(rewards) != 2 {
+		t.Fatalf("reward = %#v", history["reward"])
+	}
+	firstReward, ok := rewards[0].([]any)
+	if !ok || len(firstReward) != 1 || firstReward[0] != "0x1" {
+		t.Fatalf("first reward = %#v", rewards[0])
+	}
+	secondReward, ok := rewards[1].([]any)
+	if !ok || len(secondReward) != 1 || secondReward[0] != "0x0" {
+		t.Fatalf("second reward = %#v", rewards[1])
+	}
+}
+
 func TestRPCSubmitsSponsoredUserOperation(t *testing.T) {
 	userKey, err := chaincrypto.GenerateKey()
 	if err != nil {

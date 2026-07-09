@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -316,6 +317,18 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: quantity(n.FeeMarket().GasPrice)})
 	case "eth_maxPriorityFeePerGas":
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: quantity(n.FeeMarket().MaxPriorityFeePerGas)})
+	case "eth_feeHistory":
+		params, err := rpcParams(request.Params)
+		if err != nil || len(params) < 2 {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "block count and newest block are required"})
+			return
+		}
+		history, err := feeHistory(n, params)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: history})
 	case "eth_getBalance":
 		params, err := rpcParams(request.Params)
 		if err != nil || len(params) < 1 {
@@ -935,6 +948,184 @@ func parseRPCBlockNumber(n *node.Node, value any) (uint64, error) {
 		safe:      finality.SafeHeight,
 		finalized: finality.FinalizedHeight,
 	})
+}
+
+func feeHistory(n *node.Node, params []any) (map[string]any, error) {
+	blockCount, err := uint64RPCValue(params[0], "block count")
+	if err != nil {
+		return nil, err
+	}
+	if blockCount == 0 {
+		return nil, fmt.Errorf("block count must be positive")
+	}
+	newest, err := parseRPCBlockNumber(n, params[1])
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := n.Block(newest); !ok {
+		return nil, fmt.Errorf("newest block not found")
+	}
+	percentiles, err := rewardPercentiles(params)
+	if err != nil {
+		return nil, err
+	}
+
+	oldest := uint64(0)
+	if blockCount <= newest+1 {
+		oldest = newest - blockCount + 1
+	}
+	actualCount := newest - oldest + 1
+	baseFees := make([]string, 0, actualCount+1)
+	gasUsedRatios := make([]float64, 0, actualCount)
+	rewards := make([][]string, 0, actualCount)
+	for height := oldest; height <= newest; height++ {
+		block, ok := n.Block(height)
+		if !ok {
+			return nil, fmt.Errorf("block %s not found", quantity(height))
+		}
+		baseFees = append(baseFees, quantity(blockBaseFee(block)))
+		gasUsedRatios = append(gasUsedRatios, blockGasUsedRatio(block))
+		if len(percentiles) > 0 {
+			rewards = append(rewards, blockRewardPercentiles(block, percentiles))
+		}
+	}
+	nextBaseFee, err := feeHistoryNextBaseFee(n, newest)
+	if err != nil {
+		return nil, err
+	}
+	baseFees = append(baseFees, quantity(nextBaseFee))
+
+	result := map[string]any{
+		"oldestBlock":   quantity(oldest),
+		"baseFeePerGas": baseFees,
+		"gasUsedRatio":  gasUsedRatios,
+	}
+	if len(percentiles) > 0 {
+		result["reward"] = rewards
+	}
+	return result, nil
+}
+
+func feeHistoryNextBaseFee(n *node.Node, newest uint64) (uint64, error) {
+	if next, ok := n.Block(newest + 1); ok {
+		return blockBaseFee(next), nil
+	}
+	block, ok := n.Block(newest)
+	if !ok {
+		return 0, fmt.Errorf("newest block not found")
+	}
+	return node.NextBaseFee(block, node.DefaultBlockGasLimit), nil
+}
+
+func blockBaseFee(block types.Block) uint64 {
+	if block.Header.BaseFeePerGas == 0 {
+		return node.InitialBaseFeePerGas
+	}
+	return block.Header.BaseFeePerGas
+}
+
+func blockGasUsedRatio(block types.Block) float64 {
+	gasLimit := block.Header.GasLimit
+	if gasLimit == 0 {
+		gasLimit = node.DefaultBlockGasLimit
+	}
+	return float64(block.Header.GasUsed) / float64(gasLimit)
+}
+
+func rewardPercentiles(params []any) ([]float64, error) {
+	if len(params) < 3 || params[2] == nil {
+		return nil, nil
+	}
+	raw, ok := params[2].([]any)
+	if !ok {
+		return nil, fmt.Errorf("reward percentiles must be an array")
+	}
+	percentiles := make([]float64, 0, len(raw))
+	for _, value := range raw {
+		percentile, err := rewardPercentile(value)
+		if err != nil {
+			return nil, err
+		}
+		percentiles = append(percentiles, percentile)
+	}
+	return percentiles, nil
+}
+
+func rewardPercentile(value any) (float64, error) {
+	switch typed := value.(type) {
+	case float64:
+		if typed < 0 || typed > 100 {
+			return 0, fmt.Errorf("reward percentile must be between 0 and 100")
+		}
+		return typed, nil
+	case string:
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(typed), 64)
+		if err != nil || parsed < 0 || parsed > 100 {
+			return 0, fmt.Errorf("reward percentile must be between 0 and 100")
+		}
+		return parsed, nil
+	default:
+		return 0, fmt.Errorf("reward percentile must be a number")
+	}
+}
+
+type rewardSample struct {
+	rewardPerGas uint64
+	gasUsed      uint64
+}
+
+func blockRewardPercentiles(block types.Block, percentiles []float64) []string {
+	samples := blockRewardSamples(block)
+	output := make([]string, len(percentiles))
+	if len(samples) == 0 {
+		for i := range output {
+			output[i] = quantity(0)
+		}
+		return output
+	}
+	sort.Slice(samples, func(i int, j int) bool {
+		return samples[i].rewardPerGas < samples[j].rewardPerGas
+	})
+	var totalGas uint64
+	for _, sample := range samples {
+		totalGas += sample.gasUsed
+	}
+	for i, percentile := range percentiles {
+		output[i] = quantity(weightedRewardPercentile(samples, totalGas, percentile))
+	}
+	return output
+}
+
+func blockRewardSamples(block types.Block) []rewardSample {
+	samples := make([]rewardSample, 0, len(block.Receipts))
+	for _, receipt := range block.Receipts {
+		if receipt.GasUsed == 0 {
+			continue
+		}
+		samples = append(samples, rewardSample{
+			rewardPerGas: receipt.PriorityFeePaid / receipt.GasUsed,
+			gasUsed:      receipt.GasUsed,
+		})
+	}
+	return samples
+}
+
+func weightedRewardPercentile(samples []rewardSample, totalGas uint64, percentile float64) uint64 {
+	if totalGas == 0 {
+		return 0
+	}
+	threshold := uint64(float64(totalGas) * percentile / 100)
+	if percentile > 0 && threshold == 0 {
+		threshold = 1
+	}
+	var cumulative uint64
+	for _, sample := range samples {
+		cumulative += sample.gasUsed
+		if cumulative >= threshold {
+			return sample.rewardPerGas
+		}
+	}
+	return samples[len(samples)-1].rewardPerGas
 }
 
 func codeIDHex(codeID string) string {
