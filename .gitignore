@@ -1,0 +1,8 @@
+/bin/
+/dist/
+/tmp/
+/data/
+/config/genesis.json
+*.exe
+*.test
+
