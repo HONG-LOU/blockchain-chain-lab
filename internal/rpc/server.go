@@ -1,23 +1,44 @@
 package rpc
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"chainlab/internal/node"
 	"chainlab/internal/types"
 )
 
 func NewServer(n *node.Node) http.Handler {
+	return NewServerWithPeers(n, nil)
+}
+
+func NewServerWithPeers(n *node.Node, peers []string) http.Handler {
+	server := &Server{
+		node:   n,
+		peers:  append([]string(nil), peers...),
+		client: &http.Client{Timeout: 5 * time.Second},
+	}
+	return server.routes()
+}
+
+type Server struct {
+	node   *node.Node
+	peers  []string
+	client *http.Client
+}
+
+func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	mux.HandleFunc("GET /chain/head", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, n.Head())
+		writeJSON(w, http.StatusOK, s.node.Head())
 	})
 	mux.HandleFunc("GET /chain/block/{height}", func(w http.ResponseWriter, r *http.Request) {
 		height, err := strconv.ParseUint(r.PathValue("height"), 10, 64)
@@ -25,18 +46,31 @@ func NewServer(n *node.Node) http.Handler {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid height"})
 			return
 		}
-		block, ok := n.Block(height)
+		block, ok := s.node.Block(height)
 		if !ok {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "block not found"})
 			return
 		}
 		writeJSON(w, http.StatusOK, block)
 	})
+	mux.HandleFunc("POST /chain/produce", func(w http.ResponseWriter, r *http.Request) {
+		block, err := s.node.ProduceBlock()
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		peerErrors := s.broadcastBlock(block)
+		if len(peerErrors) > 0 {
+			writeJSON(w, http.StatusOK, map[string]any{"block": block, "peer_errors": peerErrors})
+			return
+		}
+		writeJSON(w, http.StatusOK, block)
+	})
 	mux.HandleFunc("GET /account/{address}", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, n.Account(r.PathValue("address")))
+		writeJSON(w, http.StatusOK, s.node.Account(r.PathValue("address")))
 	})
 	mux.HandleFunc("GET /tx/{hash}", func(w http.ResponseWriter, r *http.Request) {
-		record, ok := n.Transaction(r.PathValue("hash"))
+		record, ok := s.node.Transaction(r.PathValue("hash"))
 		if !ok {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "transaction not found"})
 			return
@@ -44,21 +78,88 @@ func NewServer(n *node.Node) http.Handler {
 		writeJSON(w, http.StatusOK, record)
 	})
 	mux.HandleFunc("POST /tx", func(w http.ResponseWriter, r *http.Request) {
-		var tx types.Transaction
-		if err := json.NewDecoder(r.Body).Decode(&tx); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid transaction json"})
+		tx, err := decodeTransaction(r)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		if err := n.SubmitTx(tx); err != nil {
+		if err := s.node.SubmitTx(tx); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		peerErrors := s.broadcastTransaction(tx)
+		writeJSON(w, http.StatusAccepted, map[string]any{"status": "accepted", "hash": tx.Hash(), "peer_errors": peerErrors})
+	})
+	mux.HandleFunc("POST /peer/tx", func(w http.ResponseWriter, r *http.Request) {
+		tx, err := decodeTransaction(r)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := s.node.SubmitTx(tx); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
 		writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted", "hash": tx.Hash()})
 	})
+	mux.HandleFunc("POST /peer/block", func(w http.ResponseWriter, r *http.Request) {
+		var block types.Block
+		if err := json.NewDecoder(r.Body).Decode(&block); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid block json"})
+			return
+		}
+		if err := s.node.ImportBlock(block); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted", "hash": block.Hash()})
+	})
 	mux.HandleFunc("POST /rpc", func(w http.ResponseWriter, r *http.Request) {
-		handleJSONRPC(w, r, n)
+		handleJSONRPC(w, r, s.node)
 	})
 	return mux
+}
+
+func decodeTransaction(r *http.Request) (types.Transaction, error) {
+	var tx types.Transaction
+	if err := json.NewDecoder(r.Body).Decode(&tx); err != nil {
+		return types.Transaction{}, fmt.Errorf("invalid transaction json")
+	}
+	return tx, nil
+}
+
+func (s *Server) broadcastTransaction(tx types.Transaction) []string {
+	return s.broadcast("/peer/tx", tx)
+}
+
+func (s *Server) broadcastBlock(block types.Block) []string {
+	return s.broadcast("/peer/block", block)
+}
+
+func (s *Server) broadcast(path string, payload any) []string {
+	if len(s.peers) == 0 {
+		return nil
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return []string{err.Error()}
+	}
+	var peerErrors []string
+	for _, peer := range s.peers {
+		url := strings.TrimRight(peer, "/") + path
+		resp, err := s.client.Post(url, "application/json", bytes.NewReader(raw))
+		if err != nil {
+			peerErrors = append(peerErrors, fmt.Sprintf("%s: %s", peer, err.Error()))
+			continue
+		}
+		if resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		if resp.StatusCode >= http.StatusBadRequest {
+			peerErrors = append(peerErrors, fmt.Sprintf("%s: status %d", peer, resp.StatusCode))
+		}
+	}
+	return peerErrors
 }
 
 type rpcRequest struct {

@@ -13,6 +13,7 @@ It currently implements:
 - HTTP REST endpoints and a small JSON-RPC-style endpoint
 - persistent node snapshots with committed blocks, state, and transaction index
 - EVM-compatible JSON-RPC read subset: `eth_chainId`, `eth_blockNumber`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`
+- local multi-node devnet sync over HTTP peers: transaction relay, block import, and produced-block broadcast
 - CLI commands for keys, genesis, nodes, and demos
 
 This is not a production mainnet. It is a verified development chain designed so the consensus, storage, runtime, and RPC layers can be replaced or expanded.
@@ -50,6 +51,18 @@ Start a persistent local node:
 go run ./cmd/chainlab node --genesis config/genesis.json --listen :8547 --data-dir data/localnet
 ```
 
+Start a follower node:
+
+```powershell
+go run ./cmd/chainlab node --genesis config/genesis.json --listen :8548 --data-dir data/follower
+```
+
+Start a producing node that broadcasts to the follower:
+
+```powershell
+go run ./cmd/chainlab node --genesis config/genesis.json --listen :8547 --data-dir data/producer --peer http://127.0.0.1:8548
+```
+
 Run the built-in demo:
 
 ```powershell
@@ -64,6 +77,9 @@ go run ./cmd/chainlab demo
 - `GET /account/{address}`
 - `GET /tx/{hash}`
 - `POST /tx`
+- `POST /chain/produce`
+- `POST /peer/tx`
+- `POST /peer/block`
 - `POST /rpc` with methods `chain_head`, `chain_getAccount`, and `chain_sendTx`
 - `POST /rpc` with EVM-style methods `eth_chainId`, `eth_blockNumber`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, and `eth_getBlockByNumber`
 
@@ -71,7 +87,8 @@ go run ./cmd/chainlab demo
 
 Next useful milestones:
 
-- multi-node devnet
+- multi-validator scheduling and fork-choice rules
+- signed raw transaction CLI
 - WASM contract runtime
 - block explorer UI
 - production-framework migration decision: OP Stack, Cosmos SDK, Avalanche L1, or another appchain stack

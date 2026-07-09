@@ -167,6 +167,48 @@ func (n *Node) ProduceBlock() (types.Block, error) {
 	return block, nil
 }
 
+func (n *Node) ImportBlock(block types.Block) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if block.Header.ChainID != n.chainID {
+		return errors.New("imported block chain id does not match node")
+	}
+	head := n.blocks[len(n.blocks)-1]
+	if block.Header.Height <= head.Header.Height {
+		if block.Hash() == head.Hash() {
+			return nil
+		}
+		return errors.New("imported block is not ahead of local head")
+	}
+
+	working := n.state.Clone()
+	executor := core.NewExecutor(n.chainID, block.Header.Proposer, contracts.NewRuntimeWithDefaults())
+	receipts := make([]types.Receipt, 0, len(block.Transactions))
+	for _, tx := range block.Transactions {
+		receipt, err := executor.Execute(working, tx)
+		if err != nil {
+			return err
+		}
+		receipts = append(receipts, receipt)
+	}
+	if types.ReceiptRoot(receipts) != block.Header.ReceiptRoot {
+		return errors.New("imported block receipt root mismatch")
+	}
+	if working.Root() != block.Header.StateRoot {
+		return errors.New("imported block state root mismatch")
+	}
+	if err := n.consensus.ValidateBlock(head, block); err != nil {
+		return err
+	}
+
+	n.state.ReplaceWith(working)
+	n.blocks = append(n.blocks, block)
+	n.indexBlock(block)
+	n.removeMempoolTransactions(block.Transactions)
+	return n.persistLocked()
+}
+
 func (n *Node) Head() types.Block {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -241,6 +283,23 @@ func (n *Node) indexBlock(block types.Block) {
 			Index:       i,
 		}
 	}
+}
+
+func (n *Node) removeMempoolTransactions(txs []types.Transaction) {
+	if len(txs) == 0 || len(n.mempool) == 0 {
+		return
+	}
+	included := make(map[string]struct{}, len(txs))
+	for _, tx := range txs {
+		included[tx.Hash()] = struct{}{}
+	}
+	remaining := n.mempool[:0]
+	for _, tx := range n.mempool {
+		if _, ok := included[tx.Hash()]; !ok {
+			remaining = append(remaining, tx)
+		}
+	}
+	n.mempool = remaining
 }
 
 func (n *Node) persistLocked() error {

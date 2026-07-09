@@ -15,6 +15,24 @@ import (
 	chainrpc "chainlab/internal/rpc"
 )
 
+type peerListFlag []string
+
+func (p *peerListFlag) Set(value string) error {
+	if value == "" {
+		return fmt.Errorf("peer URL cannot be empty")
+	}
+	*p = append(*p, value)
+	return nil
+}
+
+func (p *peerListFlag) String() string {
+	return fmt.Sprint([]string(*p))
+}
+
+func (p *peerListFlag) Values() []string {
+	return append([]string(nil), (*p)...)
+}
+
 type GenesisFile struct {
 	ChainID    string            `json:"chain_id"`
 	Proposer   string            `json:"proposer"`
@@ -95,6 +113,8 @@ func nodeCommand(args []string) {
 	privateKeyHex := flags.String("private-key", "", "proposer private key")
 	genesisPath := flags.String("genesis", "", "genesis file path")
 	dataDir := flags.String("data-dir", "", "persistent chain data directory")
+	var peers peerListFlag
+	flags.Var(&peers, "peer", "peer HTTP base URL; can be repeated")
 	if err := flags.Parse(args); err != nil {
 		log.Fatal(err)
 	}
@@ -113,7 +133,7 @@ func nodeCommand(args []string) {
 		log.Fatal(err)
 	}
 	fmt.Printf("chainlab node listening on %s proposer=%s\n", *listen, addr)
-	log.Fatal(http.ListenAndServe(*listen, chainrpc.NewServer(n)))
+	log.Fatal(http.ListenAndServe(*listen, chainrpc.NewServerWithPeers(n, peers.Values())))
 }
 
 func buildNodeConfig(options nodeOptions) (node.Config, error) {

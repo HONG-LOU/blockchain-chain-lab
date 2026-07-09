@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"os"
 	"path/filepath"
 	"testing"
@@ -71,4 +72,21 @@ func keyPath(t *testing.T, genesis GenesisFile) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestPeerListFlagAcceptsRepeatedPeers(t *testing.T) {
+	flags := flag.NewFlagSet("node", flag.ContinueOnError)
+	var peers peerListFlag
+	flags.Var(&peers, "peer", "peer URL")
+
+	if err := flags.Parse([]string{"--peer", "http://127.0.0.1:18547", "--peer", "http://127.0.0.1:18548"}); err != nil {
+		t.Fatal(err)
+	}
+	got := peers.Values()
+	if len(got) != 2 {
+		t.Fatalf("peer count = %d", len(got))
+	}
+	if got[0] != "http://127.0.0.1:18547" || got[1] != "http://127.0.0.1:18548" {
+		t.Fatalf("peers = %#v", got)
+	}
 }

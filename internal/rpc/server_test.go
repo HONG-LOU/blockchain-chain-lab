@@ -179,6 +179,128 @@ func TestEVMCompatibleJSONRPCSubset(t *testing.T) {
 	}
 }
 
+func TestRPCBroadcastsTransactionsToPeers(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	genesisBalances := map[string]uint64{alice: 1_000_000}
+	peerNode, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: genesisBalances,
+		Validators:     []string{alice},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	peerServer := httptest.NewServer(chainrpc.NewServer(peerNode))
+	defer peerServer.Close()
+	localNode, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: genesisBalances,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	localServer := httptest.NewServer(chainrpc.NewServerWithPeers(localNode, []string{peerServer.URL}))
+	defer localServer.Close()
+
+	tx := signedTransfer(t, key, alice, bob, 0, 100)
+	body, _ := json.Marshal(tx)
+	resp, err := http.Post(localServer.URL+"/tx", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("tx status = %d", resp.StatusCode)
+	}
+
+	block, err := peerNode.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(block.Transactions) != 1 {
+		t.Fatalf("peer block should include broadcast transaction, got %d txs", len(block.Transactions))
+	}
+	if got := peerNode.Account(bob).Balance; got != 100 {
+		t.Fatalf("peer bob balance = %d", got)
+	}
+}
+
+func TestRPCBroadcastsProducedBlocksToPeers(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	genesisBalances := map[string]uint64{alice: 1_000_000}
+	peerNode, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: genesisBalances,
+		Validators:     []string{alice},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	peerServer := httptest.NewServer(chainrpc.NewServer(peerNode))
+	defer peerServer.Close()
+	localNode, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: genesisBalances,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	localServer := httptest.NewServer(chainrpc.NewServerWithPeers(localNode, []string{peerServer.URL}))
+	defer localServer.Close()
+
+	tx := signedTransfer(t, key, alice, bob, 0, 100)
+	if err := localNode.SubmitTx(tx); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post(localServer.URL+"/chain/produce", "application/json", bytes.NewReader([]byte("{}")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("produce status = %d", resp.StatusCode)
+	}
+
+	if got := peerNode.Account(bob).Balance; got != 100 {
+		t.Fatalf("peer bob balance after block broadcast = %d", got)
+	}
+	if peerNode.Head().Header.Height != 1 {
+		t.Fatalf("peer height = %d", peerNode.Head().Header.Height)
+	}
+}
+
+func signedTransfer(t *testing.T, key chaincrypto.PrivateKey, from string, to string, nonce uint64, value uint64) types.Transaction {
+	t.Helper()
+	tx := types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     from,
+		To:       to,
+		Nonce:    nonce,
+		Value:    value,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	}
+	sig, err := chaincrypto.Sign(key, tx.SigningBytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx.Signature = sig
+	return tx
+}
+
 func assertRPCResult(t *testing.T, url string, method string, params []any, expected any) {
 	t.Helper()
 	if got := callRPC(t, url, method, params); got != expected {
