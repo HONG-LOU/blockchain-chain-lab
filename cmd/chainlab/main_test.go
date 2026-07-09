@@ -323,6 +323,69 @@ func TestTransferCommandUsesPendingNonceAndQueryMempool(t *testing.T) {
 	}
 }
 
+func TestRawTransactionCommandsBuildAndSubmitRawTx(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := crypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	var rawOut bytes.Buffer
+	if err := transferCommand([]string{
+		"--rpc", server.URL,
+		"--private-key", crypto.PrivateKeyToHex(key),
+		"--to", bob,
+		"--value", "100",
+		"--raw-only",
+	}, &rawOut); err != nil {
+		t.Fatal(err)
+	}
+	var rawResult struct {
+		Hash string `json:"hash"`
+		Raw  string `json:"raw"`
+	}
+	if err := json.Unmarshal(rawOut.Bytes(), &rawResult); err != nil {
+		t.Fatal(err)
+	}
+	if rawResult.Hash == "" || len(rawResult.Raw) <= 2 || rawResult.Raw[:2] != "0x" {
+		t.Fatalf("raw result = %+v", rawResult)
+	}
+	if pool := n.TxPool(); pool.PendingCount != 0 {
+		t.Fatalf("raw-only should not submit tx, pool = %+v", pool)
+	}
+
+	var submitOut bytes.Buffer
+	if err := rawSubmitCommand([]string{"--rpc", server.URL, "--raw", rawResult.Raw}, &submitOut); err != nil {
+		t.Fatal(err)
+	}
+	var submitResult struct {
+		Hash string `json:"hash"`
+	}
+	if err := json.Unmarshal(submitOut.Bytes(), &submitResult); err != nil {
+		t.Fatal(err)
+	}
+	if submitResult.Hash != rawResult.Hash {
+		t.Fatalf("submit hash = %q, want %q", submitResult.Hash, rawResult.Hash)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+	if got := n.Account(bob).Balance; got != 100 {
+		t.Fatalf("bob balance = %d", got)
+	}
+}
+
 func TestStakeAndValidatorJoinCommandsSendSignedTx(t *testing.T) {
 	proposerKey, err := crypto.GenerateKey()
 	if err != nil {

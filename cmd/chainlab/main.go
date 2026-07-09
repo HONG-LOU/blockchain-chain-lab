@@ -214,7 +214,7 @@ func usage() {
 
 func txCommand(args []string, out io.Writer) {
 	if len(args) < 1 {
-		log.Fatal("usage: chainlab tx <transfer|deploy|call|stake|validator-join|validator-leave|validator-slash>")
+		log.Fatal("usage: chainlab tx <transfer|deploy|call|stake|validator-join|validator-leave|validator-slash|raw-submit>")
 	}
 	switch args[0] {
 	case "transfer":
@@ -243,6 +243,10 @@ func txCommand(args []string, out io.Writer) {
 		}
 	case "validator-slash":
 		if err := validatorSlashCommand(args[1:], out); err != nil {
+			log.Fatal(err)
+		}
+	case "raw-submit":
+		if err := rawSubmitCommand(args[1:], out); err != nil {
 			log.Fatal(err)
 		}
 	default:
@@ -302,6 +306,7 @@ func transferCommand(args []string, out io.Writer) error {
 	value := flags.Uint64("value", 0, "transfer amount")
 	gasLimit := flags.Uint64("gas-limit", 21_000, "gas limit")
 	gasPrice := flags.Uint64("gas-price", 1, "gas price")
+	rawOnly := flags.Bool("raw-only", false, "print signed raw transaction without submitting")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -309,11 +314,35 @@ func transferCommand(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if *rawOnly {
+		raw, err := types.EncodeRawTransaction(tx)
+		if err != nil {
+			return err
+		}
+		return writeTo(out, map[string]any{"hash": tx.Hash(), "raw": raw, "transaction": tx})
+	}
 	response, err := submitTransaction(*rpcURL, tx)
 	if err != nil {
 		return err
 	}
 	return writeTo(out, response)
+}
+
+func rawSubmitCommand(args []string, out io.Writer) error {
+	flags := flag.NewFlagSet("tx raw-submit", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
+	raw := flags.String("raw", "", "0x-prefixed raw ChainLab transaction")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*raw) == "" {
+		return fmt.Errorf("raw transaction is required")
+	}
+	var hash string
+	if err := rpcCall(*rpcURL, "eth_sendRawTransaction", []any{*raw}, &hash); err != nil {
+		return err
+	}
+	return writeTo(out, map[string]string{"hash": hash})
 }
 
 func stakeCommand(args []string, out io.Writer) error {

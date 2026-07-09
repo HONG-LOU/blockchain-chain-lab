@@ -37,6 +37,7 @@ Phase 1 creates a runnable local blockchain with these capabilities:
 
 - Account model with balances, nonces, optional contract code id, and key-value storage.
 - Secp256k1 transaction signatures and Ethereum-style 20-byte addresses.
+- ChainLab-native raw transaction encoding for offline signing and later broadcast.
 - Transaction types for transfer, contract deployment, contract calls, staking, unstaking, and governance voting.
 - Validator lifecycle starts with staked validator join transactions, explicit validator leave transactions, and validator slashing transactions. The active validator set is committed into state roots.
 - Gas accounting with gas limit, gas price, and deterministic fee charging.
@@ -195,6 +196,7 @@ Phase 2 progress:
 - CLI nodes accept repeated `--peer` URLs for HTTP peer sync.
 - CLI wallet-style commands can fetch nonce over RPC, sign and submit transfers, native contract deploys, native contract write calls, produce blocks, and query head/account/transaction records.
 - RPC and CLI expose mempool state through `GET /txpool`, `txpool_status`, `txpool_content`, and `query mempool`; `eth_getTransactionCount(..., "pending")` replays pending transactions on a cloned state so wallet-style commands can submit multiple uncommitted transactions with sequential nonces.
+- Raw transaction submission is available through `eth_sendRawTransaction`, `POST /tx/raw`, CLI `tx transfer --raw-only`, and CLI `tx raw-submit`. The current raw format is ChainLab's signed transaction JSON encoded as `0x` hex; full Ethereum RLP/EIP-1559 raw transaction compatibility remains future work.
 - Nodes expose deterministic `safe` and `finalized` checkpoints through `GET /chain/finality`, JSON-RPC `chain_finality`, CLI `query finality`, and EVM-style `safe` / `finalized` block tags. The current local policy marks `safe` as head minus one block and `finalized` as head minus two blocks, clamped to genesis.
 - Genesis files include a `validators` array, and `chainlab node --private-key` can start a different local validator from the same genesis file.
 - PoA now enforces deterministic proposer rotation and treats repeated imports of already-known canonical blocks as idempotent peer sync events.

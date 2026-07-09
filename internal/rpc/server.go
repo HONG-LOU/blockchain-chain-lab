@@ -101,6 +101,19 @@ func (s *Server) routes() http.Handler {
 		peerErrors := s.broadcastTransaction(tx)
 		writeJSON(w, http.StatusAccepted, map[string]any{"status": "accepted", "hash": tx.Hash(), "peer_errors": peerErrors})
 	})
+	mux.HandleFunc("POST /tx/raw", func(w http.ResponseWriter, r *http.Request) {
+		tx, err := decodeRawTransaction(r)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := s.node.SubmitTx(tx); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		peerErrors := s.broadcastTransaction(tx)
+		writeJSON(w, http.StatusAccepted, map[string]any{"status": "accepted", "hash": tx.Hash(), "peer_errors": peerErrors})
+	})
 	mux.HandleFunc("POST /peer/tx", func(w http.ResponseWriter, r *http.Request) {
 		tx, err := decodeTransaction(r)
 		if err != nil {
@@ -135,6 +148,23 @@ func decodeTransaction(r *http.Request) (types.Transaction, error) {
 	var tx types.Transaction
 	if err := json.NewDecoder(r.Body).Decode(&tx); err != nil {
 		return types.Transaction{}, fmt.Errorf("invalid transaction json")
+	}
+	return tx, nil
+}
+
+func decodeRawTransaction(r *http.Request) (types.Transaction, error) {
+	var request struct {
+		Raw string `json:"raw"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		return types.Transaction{}, fmt.Errorf("invalid raw transaction json")
+	}
+	if strings.TrimSpace(request.Raw) == "" {
+		return types.Transaction{}, fmt.Errorf("raw transaction is required")
+	}
+	tx, err := types.DecodeRawTransaction(request.Raw)
+	if err != nil {
+		return types.Transaction{}, err
 	}
 	return tx, nil
 }
@@ -344,6 +374,27 @@ func handleJSONRPC(w http.ResponseWriter, r *http.Request, n *node.Node) {
 			return
 		}
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: quantity(gas)})
+	case "eth_sendRawTransaction":
+		params, err := rpcParams(request.Params)
+		if err != nil || len(params) < 1 {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "raw transaction is required"})
+			return
+		}
+		raw, ok := params[0].(string)
+		if !ok || strings.TrimSpace(raw) == "" {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "raw transaction must be a string"})
+			return
+		}
+		tx, err := types.DecodeRawTransaction(raw)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
+			return
+		}
+		if err := n.SubmitTx(tx); err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: tx.Hash()})
 	case "chain_head":
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: n.Head()})
 	case "chain_finality":

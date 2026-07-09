@@ -17,6 +17,7 @@ It currently implements:
 - EVM-compatible JSON-RPC read subset: `eth_chainId`, `eth_blockNumber`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`, `eth_getLogs`, `eth_call`, `eth_estimateGas`
 - EVM-style `safe` and `finalized` block tags for block and log reads
 - pending nonce calculation and txpool inspection for uncommitted transactions
+- ChainLab-native raw transaction envelope for offline signing and later broadcast
 - EVM-style contract event logs projected from native receipts, with block range, address, and topic filtering
 - local multi-node devnet sync over HTTP peers: transaction relay, block import, and produced-block broadcast
 - CLI commands for keys, genesis, nodes, signed transfers, block production, queries, and demos
@@ -88,6 +89,15 @@ Submit a signed transfer through a running node:
 go run ./cmd/chainlab tx transfer --rpc http://127.0.0.1:8547 --private-key <hex-private-key> --to <address> --value 100
 ```
 
+Build a signed raw ChainLab transaction without broadcasting, then submit it later:
+
+```powershell
+go run ./cmd/chainlab tx transfer --rpc http://127.0.0.1:8547 --private-key <hex-private-key> --to <address> --value 100 --raw-only
+go run ./cmd/chainlab tx raw-submit --rpc http://127.0.0.1:8547 --raw <0x-raw-transaction>
+```
+
+The raw format is a `0x`-prefixed hex encoding of ChainLab's signed transaction JSON. It is not Ethereum RLP or EIP-1559 raw transaction encoding yet.
+
 Deploy and write-call a native contract:
 
 ```powershell
@@ -135,11 +145,12 @@ go run ./cmd/chainlab query estimate-gas --rpc http://127.0.0.1:8547 --type call
 - `GET /tx/{hash}`
 - `GET /txpool`
 - `POST /tx`
+- `POST /tx/raw`
 - `POST /chain/produce`
 - `POST /peer/tx`
 - `POST /peer/block`
 - `POST /rpc` with methods `chain_head`, `chain_finality`, `chain_getAccount`, `chain_validators`, and `chain_sendTx`
-- `POST /rpc` with EVM-style methods `eth_chainId`, `eth_blockNumber`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`, `eth_getLogs`, `eth_call`, and `eth_estimateGas`. Block range tags support `earliest`, `latest`, `safe`, `finalized`, and hex quantities. `eth_getTransactionCount` also supports `pending` for mempool-aware nonce calculation.
+- `POST /rpc` with EVM-style methods `eth_chainId`, `eth_blockNumber`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`, `eth_getLogs`, `eth_call`, `eth_estimateGas`, and `eth_sendRawTransaction`. Block range tags support `earliest`, `latest`, `safe`, `finalized`, and hex quantities. `eth_getTransactionCount` also supports `pending` for mempool-aware nonce calculation.
 - `POST /rpc` with txpool-style methods `txpool_status` and `txpool_content`
 
 ## Roadmap

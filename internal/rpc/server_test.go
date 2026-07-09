@@ -357,6 +357,91 @@ func TestRPCExposesTxPoolAndPendingNonce(t *testing.T) {
 	}
 }
 
+func TestRPCSendRawTransactionSubmitsSignedTx(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	tx := signedTransfer(t, key, alice, bob, 0, 100)
+	raw, err := types.EncodeRawTransaction(tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := callRPC(t, server.URL, "eth_sendRawTransaction", []any{raw})
+	if result != tx.Hash() {
+		t.Fatalf("raw tx hash = %v, want %s", result, tx.Hash())
+	}
+	pool := n.TxPool()
+	if pool.PendingCount != 1 || pool.Pending[0].Hash() != tx.Hash() {
+		t.Fatalf("txpool = %+v", pool)
+	}
+
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+	if got := n.Account(bob).Balance; got != 100 {
+		t.Fatalf("bob balance = %d", got)
+	}
+}
+
+func TestRESTRawTransactionSubmitsSignedTx(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	tx := signedTransfer(t, key, alice, bob, 0, 100)
+	raw, err := types.EncodeRawTransaction(tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(map[string]string{"raw": raw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post(server.URL+"/tx/raw", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("raw tx status = %d", resp.StatusCode)
+	}
+	var result struct {
+		Hash string `json:"hash"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Hash != tx.Hash() {
+		t.Fatalf("raw tx hash = %q, want %q", result.Hash, tx.Hash())
+	}
+}
+
 func TestEthGetLogsFiltersContractEvents(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {
