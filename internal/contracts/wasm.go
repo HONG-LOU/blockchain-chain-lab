@@ -15,6 +15,7 @@ const wasmHostModule = "chainlab"
 
 const (
 	wasmInstantiateGas = 100
+	wasmInstructionGas = 1
 	wasmHostCallGas    = 100
 	wasmByteGas        = 1
 )
@@ -100,6 +101,13 @@ func newWasmInvocation(ctx Context, args map[string]string) *wasmInvocation {
 
 func (i *wasmInvocation) call(code []byte, export string) error {
 	if !i.charge(wasmInstantiateGas + uint64(len(code))*wasmByteGas/32) {
+		return i.err
+	}
+	instructionFuel, err := wasmExportedFunctionFuel(code, export)
+	if err != nil {
+		return err
+	}
+	if !i.charge(instructionFuel) {
 		return i.err
 	}
 	ctx := context.Background()
@@ -235,6 +243,253 @@ func (i *wasmInvocation) charge(amount uint64) bool {
 		return false
 	}
 	return true
+}
+
+func wasmExportedFunctionFuel(code []byte, exportName string) (uint64, error) {
+	parser := wasmModuleParser{data: code}
+	return parser.exportedFunctionFuel(exportName)
+}
+
+type wasmModuleParser struct {
+	data             []byte
+	offset           int
+	importedFuncs    uint32
+	exportedFuncs    map[string]uint32
+	codeBodyFuelByID []uint64
+}
+
+func (p *wasmModuleParser) exportedFunctionFuel(exportName string) (uint64, error) {
+	if len(p.data) < 8 || string(p.data[:4]) != "\x00asm" {
+		return 0, errors.New("invalid wasm magic")
+	}
+	p.offset = 8
+	p.exportedFuncs = make(map[string]uint32)
+	for p.offset < len(p.data) {
+		sectionID := p.data[p.offset]
+		p.offset++
+		sectionSize, ok := p.readU32()
+		if !ok {
+			return 0, errors.New("invalid wasm section size")
+		}
+		sectionStart := p.offset
+		sectionEnd := sectionStart + int(sectionSize)
+		if sectionEnd < sectionStart || sectionEnd > len(p.data) {
+			return 0, errors.New("invalid wasm section bounds")
+		}
+		section := p.data[sectionStart:sectionEnd]
+		switch sectionID {
+		case 2:
+			if err := p.parseImportSection(section); err != nil {
+				return 0, err
+			}
+		case 7:
+			if err := p.parseExportSection(section); err != nil {
+				return 0, err
+			}
+		case 10:
+			if err := p.parseCodeSection(section); err != nil {
+				return 0, err
+			}
+		}
+		p.offset = sectionEnd
+	}
+	funcIndex, ok := p.exportedFuncs[exportName]
+	if !ok {
+		return 0, nil
+	}
+	if funcIndex < p.importedFuncs {
+		return 0, nil
+	}
+	bodyIndex := funcIndex - p.importedFuncs
+	if int(bodyIndex) >= len(p.codeBodyFuelByID) {
+		return 0, errors.New("wasm exported function has no code body")
+	}
+	return p.codeBodyFuelByID[bodyIndex], nil
+}
+
+func (p *wasmModuleParser) parseImportSection(section []byte) error {
+	reader := wasmSectionReader{data: section}
+	count, ok := reader.readU32()
+	if !ok {
+		return errors.New("invalid wasm import count")
+	}
+	for i := uint32(0); i < count; i++ {
+		if _, ok := reader.readName(); !ok {
+			return errors.New("invalid wasm import module name")
+		}
+		if _, ok := reader.readName(); !ok {
+			return errors.New("invalid wasm import name")
+		}
+		kind, ok := reader.readByte()
+		if !ok {
+			return errors.New("invalid wasm import kind")
+		}
+		switch kind {
+		case 0x00:
+			if _, ok := reader.readU32(); !ok {
+				return errors.New("invalid wasm imported function type")
+			}
+			p.importedFuncs++
+		case 0x01:
+			if _, ok := reader.readTableType(); !ok {
+				return errors.New("invalid wasm imported table type")
+			}
+		case 0x02:
+			if _, ok := reader.readLimits(); !ok {
+				return errors.New("invalid wasm imported memory type")
+			}
+		case 0x03:
+			if _, ok := reader.readGlobalType(); !ok {
+				return errors.New("invalid wasm imported global type")
+			}
+		default:
+			return errors.New("unsupported wasm import kind")
+		}
+	}
+	return nil
+}
+
+func (p *wasmModuleParser) parseExportSection(section []byte) error {
+	reader := wasmSectionReader{data: section}
+	count, ok := reader.readU32()
+	if !ok {
+		return errors.New("invalid wasm export count")
+	}
+	for i := uint32(0); i < count; i++ {
+		name, ok := reader.readName()
+		if !ok {
+			return errors.New("invalid wasm export name")
+		}
+		kind, ok := reader.readByte()
+		if !ok {
+			return errors.New("invalid wasm export kind")
+		}
+		index, ok := reader.readU32()
+		if !ok {
+			return errors.New("invalid wasm export index")
+		}
+		if kind == 0x00 {
+			p.exportedFuncs[name] = index
+		}
+	}
+	return nil
+}
+
+func (p *wasmModuleParser) parseCodeSection(section []byte) error {
+	reader := wasmSectionReader{data: section}
+	count, ok := reader.readU32()
+	if !ok {
+		return errors.New("invalid wasm code body count")
+	}
+	p.codeBodyFuelByID = make([]uint64, 0, count)
+	for i := uint32(0); i < count; i++ {
+		size, ok := reader.readU32()
+		if !ok {
+			return errors.New("invalid wasm code body size")
+		}
+		body, ok := reader.readBytes(size)
+		if !ok {
+			return errors.New("invalid wasm code body")
+		}
+		p.codeBodyFuelByID = append(p.codeBodyFuelByID, uint64(len(body))*wasmInstructionGas)
+	}
+	return nil
+}
+
+func (p *wasmModuleParser) readU32() (uint32, bool) {
+	reader := wasmSectionReader{data: p.data, offset: p.offset}
+	value, ok := reader.readU32()
+	p.offset = reader.offset
+	return value, ok
+}
+
+type wasmSectionReader struct {
+	data   []byte
+	offset int
+}
+
+func (r *wasmSectionReader) readByte() (byte, bool) {
+	if r.offset >= len(r.data) {
+		return 0, false
+	}
+	value := r.data[r.offset]
+	r.offset++
+	return value, true
+}
+
+func (r *wasmSectionReader) readBytes(length uint32) ([]byte, bool) {
+	end := r.offset + int(length)
+	if end < r.offset || end > len(r.data) {
+		return nil, false
+	}
+	out := r.data[r.offset:end]
+	r.offset = end
+	return out, true
+}
+
+func (r *wasmSectionReader) readName() (string, bool) {
+	length, ok := r.readU32()
+	if !ok {
+		return "", false
+	}
+	raw, ok := r.readBytes(length)
+	if !ok {
+		return "", false
+	}
+	return string(raw), true
+}
+
+func (r *wasmSectionReader) readU32() (uint32, bool) {
+	var result uint32
+	var shift uint
+	for i := 0; i < 5; i++ {
+		b, ok := r.readByte()
+		if !ok {
+			return 0, false
+		}
+		result |= uint32(b&0x7f) << shift
+		if b&0x80 == 0 {
+			return result, true
+		}
+		shift += 7
+	}
+	return 0, false
+}
+
+func (r *wasmSectionReader) readLimits() (struct{}, bool) {
+	flag, ok := r.readByte()
+	if !ok {
+		return struct{}{}, false
+	}
+	switch flag {
+	case 0x00:
+		_, ok = r.readU32()
+	case 0x01:
+		_, ok = r.readU32()
+		if ok {
+			_, ok = r.readU32()
+		}
+	default:
+		ok = false
+	}
+	return struct{}{}, ok
+}
+
+func (r *wasmSectionReader) readTableType() (struct{}, bool) {
+	if _, ok := r.readByte(); !ok {
+		return struct{}{}, false
+	}
+	return r.readLimits()
+}
+
+func (r *wasmSectionReader) readGlobalType() (struct{}, bool) {
+	if _, ok := r.readByte(); !ok {
+		return struct{}{}, false
+	}
+	if _, ok := r.readByte(); !ok {
+		return struct{}{}, false
+	}
+	return struct{}{}, true
 }
 
 func wasmEchoModule() []byte {
