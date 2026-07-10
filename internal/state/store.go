@@ -236,6 +236,12 @@ func (s *Store) GetStorage(address string, key string) string {
 	return account.Storage[key]
 }
 
+func (s *Store) HasStorage(address string, key string) bool {
+	account := s.account(address)
+	_, ok := account.Storage[key]
+	return ok
+}
+
 func (s *Store) SetContractCode(code types.ContractCode) {
 	code.CodeID = strings.TrimSpace(code.CodeID)
 	if code.CodeID == "" {

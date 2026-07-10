@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"chainlab/internal/state"
+	"chainlab/internal/types"
 )
 
 func TestBalancesNonceAndStorage(t *testing.T) {
@@ -253,6 +254,38 @@ func TestDelegatedCodeIDPersistsThroughCloneSnapshotAndRoot(t *testing.T) {
 	}
 	if got := restored.GetStorage(alice, "owner"); got != "" {
 		t.Fatalf("cleared owner = %q", got)
+	}
+}
+
+func TestContractCodeMeteringVersionPersistsThroughCloneSnapshotAndRoot(t *testing.T) {
+	store := state.NewStore()
+	code := types.ContractCode{
+		CodeID:          "wasm:0xabc",
+		Runtime:         "wasm",
+		MeteringVersion: "chainlab-wasm-v1",
+		Creator:         "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Bytecode:        "0x0061736d",
+	}
+	store.SetContractCode(code)
+	root := store.Root()
+
+	clone := store.Clone()
+	cloned, ok := clone.ContractCode(code.CodeID)
+	if !ok || cloned.MeteringVersion != code.MeteringVersion || clone.Root() != root {
+		t.Fatalf("cloned contract code = %+v, root=%s", cloned, clone.Root())
+	}
+	restored := state.NewStoreFromSnapshot(store.Snapshot())
+	restoredCode, ok := restored.ContractCode(code.CodeID)
+	if !ok || restoredCode.MeteringVersion != code.MeteringVersion || restored.Root() != root {
+		t.Fatalf("restored contract code = %+v, root=%s", restoredCode, restored.Root())
+	}
+
+	legacy := store.Snapshot()
+	legacyCode := legacy.Codes[code.CodeID]
+	legacyCode.MeteringVersion = ""
+	legacy.Codes[code.CodeID] = legacyCode
+	if legacyRoot := state.NewStoreFromSnapshot(legacy).Root(); legacyRoot == root {
+		t.Fatal("metering version must participate in the consensus state root")
 	}
 }
 

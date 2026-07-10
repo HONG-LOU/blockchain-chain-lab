@@ -44,6 +44,200 @@ func newExecutorFixture(t *testing.T) (*state.Store, *core.Executor, chaincrypto
 	return store, executor, key, alice, bob
 }
 
+type countingContract struct {
+	calls int
+}
+
+func (*countingContract) Deploy(contracts.Context, map[string]string) ([]types.Event, error) {
+	return nil, nil
+}
+
+func (c *countingContract) Call(contracts.Context, string, map[string]string) ([]types.Event, error) {
+	c.calls++
+	return nil, nil
+}
+
+func (*countingContract) Read(contracts.Context, string, map[string]string) (string, error) {
+	return "", nil
+}
+
+func TestFeeAdmissionPrecedesContractExecution(t *testing.T) {
+	tests := []struct {
+		name     string
+		gasPrice uint64
+		balance  uint64
+		want     string
+	}{
+		{name: "fee cap below base fee", gasPrice: 0, balance: 1_000_000, want: "below block base fee"},
+		{name: "insufficient maximum fee balance", gasPrice: 1, balance: 0, want: "insufficient funds"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			key, err := chaincrypto.GenerateKey()
+			if err != nil {
+				t.Fatal(err)
+			}
+			alice := chaincrypto.AddressFromPrivateKey(key)
+			store := state.NewStore()
+			store.SetBalance(alice, test.balance)
+			runtime := contracts.NewRuntime()
+			contract := &countingContract{}
+			runtime.Register("counting.v1", contract)
+			address, _, err := runtime.Deploy(store, alice, "counting.v1", "seed", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			executor := core.NewExecutor("chainlab-local", "", runtime)
+			tx := signedTx(t, key, types.Transaction{
+				ChainID:  "chainlab-local",
+				Type:     types.TxCall,
+				From:     alice,
+				To:       address,
+				Nonce:    0,
+				GasLimit: 50_000,
+				GasPrice: test.gasPrice,
+				Payload:  map[string]string{"method": "count"},
+			})
+			_, err = executor.ExecuteWithContext(store, tx, core.ExecutionContext{BaseFeePerGas: 1})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("fee admission error = %v, want %q", err, test.want)
+			}
+			if contract.calls != 0 {
+				t.Fatalf("contract executed %d times before fee admission", contract.calls)
+			}
+		})
+	}
+}
+
+func TestBatchOperationLimitIsEnforcedBeforeExecution(t *testing.T) {
+	store, executor, key, alice, bob := newExecutorFixture(t)
+	operations := make([]types.BatchOperation, types.MaxBatchOperations+1)
+	for index := range operations {
+		operations[index] = types.BatchOperation{Type: types.TxTransfer, To: bob, Value: 1}
+	}
+	tx := signedTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxBatch,
+		From:     alice,
+		Nonce:    0,
+		GasLimit: 42_000,
+		GasPrice: 0,
+		Batch:    operations,
+	})
+	rootBefore := store.Root()
+	if _, err := executor.Execute(store, tx); err == nil || !strings.Contains(err.Error(), "batch exceeds") {
+		t.Fatalf("oversized batch error = %v", err)
+	}
+	if store.Root() != rootBefore {
+		t.Fatal("oversized batch changed state")
+	}
+	if _, err := core.EstimateGasForBatch(operations); err == nil || !strings.Contains(err.Error(), "batch exceeds") {
+		t.Fatalf("oversized batch estimate error = %v", err)
+	}
+}
+
+func TestBatchValueAndMaximumFeeAreReservedBeforeContractExecution(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	store := state.NewStore()
+	const gasLimit = 113_000
+	const transferValue = 100
+	store.SetBalance(alice, gasLimit+transferValue-1)
+	runtime := contracts.NewRuntime()
+	contract := &countingContract{}
+	runtime.Register("counting.v1", contract)
+	address, _, err := runtime.Deploy(store, alice, "counting.v1", "seed", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := core.NewExecutor("chainlab-local", "", runtime)
+	tx := signedTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxBatch,
+		From:     alice,
+		Nonce:    0,
+		GasLimit: gasLimit,
+		GasPrice: 1,
+		Batch: []types.BatchOperation{
+			{Type: types.TxTransfer, To: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Value: transferValue},
+			{Type: types.TxCall, To: address, Payload: map[string]string{"method": "count"}},
+		},
+	})
+	rootBefore := store.Root()
+	if _, err := executor.ExecuteWithContext(store, tx, core.ExecutionContext{BaseFeePerGas: 1}); err == nil || err.Error() != "insufficient funds" {
+		t.Fatalf("batch fee/value reservation error = %v", err)
+	}
+	if contract.calls != 0 || store.Root() != rootBefore {
+		t.Fatalf("underfunded batch executed contract or changed state: calls=%d", contract.calls)
+	}
+}
+
+func TestSponsoredBatchChecksSenderValueBeforeContractExecution(t *testing.T) {
+	userKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	paymasterKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	user := chaincrypto.AddressFromPrivateKey(userKey)
+	paymaster := chaincrypto.AddressFromPrivateKey(paymasterKey)
+	store := state.NewStore()
+	store.SetBalance(user, 99)
+	store.SetBalance(paymaster, 200_000)
+	runtime := contracts.NewRuntime()
+	contract := &countingContract{}
+	runtime.Register("counting.v1", contract)
+	address, _, err := runtime.Deploy(store, user, "counting.v1", "seed", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := core.NewExecutor("chainlab-local", "", runtime)
+	tx := sponsoredTx(t, userKey, paymasterKey, types.Transaction{
+		ChainID:   "chainlab-local",
+		Type:      types.TxBatch,
+		From:      user,
+		Nonce:     0,
+		GasLimit:  113_000,
+		GasPrice:  1,
+		Paymaster: paymaster,
+		Batch: []types.BatchOperation{
+			{Type: types.TxCall, To: address, Payload: map[string]string{"method": "count"}},
+			{Type: types.TxTransfer, To: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Value: 100},
+		},
+	})
+	rootBefore := store.Root()
+	if _, err := executor.ExecuteWithContext(store, tx, core.ExecutionContext{BaseFeePerGas: 1}); err == nil || err.Error() != "insufficient funds" {
+		t.Fatalf("sponsored batch sender-value admission error = %v", err)
+	}
+	if contract.calls != 0 || store.Root() != rootBefore {
+		t.Fatalf("underfunded sponsored batch executed contract or changed state: calls=%d", contract.calls)
+	}
+}
+
+func TestFeeAdmissionReservesSignedMaxFeeCap(t *testing.T) {
+	store, executor, key, alice, bob := newExecutorFixture(t)
+	store.SetBalance(alice, 100_000)
+	tx := signedTx(t, key, types.Transaction{
+		ChainID:              "chainlab-local",
+		Type:                 types.TxTransfer,
+		From:                 alice,
+		To:                   bob,
+		Nonce:                0,
+		Value:                1,
+		GasLimit:             21_000,
+		MaxFeePerGas:         10,
+		MaxPriorityFeePerGas: 1,
+	})
+	if _, err := executor.ExecuteWithContext(store, tx, core.ExecutionContext{BaseFeePerGas: 1}); err == nil || err.Error() != "insufficient funds" {
+		t.Fatalf("max-fee reservation error = %v", err)
+	}
+}
+
 func TestExecuteTransfer(t *testing.T) {
 	store, executor, key, alice, bob := newExecutorFixture(t)
 	tx := signedTx(t, key, types.Transaction{

@@ -1,13 +1,13 @@
 package contracts
 
 import (
-	"context"
+	"bytes"
 	"errors"
 	"fmt"
-	"time"
+	"math"
+	"unicode/utf8"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
+	wasmtime "github.com/bytecodealliance/wasmtime-go/v46"
 
 	"chainlab/internal/types"
 )
@@ -15,27 +15,107 @@ import (
 const wasmHostModule = "chainlab"
 
 const (
-	wasmInstantiateGas = 100
-	wasmInstructionGas = 1
-	wasmHostCallGas    = 100
-	wasmByteGas        = 1
+	wasmInstantiateGas       uint64 = 100
+	wasmHostCallGas          uint64 = 100
+	wasmByteGas              uint64 = 1
+	wasmStorageGrowthGas     uint64 = 4
+	wasmInstantiationByteGas uint64 = 1
+	wasmMemoryPageGas        uint64 = 1000
+	wasmTableElementGas      uint64 = 10
+	wasmMaxModuleBytes              = 512 * 1024
+	wasmMaxMemoryBytes       int64  = 16 * 1024 * 1024
+	wasmMaxMemoryPages       uint64 = 256
+	wasmMaxTableElements     int64  = 1024
+	wasmMaxStackBytes               = 512 * 1024
+	wasmMaxKeyBytes          uint32 = 256
+	wasmMaxValueBytes        uint32 = 64 * 1024
+	wasmMaxReturnBytes       uint32 = 64 * 1024
+	wasmMaxEventTypeBytes    uint32 = 128
+	wasmMaxEventKeyBytes     uint32 = 256
+	wasmMaxEventValueBytes   uint32 = 16 * 1024
+	wasmMaxEvents                   = 64
+	wasmMaxEventBytes        uint64 = 64 * 1024
+	wasmMaxStorageWrites            = 128
+	wasmMaxHostIOBytes       uint64 = 1024 * 1024
+	wasmMaxTypes                    = 1024
+	wasmMaxFunctions                = 4096
+	wasmMaxGlobals                  = 256
+	wasmMaxSegments                 = 256
+	wasmMaxParams                   = 64
+	wasmMaxResults                  = 1
+	wasmMaxLocalsPerFunction        = 1024
+	wasmMaxLocalsPerModule          = 16 * 1024
 )
 
-const wasmExecutionTimeout = 250 * time.Millisecond
+const (
+	MaxWASMModuleBytes  = wasmMaxModuleBytes
+	WASMMeteringVersion = "chainlab-wasm-v1"
+	WASMRuntimeVersion  = "wasmtime-go-v46.0.1"
+)
+
+var (
+	ErrReadOnlyContract  = errors.New("contract read-only capability violation")
+	ErrWasmResourceLimit = errors.New("wasm resource limit exceeded")
+	ErrWasmGuestTrap     = errors.New("wasm guest trap")
+	ErrWasmInvalidUTF8   = errors.New("wasm host data must be valid UTF-8")
+	ErrWasmRuntimeFault  = errors.New("wasm runtime fault")
+)
+
+var chainlabWasmEngine = newChainlabWasmEngine()
 
 type WasmContract struct {
-	code []byte
+	module    *wasmtime.Module
+	resources wasmModuleResources
+}
+
+type wasmModuleResources struct {
+	codeBytes     uint64
+	memoryPages   uint64
+	tableElements uint64
+}
+
+type wasmBinarySignature struct {
+	params  []byte
+	results []byte
+}
+
+type wasmBinaryPolicy struct {
+	types                 []wasmBinarySignature
+	importedFunctionTypes []uint32
+	functionTypes         []uint32
+	seenImports           map[string]struct{}
+	seenExports           map[string]struct{}
+	seenSections          map[byte]struct{}
+	requiredExports       map[string]bool
+	lastSectionID         byte
+	functionCount         uint32
+	codeBodyCount         uint32
+	memoryDefined         bool
+	memoryExported        bool
 }
 
 func NewWasmContract(code []byte) (WasmContract, error) {
-	if err := ValidateWasmCode(code); err != nil {
+	return newWasmContract(code, false)
+}
+
+func newAdmittedWasmContract(code []byte) (WasmContract, error) {
+	return newWasmContract(code, true)
+}
+
+func newWasmContract(code []byte, admitted bool) (WasmContract, error) {
+	module, resources, err := compileWasmModule(code, admitted)
+	if err != nil {
 		return WasmContract{}, err
 	}
-	return WasmContract{code: append([]byte(nil), code...)}, nil
+	return WasmContract{module: module, resources: resources}, nil
 }
 
 func NewWasmEchoContract() WasmContract {
-	return WasmContract{code: wasmEchoModule()}
+	contract, err := NewWasmContract(wasmEchoModule())
+	if err != nil {
+		panic(fmt.Sprintf("invalid built-in wasm echo contract: %v", err))
+	}
+	return contract
 }
 
 func WasmEchoCode() []byte {
@@ -43,23 +123,547 @@ func WasmEchoCode() []byte {
 }
 
 func ValidateWasmCode(code []byte) error {
-	if len(code) == 0 {
-		return errors.New("wasm bytecode is required")
-	}
-	ctx := context.Background()
-	runtime := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().WithMemoryLimitPages(1))
-	defer runtime.Close(ctx)
-	compiled, err := runtime.CompileModule(ctx, code)
+	module, _, err := compileWasmModule(code, false)
 	if err != nil {
-		return fmt.Errorf("invalid wasm bytecode: %w", err)
+		return err
 	}
-	defer compiled.Close(ctx)
+	module.Close()
 	return nil
+}
+
+func newChainlabWasmEngine() *wasmtime.Engine {
+	config := wasmtime.NewConfig()
+	config.SetConsumeFuel(true)
+	config.SetStrategy(wasmtime.StrategyCranelift)
+	config.SetCraneliftOptLevel(wasmtime.OptLevelSpeed)
+	config.SetCraneliftNanCanonicalization(true)
+	config.SetParallelCompilation(false)
+	config.SetMaxWasmStack(wasmMaxStackBytes)
+	config.SetWasmSIMD(false)
+	config.SetWasmRelaxedSIMD(false)
+	config.SetWasmBulkMemory(false)
+	config.SetWasmMultiValue(false)
+	config.SetWasmMultiMemory(false)
+	config.SetWasmMemory64(false)
+	config.SetWasmTailCall(false)
+	config.SetGCSupport(false)
+	config.SetWasmWideArithmetic(false)
+	config.SetWasmThreads(false)
+	config.SetWasmReferenceTypes(true)
+	config.SetWasmFunctionReferences(false)
+	config.SetWasmComponentModel(false)
+	return wasmtime.NewEngineWithConfig(config)
+}
+
+func compileWasmModule(code []byte, admitted bool) (*wasmtime.Module, wasmModuleResources, error) {
+	resources := wasmModuleResources{codeBytes: uint64(len(code))}
+	if len(code) == 0 {
+		return nil, wasmModuleResources{}, errors.New("wasm bytecode is required")
+	}
+	if len(code) > wasmMaxModuleBytes {
+		return nil, wasmModuleResources{}, fmt.Errorf("wasm module size exceeds %d bytes", wasmMaxModuleBytes)
+	}
+	if err := validateWasmEnvelope(code, &resources); err != nil {
+		if admitted {
+			return nil, wasmModuleResources{}, fmt.Errorf("%w: admitted wasm envelope mismatch", ErrWasmRuntimeFault)
+		}
+		return nil, wasmModuleResources{}, err
+	}
+	if err := wasmtime.ModuleValidate(chainlabWasmEngine, code); err != nil {
+		if admitted {
+			return nil, wasmModuleResources{}, fmt.Errorf("%w: admitted wasm validation failed", ErrWasmRuntimeFault)
+		}
+		return nil, wasmModuleResources{}, errors.New("invalid wasm bytecode")
+	}
+	module, err := wasmtime.NewModule(chainlabWasmEngine, code)
+	if err != nil {
+		return nil, wasmModuleResources{}, fmt.Errorf("%w: wasm compilation failed", ErrWasmRuntimeFault)
+	}
+	if err := validateWasmABI(module, &resources); err != nil {
+		module.Close()
+		if admitted {
+			return nil, wasmModuleResources{}, fmt.Errorf("%w: admitted wasm ABI mismatch", ErrWasmRuntimeFault)
+		}
+		return nil, wasmModuleResources{}, err
+	}
+	return module, resources, nil
+}
+
+func validateWasmEnvelope(code []byte, resources *wasmModuleResources) error {
+	if len(code) < 8 || string(code[:4]) != "\x00asm" || string(code[4:8]) != "\x01\x00\x00\x00" {
+		return errors.New("invalid wasm bytecode header")
+	}
+	policy := wasmBinaryPolicy{
+		seenImports:     make(map[string]struct{}),
+		seenExports:     make(map[string]struct{}),
+		seenSections:    make(map[byte]struct{}),
+		requiredExports: map[string]bool{"deploy": false, "call": false, "read": false},
+	}
+	for offset := 8; offset < len(code); {
+		sectionID := code[offset]
+		offset++
+		reader := wasmSectionReader{data: code, offset: offset}
+		sectionSize, ok := reader.readU32()
+		if !ok {
+			return errors.New("invalid wasm section size")
+		}
+		sectionEnd := uint64(reader.offset) + uint64(sectionSize)
+		if sectionEnd > uint64(len(code)) {
+			return errors.New("invalid wasm section bounds")
+		}
+		section := code[reader.offset:int(sectionEnd)]
+		if sectionID != 0 {
+			if sectionID > 12 {
+				return fmt.Errorf("wasm section id %d is not allowed", sectionID)
+			}
+			if sectionID == 8 {
+				return errors.New("wasm start section is forbidden")
+			}
+			if sectionID == 12 {
+				return errors.New("wasm data-count section requires forbidden bulk memory")
+			}
+			if _, duplicate := policy.seenSections[sectionID]; duplicate {
+				return fmt.Errorf("wasm section id %d is duplicated", sectionID)
+			}
+			if sectionID < policy.lastSectionID {
+				return fmt.Errorf("wasm section id %d is out of order", sectionID)
+			}
+			policy.seenSections[sectionID] = struct{}{}
+			policy.lastSectionID = sectionID
+		}
+		switch sectionID {
+		case 1:
+			if err := validateWasmTypeSection(section, &policy); err != nil {
+				return err
+			}
+		case 2:
+			if err := validateWasmImportSection(section, &policy); err != nil {
+				return err
+			}
+		case 3:
+			if err := validateWasmFunctionSection(section, &policy); err != nil {
+				return err
+			}
+		case 4:
+			if err := validateWasmTableSection(section, resources); err != nil {
+				return err
+			}
+		case 5:
+			if err := validateWasmMemorySection(section, &policy, resources); err != nil {
+				return err
+			}
+		case 6:
+			if err := validateWasmVectorCount(section, wasmMaxGlobals, "globals"); err != nil {
+				return err
+			}
+		case 7:
+			if err := validateWasmExportSection(section, &policy); err != nil {
+				return err
+			}
+		case 9, 11:
+			if err := validateWasmVectorCount(section, wasmMaxSegments, "segments"); err != nil {
+				return err
+			}
+		case 10:
+			if err := validateWasmCodeSection(section, &policy); err != nil {
+				return err
+			}
+		}
+		offset = int(sectionEnd)
+	}
+	return policy.validateComplete()
+}
+
+func validateWasmVectorCount(section []byte, maximum uint32, name string) error {
+	reader := wasmSectionReader{data: section}
+	count, ok := reader.readU32()
+	if !ok {
+		return fmt.Errorf("invalid wasm %s section", name)
+	}
+	if count > maximum {
+		return fmt.Errorf("wasm %s exceed the version-1 limit", name)
+	}
+	return nil
+}
+
+func validateWasmTypeSection(section []byte, policy *wasmBinaryPolicy) error {
+	reader := wasmSectionReader{data: section}
+	count, ok := reader.readU32()
+	if !ok || count > wasmMaxTypes {
+		return errors.New("wasm types exceed the version-1 limit")
+	}
+	for index := uint32(0); index < count; index++ {
+		form, ok := reader.readByte()
+		if !ok || form != 0x60 {
+			return errors.New("invalid wasm function type")
+		}
+		params, ok := reader.readU32()
+		if !ok || params > wasmMaxParams {
+			return errors.New("wasm function parameters exceed the version-1 limit")
+		}
+		paramTypes, ok := reader.readBytes(params)
+		if !ok {
+			return errors.New("invalid wasm function parameters")
+		}
+		results, ok := reader.readU32()
+		if !ok || results > wasmMaxResults {
+			return errors.New("wasm function results exceed the version-1 limit")
+		}
+		resultTypes, ok := reader.readBytes(results)
+		if !ok {
+			return errors.New("invalid wasm function results")
+		}
+		policy.types = append(policy.types, wasmBinarySignature{
+			params:  append([]byte(nil), paramTypes...),
+			results: append([]byte(nil), resultTypes...),
+		})
+	}
+	if !reader.exhausted() {
+		return errors.New("wasm type section has trailing data")
+	}
+	return nil
+}
+
+func validateWasmImportSection(section []byte, policy *wasmBinaryPolicy) error {
+	reader := wasmSectionReader{data: section}
+	count, ok := reader.readU32()
+	if !ok || count > uint32(len(wasmHostSignatures)) {
+		return errors.New("wasm imports exceed the version-1 limit")
+	}
+	for index := uint32(0); index < count; index++ {
+		moduleName, ok := reader.readName()
+		if !ok || moduleName != wasmHostModule {
+			return errors.New("wasm imports must use the chainlab module")
+		}
+		name, ok := reader.readName()
+		if !ok {
+			return errors.New("invalid wasm import name")
+		}
+		if _, allowed := wasmHostSignatures[name]; !allowed {
+			return fmt.Errorf("wasm import %q is not allowed", name)
+		}
+		if _, duplicate := policy.seenImports[name]; duplicate {
+			return fmt.Errorf("wasm import %q is duplicated", name)
+		}
+		policy.seenImports[name] = struct{}{}
+		kind, ok := reader.readByte()
+		if !ok || kind != 0x00 {
+			return fmt.Errorf("wasm import %q must be a function", name)
+		}
+		typeIndex, ok := reader.readU32()
+		if !ok || int(typeIndex) >= len(policy.types) {
+			return fmt.Errorf("wasm import %q has an invalid type", name)
+		}
+		if !wasmBinarySignatureMatches(policy.types[typeIndex], wasmHostBinarySignature(name)) {
+			return fmt.Errorf("wasm import %q has an invalid signature", name)
+		}
+		policy.importedFunctionTypes = append(policy.importedFunctionTypes, typeIndex)
+	}
+	if !reader.exhausted() {
+		return errors.New("wasm import section has trailing data")
+	}
+	return nil
+}
+
+func validateWasmFunctionSection(section []byte, policy *wasmBinaryPolicy) error {
+	reader := wasmSectionReader{data: section}
+	count, ok := reader.readU32()
+	if !ok || count > wasmMaxFunctions {
+		return errors.New("wasm functions exceed the version-1 limit")
+	}
+	policy.functionTypes = make([]uint32, 0, count)
+	policy.functionCount = count
+	for index := uint32(0); index < count; index++ {
+		typeIndex, ok := reader.readU32()
+		if !ok || int(typeIndex) >= len(policy.types) {
+			return errors.New("wasm function has an invalid type")
+		}
+		policy.functionTypes = append(policy.functionTypes, typeIndex)
+	}
+	if !reader.exhausted() {
+		return errors.New("wasm function section has trailing data")
+	}
+	return nil
+}
+
+func validateWasmMemorySection(section []byte, policy *wasmBinaryPolicy, resources *wasmModuleResources) error {
+	reader := wasmSectionReader{data: section}
+	count, ok := reader.readU32()
+	if !ok || count != 1 {
+		return errors.New("wasm must define exactly one memory")
+	}
+	minimum, maximum, hasMaximum, ok := reader.readLimitBounds()
+	if !ok || !hasMaximum || minimum == 0 || minimum != maximum || uint64(maximum) > wasmMaxMemoryPages {
+		return errors.New("wasm memory must declare a fixed version-1 size")
+	}
+	policy.memoryDefined = true
+	resources.memoryPages = uint64(maximum)
+	if !reader.exhausted() {
+		return errors.New("wasm memory section has trailing data")
+	}
+	return nil
+}
+
+func validateWasmExportSection(section []byte, policy *wasmBinaryPolicy) error {
+	reader := wasmSectionReader{data: section}
+	count, ok := reader.readU32()
+	if !ok || count > 4 {
+		return errors.New("wasm exports exceed the version-1 limit")
+	}
+	for index := uint32(0); index < count; index++ {
+		name, ok := reader.readName()
+		if !ok {
+			return errors.New("invalid wasm export name")
+		}
+		if _, duplicate := policy.seenExports[name]; duplicate {
+			return fmt.Errorf("wasm export %q is duplicated", name)
+		}
+		policy.seenExports[name] = struct{}{}
+		kind, ok := reader.readByte()
+		if !ok {
+			return errors.New("invalid wasm export kind")
+		}
+		exportIndex, ok := reader.readU32()
+		if !ok {
+			return errors.New("invalid wasm export index")
+		}
+		if name == "memory" {
+			if kind != 0x02 || exportIndex != 0 || !policy.memoryDefined || policy.memoryExported {
+				return errors.New("wasm must export its single memory")
+			}
+			policy.memoryExported = true
+			continue
+		}
+		if _, required := policy.requiredExports[name]; !required || kind != 0x00 {
+			return fmt.Errorf("wasm export %q is not allowed", name)
+		}
+		signature, ok := policy.functionSignature(exportIndex)
+		if !ok || !wasmBinarySignatureMatches(signature, wasmBinarySignature{}) {
+			return fmt.Errorf("wasm export %q must have signature () -> ()", name)
+		}
+		policy.requiredExports[name] = true
+	}
+	if !reader.exhausted() {
+		return errors.New("wasm export section has trailing data")
+	}
+	return nil
+}
+
+func (p *wasmBinaryPolicy) functionSignature(functionIndex uint32) (wasmBinarySignature, bool) {
+	if functionIndex < uint32(len(p.importedFunctionTypes)) {
+		typeIndex := p.importedFunctionTypes[functionIndex]
+		return p.types[typeIndex], true
+	}
+	definedIndex := functionIndex - uint32(len(p.importedFunctionTypes))
+	if int(definedIndex) >= len(p.functionTypes) {
+		return wasmBinarySignature{}, false
+	}
+	return p.types[p.functionTypes[definedIndex]], true
+}
+
+func (p *wasmBinaryPolicy) validateComplete() error {
+	if !p.memoryDefined || !p.memoryExported {
+		return errors.New("wasm memory export is required")
+	}
+	for _, name := range []string{"deploy", "call", "read"} {
+		if !p.requiredExports[name] {
+			return fmt.Errorf("wasm export %q is required", name)
+		}
+	}
+	if p.functionCount != p.codeBodyCount {
+		return errors.New("wasm function and code body counts differ")
+	}
+	return nil
+}
+
+func wasmHostBinarySignature(name string) wasmBinarySignature {
+	signature := wasmHostSignatures[name]
+	params := make([]byte, len(signature.params))
+	for index := range params {
+		params[index] = 0x7f
+	}
+	results := make([]byte, len(signature.results))
+	for index := range results {
+		results[index] = 0x7f
+	}
+	return wasmBinarySignature{params: params, results: results}
+}
+
+func wasmBinarySignatureMatches(actual wasmBinarySignature, expected wasmBinarySignature) bool {
+	return bytes.Equal(actual.params, expected.params) && bytes.Equal(actual.results, expected.results)
+}
+
+func validateWasmTableSection(section []byte, resources *wasmModuleResources) error {
+	reader := wasmSectionReader{data: section}
+	count, ok := reader.readU32()
+	if !ok || count > 1 {
+		return errors.New("wasm tables exceed the version-1 limit")
+	}
+	for index := uint32(0); index < count; index++ {
+		elementType, ok := reader.readByte()
+		if !ok || elementType != 0x70 {
+			return errors.New("wasm table element type is not allowed")
+		}
+		minimum, maximum, hasMaximum, ok := reader.readLimitBounds()
+		if !ok || !hasMaximum || minimum != maximum {
+			return errors.New("wasm table must declare a fixed version-1 size")
+		}
+		if maximum > uint32(wasmMaxTableElements) {
+			return errors.New("wasm table exceeds the version-1 limit")
+		}
+		resources.tableElements = uint64(maximum)
+	}
+	if !reader.exhausted() {
+		return errors.New("wasm table section has trailing data")
+	}
+	return nil
+}
+
+func validateWasmCodeSection(section []byte, policy *wasmBinaryPolicy) error {
+	reader := wasmSectionReader{data: section}
+	count, ok := reader.readU32()
+	if !ok || count > wasmMaxFunctions {
+		return errors.New("wasm code bodies exceed the version-1 limit")
+	}
+	policy.codeBodyCount = count
+	var moduleLocals uint64
+	for functionIndex := uint32(0); functionIndex < count; functionIndex++ {
+		bodySize, ok := reader.readU32()
+		if !ok {
+			return errors.New("invalid wasm code body size")
+		}
+		body, ok := reader.readBytes(bodySize)
+		if !ok {
+			return errors.New("invalid wasm code body")
+		}
+		bodyReader := wasmSectionReader{data: body}
+		localGroups, ok := bodyReader.readU32()
+		if !ok || localGroups > wasmMaxLocalsPerFunction {
+			return errors.New("wasm local groups exceed the version-1 limit")
+		}
+		var functionLocals uint64
+		for group := uint32(0); group < localGroups; group++ {
+			localCount, ok := bodyReader.readU32()
+			if !ok {
+				return errors.New("invalid wasm local declaration")
+			}
+			if _, ok := bodyReader.readByte(); !ok {
+				return errors.New("invalid wasm local type")
+			}
+			functionLocals += uint64(localCount)
+			if functionLocals > wasmMaxLocalsPerFunction {
+				return errors.New("wasm locals exceed the per-function limit")
+			}
+		}
+		moduleLocals += functionLocals
+		if moduleLocals > wasmMaxLocalsPerModule {
+			return errors.New("wasm locals exceed the module limit")
+		}
+	}
+	if !reader.exhausted() {
+		return errors.New("wasm code section has trailing data")
+	}
+	return nil
+}
+
+type wasmSignature struct {
+	params  []wasmtime.ValKind
+	results []wasmtime.ValKind
+}
+
+var wasmHostSignatures = map[string]wasmSignature{
+	"arg_copy":     {params: []wasmtime.ValKind{wasmtime.KindI32, wasmtime.KindI32, wasmtime.KindI32}, results: []wasmtime.ValKind{wasmtime.KindI32}},
+	"storage_copy": {params: []wasmtime.ValKind{wasmtime.KindI32, wasmtime.KindI32, wasmtime.KindI32}, results: []wasmtime.ValKind{wasmtime.KindI32}},
+	"storage_set":  {params: []wasmtime.ValKind{wasmtime.KindI32, wasmtime.KindI32, wasmtime.KindI32, wasmtime.KindI32}, results: []wasmtime.ValKind{wasmtime.KindI32}},
+	"return_set":   {params: []wasmtime.ValKind{wasmtime.KindI32, wasmtime.KindI32}, results: []wasmtime.ValKind{wasmtime.KindI32}},
+	"emit_event":   {params: []wasmtime.ValKind{wasmtime.KindI32, wasmtime.KindI32, wasmtime.KindI32, wasmtime.KindI32, wasmtime.KindI32, wasmtime.KindI32}, results: []wasmtime.ValKind{wasmtime.KindI32}},
+}
+
+func validateWasmABI(module *wasmtime.Module, resources *wasmModuleResources) error {
+	seenImports := make(map[string]struct{})
+	for _, imported := range module.Imports() {
+		name := imported.Name()
+		if imported.Module() != wasmHostModule || name == nil {
+			return errors.New("wasm imports must be named chainlab host functions")
+		}
+		signature, ok := wasmHostSignatures[*name]
+		if !ok {
+			return fmt.Errorf("wasm import %q is not allowed", *name)
+		}
+		if _, duplicate := seenImports[*name]; duplicate {
+			return fmt.Errorf("wasm import %q is duplicated", *name)
+		}
+		seenImports[*name] = struct{}{}
+		functionType := imported.Type().FuncType()
+		if functionType == nil || !wasmFunctionTypeMatches(functionType, signature) {
+			return fmt.Errorf("wasm import %q has an invalid signature", *name)
+		}
+	}
+
+	requiredFunctions := map[string]bool{"deploy": false, "call": false, "read": false}
+	memoryFound := false
+	for _, exported := range module.Exports() {
+		name := exported.Name()
+		typeInfo := exported.Type()
+		if _, required := requiredFunctions[name]; required {
+			functionType := typeInfo.FuncType()
+			if functionType == nil || !wasmFunctionTypeMatches(functionType, wasmSignature{}) {
+				return fmt.Errorf("wasm export %q must have signature () -> ()", name)
+			}
+			requiredFunctions[name] = true
+			continue
+		}
+		if name == "memory" {
+			memoryType := typeInfo.MemoryType()
+			if memoryType == nil || memoryFound {
+				return errors.New("wasm must export exactly one memory")
+			}
+			if memoryType.Is64() || memoryType.IsShared() || memoryType.Minimum() == 0 || memoryType.Minimum() > wasmMaxMemoryPages {
+				return errors.New("wasm memory type exceeds the version-1 policy")
+			}
+			hasMaximum, maximum := memoryType.Maximum()
+			if !hasMaximum || memoryType.Minimum() != maximum || maximum > wasmMaxMemoryPages {
+				return errors.New("wasm memory must declare a fixed version-1 size")
+			}
+			resources.memoryPages = maximum
+			memoryFound = true
+			continue
+		}
+		return fmt.Errorf("wasm export %q is not allowed", name)
+	}
+	if !memoryFound {
+		return errors.New("wasm memory export is required")
+	}
+	for _, name := range []string{"deploy", "call", "read"} {
+		if !requiredFunctions[name] {
+			return fmt.Errorf("wasm export %q is required", name)
+		}
+	}
+	return nil
+}
+
+func wasmFunctionTypeMatches(functionType *wasmtime.FuncType, expected wasmSignature) bool {
+	params := functionType.Params()
+	results := functionType.Results()
+	if len(params) != len(expected.params) || len(results) != len(expected.results) {
+		return false
+	}
+	for index := range params {
+		if params[index].Kind() != expected.params[index] {
+			return false
+		}
+	}
+	for index := range results {
+		if results[index].Kind() != expected.results[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func (w WasmContract) Deploy(ctx Context, args map[string]string) ([]types.Event, error) {
 	invocation := newWasmInvocation(ctx, args)
-	if err := invocation.call(w.code, "deploy"); err != nil {
+	if err := invocation.call(w.module, w.resources, "deploy"); err != nil {
 		return nil, err
 	}
 	return invocation.events, nil
@@ -70,7 +674,7 @@ func (w WasmContract) Call(ctx Context, method string, args map[string]string) (
 		return nil, fmt.Errorf("unknown wasm echo method %q", method)
 	}
 	invocation := newWasmInvocation(ctx, args)
-	if err := invocation.call(w.code, "call"); err != nil {
+	if err := invocation.call(w.module, w.resources, "call"); err != nil {
 		return nil, err
 	}
 	return invocation.events, nil
@@ -81,352 +685,386 @@ func (w WasmContract) Read(ctx Context, method string, args map[string]string) (
 		return "", fmt.Errorf("unknown wasm echo read method %q", method)
 	}
 	invocation := newWasmInvocation(ctx, args)
-	if err := invocation.call(w.code, "read"); err != nil {
+	if err := invocation.call(w.module, w.resources, "read"); err != nil {
 		return "", err
 	}
 	return invocation.returnValue, nil
 }
 
 type wasmInvocation struct {
-	contractCtx Context
-	args        map[string]string
-	events      []types.Event
-	returnValue string
-	err         error
+	contractCtx   Context
+	args          map[string]string
+	events        []types.Event
+	returnValue   string
+	err           error
+	store         *wasmtime.Store
+	hostIOBytes   uint64
+	eventBytes    uint64
+	storageWrites int
 }
 
 func newWasmInvocation(ctx Context, args map[string]string) *wasmInvocation {
 	if args == nil {
 		args = map[string]string{}
 	}
+	if ctx.Meter == nil {
+		ctx.Meter = NewLimitedMeter(DefaultContractGasLimit)
+	}
 	return &wasmInvocation{contractCtx: ctx, args: args}
 }
 
-func (i *wasmInvocation) call(code []byte, export string) error {
-	if !i.charge(wasmInstantiateGas + uint64(len(code))*wasmByteGas/32) {
+func (i *wasmInvocation) call(module *wasmtime.Module, resources wasmModuleResources, export string) error {
+	if module == nil {
+		return fmt.Errorf("%w: wasm module is not compiled", ErrWasmRuntimeFault)
+	}
+	if !i.charge(resources.instantiationGas()) {
 		return i.err
 	}
-	instructionFuel, err := wasmExportedFunctionFuel(code, export)
-	if err != nil {
+	fuelLimit := i.contractCtx.Meter.Remaining()
+	store := wasmtime.NewStoreWithData(chainlabWasmEngine, i)
+	i.store = store
+	defer store.Close()
+	store.Limiter(wasmMaxMemoryBytes, wasmMaxTableElements, 1, 1, 1)
+	if err := store.SetFuel(fuelLimit); err != nil {
+		return fmt.Errorf("%w: fuel configuration", ErrWasmRuntimeFault)
+	}
+
+	linker := wasmtime.NewLinker(chainlabWasmEngine)
+	defer linker.Close()
+	if err := defineWasmHost(linker); err != nil {
 		return err
 	}
-	if !i.charge(instructionFuel) {
+	instance, executionErr := linker.Instantiate(store, module)
+	if executionErr == nil {
+		function := instance.GetFunc(store, export)
+		if function == nil {
+			executionErr = fmt.Errorf("%w: validated export %q is missing", ErrWasmRuntimeFault, export)
+		} else {
+			_, executionErr = function.Call(store)
+		}
+	}
+	remaining, fuelErr := store.GetFuel()
+	if fuelErr != nil {
+		return fmt.Errorf("%w: read fuel balance", ErrWasmRuntimeFault)
+	}
+	if remaining > fuelLimit {
+		return fmt.Errorf("%w: fuel accounting underflow", ErrWasmRuntimeFault)
+	}
+	if wasmConsumesFullBudget(executionErr) {
+		remaining = 0
+	}
+	if !i.charge(fuelLimit - remaining) {
 		return i.err
 	}
-	ctx := context.Background()
-	execCtx, cancel := context.WithTimeout(ctx, wasmExecutionTimeout)
-	defer cancel()
-	runtime := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().
-		WithMemoryLimitPages(1).
-		WithCloseOnContextDone(true))
-	defer runtime.Close(ctx)
-
-	if _, err := runtime.NewHostModuleBuilder(wasmHostModule).
-		NewFunctionBuilder().WithFunc(i.argCopy).Export("arg_copy").
-		NewFunctionBuilder().WithFunc(i.storageCopy).Export("storage_copy").
-		NewFunctionBuilder().WithFunc(i.storageSet).Export("storage_set").
-		NewFunctionBuilder().WithFunc(i.returnSet).Export("return_set").
-		NewFunctionBuilder().WithFunc(i.emitEvent).Export("emit_event").
-		Instantiate(execCtx); err != nil {
-		if timeoutErr := wasmTimeoutError(execCtx); timeoutErr != nil {
-			return timeoutErr
-		}
-		return err
+	if i.err != nil {
+		return i.err
 	}
-
-	module, err := runtime.Instantiate(execCtx, code)
-	if err != nil {
-		if timeoutErr := wasmTimeoutError(execCtx); timeoutErr != nil {
-			return timeoutErr
-		}
-		return err
-	}
-	fn := module.ExportedFunction(export)
-	if fn == nil {
-		return fmt.Errorf("wasm export %q is missing", export)
-	}
-	if _, err := fn.Call(execCtx); err != nil {
-		if timeoutErr := wasmTimeoutError(execCtx); timeoutErr != nil {
-			return timeoutErr
-		}
-		return err
-	}
-	if timeoutErr := wasmTimeoutError(execCtx); timeoutErr != nil {
-		return timeoutErr
-	}
-	return i.err
-}
-
-func wasmTimeoutError(ctx context.Context) error {
-	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("wasm execution timeout: %w", err)
+	if executionErr != nil {
+		return normalizeWasmExecutionError(executionErr)
 	}
 	return nil
 }
 
-func (i *wasmInvocation) argCopy(ctx context.Context, module api.Module, keyPtr uint32, keyLen uint32, dstPtr uint32) uint32 {
-	key, ok := i.readString(module, keyPtr, keyLen)
-	if !ok {
-		return 0
-	}
-	value := i.args[key]
-	if !i.charge(wasmHostCallGas + uint64(len(key)+len(value))*wasmByteGas) {
-		return 0
-	}
-	return i.writeString(module, dstPtr, value)
+func (r wasmModuleResources) instantiationGas() uint64 {
+	return wasmInstantiateGas +
+		r.codeBytes*wasmInstantiationByteGas +
+		r.memoryPages*wasmMemoryPageGas +
+		r.tableElements*wasmTableElementGas
 }
 
-func (i *wasmInvocation) storageCopy(ctx context.Context, module api.Module, keyPtr uint32, keyLen uint32, dstPtr uint32) uint32 {
-	key, ok := i.readString(module, keyPtr, keyLen)
-	if !ok {
-		return 0
+func wasmConsumesFullBudget(err error) bool {
+	var trap *wasmtime.Trap
+	if !errors.As(err, &trap) {
+		return false
 	}
-	value := i.contractCtx.Store.GetStorage(i.contractCtx.Address, key)
-	if !i.charge(wasmHostCallGas + uint64(len(key)+len(value))*wasmByteGas) {
-		return 0
-	}
-	return i.writeString(module, dstPtr, value)
+	code := trap.Code()
+	return code != nil && (*code == wasmtime.OutOfFuel || *code == wasmtime.StackOverflow)
 }
 
-func (i *wasmInvocation) storageSet(ctx context.Context, module api.Module, keyPtr uint32, keyLen uint32, valuePtr uint32, valueLen uint32) uint32 {
-	key, keyOK := i.readString(module, keyPtr, keyLen)
-	value, valueOK := i.readString(module, valuePtr, valueLen)
-	if !keyOK || !valueOK {
-		return 1
+func defineWasmHost(linker *wasmtime.Linker) error {
+	definitions := []struct {
+		name     string
+		function any
+	}{
+		{name: "arg_copy", function: wasmHostArgCopy},
+		{name: "storage_copy", function: wasmHostStorageCopy},
+		{name: "storage_set", function: wasmHostStorageSet},
+		{name: "return_set", function: wasmHostReturnSet},
+		{name: "emit_event", function: wasmHostEmitEvent},
 	}
-	if !i.charge(wasmHostCallGas + uint64(len(key)+len(value))*wasmByteGas) {
-		return 1
+	for _, definition := range definitions {
+		if err := linker.FuncWrap(wasmHostModule, definition.name, definition.function); err != nil {
+			return fmt.Errorf("%w: host ABI initialization", ErrWasmRuntimeFault)
+		}
 	}
-	i.contractCtx.Store.SetStorage(i.contractCtx.Address, key, value)
-	return 0
+	return nil
 }
 
-func (i *wasmInvocation) returnSet(ctx context.Context, module api.Module, valuePtr uint32, valueLen uint32) uint32 {
-	value, ok := i.readString(module, valuePtr, valueLen)
-	if !ok {
-		return 1
+func normalizeWasmExecutionError(err error) error {
+	var trap *wasmtime.Trap
+	if errors.As(err, &trap) {
+		if code := trap.Code(); code != nil {
+			switch *code {
+			case wasmtime.OutOfFuel:
+				return ErrContractOutOfGas
+			case wasmtime.StackOverflow:
+				return fmt.Errorf("%w: stack", ErrWasmResourceLimit)
+			default:
+				return fmt.Errorf("%w: trap code %d", ErrWasmGuestTrap, *code)
+			}
+		}
 	}
-	if !i.charge(wasmHostCallGas + uint64(len(value))*wasmByteGas) {
-		return 1
-	}
-	i.returnValue = value
-	return 0
+	return ErrWasmRuntimeFault
 }
 
-func (i *wasmInvocation) emitEvent(ctx context.Context, module api.Module, typePtr uint32, typeLen uint32, keyPtr uint32, keyLen uint32, valuePtr uint32, valueLen uint32) uint32 {
-	eventType, typeOK := i.readString(module, typePtr, typeLen)
-	key, keyOK := i.readString(module, keyPtr, keyLen)
-	value, valueOK := i.readString(module, valuePtr, valueLen)
-	if !typeOK || !keyOK || !valueOK {
-		return 1
+func wasmHostArgCopy(caller *wasmtime.Caller, keyPtr int32, keyLen int32, dstPtr int32) (int32, *wasmtime.Trap) {
+	invocation := wasmInvocationFromCaller(caller)
+	if trap := invocation.prepareHostRead(uint32(keyLen), wasmMaxKeyBytes, "argument key", wasmHostCallGas); trap != nil {
+		return 0, trap
 	}
-	if !i.charge(wasmHostCallGas + uint64(len(eventType)+len(key)+len(value))*wasmByteGas) {
-		return 1
+	key, trap := invocation.readString(caller, uint32(keyPtr), uint32(keyLen))
+	if trap != nil {
+		return 0, trap
 	}
-	i.events = append(i.events, types.Event{Type: eventType, Attributes: map[string]string{key: value}})
-	return 0
+	value := invocation.args[key]
+	if trap := invocation.prepareHostRead(uint32(len(value)), wasmMaxValueBytes, "argument value", 0); trap != nil {
+		return 0, trap
+	}
+	return invocation.writeString(caller, uint32(dstPtr), value)
 }
 
-func (i *wasmInvocation) readString(module api.Module, ptr uint32, length uint32) (string, bool) {
+func wasmHostStorageCopy(caller *wasmtime.Caller, keyPtr int32, keyLen int32, dstPtr int32) (int32, *wasmtime.Trap) {
+	invocation := wasmInvocationFromCaller(caller)
+	if trap := invocation.prepareHostRead(uint32(keyLen), wasmMaxKeyBytes, "storage key", wasmHostCallGas); trap != nil {
+		return 0, trap
+	}
+	key, trap := invocation.readString(caller, uint32(keyPtr), uint32(keyLen))
+	if trap != nil {
+		return 0, trap
+	}
+	value := invocation.contractCtx.Store.GetStorage(invocation.contractCtx.Address, key)
+	if trap := invocation.prepareHostRead(uint32(len(value)), wasmMaxValueBytes, "storage value", 0); trap != nil {
+		return 0, trap
+	}
+	return invocation.writeString(caller, uint32(dstPtr), value)
+}
+
+func wasmHostStorageSet(caller *wasmtime.Caller, keyPtr int32, keyLen int32, valuePtr int32, valueLen int32) (int32, *wasmtime.Trap) {
+	invocation := wasmInvocationFromCaller(caller)
+	if invocation.contractCtx.ReadOnly {
+		return 1, invocation.fail(ErrReadOnlyContract)
+	}
+	if invocation.storageWrites >= wasmMaxStorageWrites {
+		return 1, invocation.fail(fmt.Errorf("%w: storage writes", ErrWasmResourceLimit))
+	}
+	totalBytes := uint64(uint32(keyLen)) + uint64(uint32(valueLen))
+	if trap := invocation.prepareHostBytes(uint32(keyLen), wasmMaxKeyBytes, "storage key", 0); trap != nil {
+		return 1, trap
+	}
+	if trap := invocation.prepareHostBytes(uint32(valueLen), wasmMaxValueBytes, "storage value", 0); trap != nil {
+		return 1, trap
+	}
+	if trap := invocation.consumeFuel(wasmHostCallGas + totalBytes*wasmByteGas); trap != nil {
+		return 1, trap
+	}
+	key, trap := invocation.readString(caller, uint32(keyPtr), uint32(keyLen))
+	if trap != nil {
+		return 1, trap
+	}
+	value, trap := invocation.readString(caller, uint32(valuePtr), uint32(valueLen))
+	if trap != nil {
+		return 1, trap
+	}
+	keyExists := invocation.contractCtx.Store.HasStorage(invocation.contractCtx.Address, key)
+	oldValue := invocation.contractCtx.Store.GetStorage(invocation.contractCtx.Address, key)
+	var growth uint64
+	if !keyExists {
+		growth += uint64(len(key))
+	}
+	if len(value) > len(oldValue) {
+		growth += uint64(len(value) - len(oldValue))
+	}
+	if growth > math.MaxUint64/wasmStorageGrowthGas {
+		return 1, invocation.fail(ErrWasmResourceLimit)
+	}
+	if trap := invocation.consumeFuel(growth * wasmStorageGrowthGas); trap != nil {
+		return 1, trap
+	}
+	invocation.storageWrites++
+	invocation.contractCtx.Store.SetStorage(invocation.contractCtx.Address, key, value)
+	return 0, nil
+}
+
+func wasmHostReturnSet(caller *wasmtime.Caller, valuePtr int32, valueLen int32) (int32, *wasmtime.Trap) {
+	invocation := wasmInvocationFromCaller(caller)
+	if trap := invocation.prepareHostRead(uint32(valueLen), wasmMaxReturnBytes, "return value", wasmHostCallGas); trap != nil {
+		return 1, trap
+	}
+	value, trap := invocation.readString(caller, uint32(valuePtr), uint32(valueLen))
+	if trap != nil {
+		return 1, trap
+	}
+	invocation.returnValue = value
+	return 0, nil
+}
+
+func wasmHostEmitEvent(caller *wasmtime.Caller, typePtr int32, typeLen int32, keyPtr int32, keyLen int32, valuePtr int32, valueLen int32) (int32, *wasmtime.Trap) {
+	invocation := wasmInvocationFromCaller(caller)
+	if invocation.contractCtx.ReadOnly {
+		return 1, invocation.fail(ErrReadOnlyContract)
+	}
+	if len(invocation.events) >= wasmMaxEvents {
+		return 1, invocation.fail(fmt.Errorf("%w: event count", ErrWasmResourceLimit))
+	}
+	totalBytes := uint64(uint32(typeLen)) + uint64(uint32(keyLen)) + uint64(uint32(valueLen))
+	if totalBytes > wasmMaxEventBytes-invocation.eventBytes {
+		return 1, invocation.fail(fmt.Errorf("%w: event bytes", ErrWasmResourceLimit))
+	}
+	for _, field := range []struct {
+		length  uint32
+		maximum uint32
+		name    string
+	}{
+		{uint32(typeLen), wasmMaxEventTypeBytes, "event type"},
+		{uint32(keyLen), wasmMaxEventKeyBytes, "event key"},
+		{uint32(valueLen), wasmMaxEventValueBytes, "event value"},
+	} {
+		if trap := invocation.prepareHostBytes(field.length, field.maximum, field.name, 0); trap != nil {
+			return 1, trap
+		}
+	}
+	if trap := invocation.consumeFuel(wasmHostCallGas + totalBytes*wasmByteGas); trap != nil {
+		return 1, trap
+	}
+	eventType, trap := invocation.readString(caller, uint32(typePtr), uint32(typeLen))
+	if trap != nil {
+		return 1, trap
+	}
+	key, trap := invocation.readString(caller, uint32(keyPtr), uint32(keyLen))
+	if trap != nil {
+		return 1, trap
+	}
+	value, trap := invocation.readString(caller, uint32(valuePtr), uint32(valueLen))
+	if trap != nil {
+		return 1, trap
+	}
+	invocation.eventBytes += totalBytes
+	invocation.events = append(invocation.events, types.Event{Type: eventType, Attributes: map[string]string{key: value}})
+	return 0, nil
+}
+
+func wasmInvocationFromCaller(caller *wasmtime.Caller) *wasmInvocation {
+	invocation, ok := caller.Data().(*wasmInvocation)
+	if !ok || invocation == nil {
+		panic("wasm invocation data is missing")
+	}
+	return invocation
+}
+
+func (i *wasmInvocation) prepareHostRead(length uint32, maximum uint32, name string, gas uint64) *wasmtime.Trap {
+	if trap := i.prepareHostBytes(length, maximum, name, 0); trap != nil {
+		return trap
+	}
+	return i.consumeFuel(gas + uint64(length)*wasmByteGas)
+}
+
+func (i *wasmInvocation) prepareHostBytes(length uint32, maximum uint32, name string, gas uint64) *wasmtime.Trap {
+	if length > maximum {
+		return i.fail(fmt.Errorf("%w: %s", ErrWasmResourceLimit, name))
+	}
+	if uint64(length) > wasmMaxHostIOBytes-i.hostIOBytes {
+		return i.fail(fmt.Errorf("%w: host I/O bytes", ErrWasmResourceLimit))
+	}
+	i.hostIOBytes += uint64(length)
+	if gas != 0 {
+		return i.consumeFuel(gas)
+	}
+	return nil
+}
+
+func (i *wasmInvocation) consumeFuel(amount uint64) *wasmtime.Trap {
 	if i.err != nil {
-		return "", false
+		return wasmtime.NewTrap("chainlab host failure")
 	}
-	memory := module.Memory()
-	if memory == nil {
-		i.err = errors.New("wasm module has no memory")
-		return "", false
+	remaining, err := i.store.GetFuel()
+	if err != nil {
+		return i.fail(fmt.Errorf("%w: read host fuel balance", ErrWasmRuntimeFault))
 	}
-	raw, ok := memory.Read(ptr, length)
-	if !ok {
-		i.err = fmt.Errorf("wasm memory read out of range: ptr=%d len=%d", ptr, length)
-		return "", false
+	if amount > remaining {
+		if err := i.store.SetFuel(0); err != nil {
+			return i.fail(fmt.Errorf("%w: exhaust host fuel", ErrWasmRuntimeFault))
+		}
+		return i.fail(ErrContractOutOfGas)
 	}
-	return string(raw), true
+	if err := i.store.SetFuel(remaining - amount); err != nil {
+		return i.fail(fmt.Errorf("%w: deduct host fuel", ErrWasmRuntimeFault))
+	}
+	return nil
 }
 
-func (i *wasmInvocation) writeString(module api.Module, ptr uint32, value string) uint32 {
-	if i.err != nil {
-		return 0
+func (i *wasmInvocation) readString(caller *wasmtime.Caller, ptr uint32, length uint32) (string, *wasmtime.Trap) {
+	memory, trap := i.memory(caller)
+	if trap != nil {
+		return "", trap
 	}
-	memory := module.Memory()
+	start := uint64(ptr)
+	end := start + uint64(length)
+	data := memory.UnsafeData(caller)
+	if end < start || end > uint64(len(data)) {
+		return "", i.fail(fmt.Errorf("%w: memory read", ErrWasmResourceLimit))
+	}
+	raw := data[int(start):int(end)]
+	if !utf8.Valid(raw) {
+		return "", i.fail(ErrWasmInvalidUTF8)
+	}
+	return string(raw), nil
+}
+
+func (i *wasmInvocation) writeString(caller *wasmtime.Caller, ptr uint32, value string) (int32, *wasmtime.Trap) {
+	if !utf8.ValidString(value) {
+		return 0, i.fail(ErrWasmInvalidUTF8)
+	}
+	memory, trap := i.memory(caller)
+	if trap != nil {
+		return 0, trap
+	}
+	start := uint64(ptr)
+	end := start + uint64(len(value))
+	data := memory.UnsafeData(caller)
+	if end < start || end > uint64(len(data)) {
+		return 0, i.fail(fmt.Errorf("%w: memory write", ErrWasmResourceLimit))
+	}
+	copy(data[int(start):int(end)], value)
+	return int32(len(value)), nil
+}
+
+func (i *wasmInvocation) memory(caller *wasmtime.Caller) (*wasmtime.Memory, *wasmtime.Trap) {
+	exported := caller.GetExport("memory")
+	if exported == nil {
+		return nil, i.fail(fmt.Errorf("%w: memory export", ErrWasmResourceLimit))
+	}
+	memory := exported.Memory()
 	if memory == nil {
-		i.err = errors.New("wasm module has no memory")
-		return 0
+		return nil, i.fail(fmt.Errorf("%w: memory export", ErrWasmResourceLimit))
 	}
-	if !memory.WriteString(ptr, value) {
-		i.err = fmt.Errorf("wasm memory write out of range: ptr=%d len=%d", ptr, len(value))
-		return 0
+	return memory, nil
+}
+
+func (i *wasmInvocation) fail(err error) *wasmtime.Trap {
+	if i.err == nil {
+		i.err = err
 	}
-	return uint32(len(value))
+	return wasmtime.NewTrap("chainlab host failure")
 }
 
 func (i *wasmInvocation) charge(amount uint64) bool {
-	if i.err != nil {
-		return false
-	}
 	if err := i.contractCtx.Meter.Charge(amount); err != nil {
-		i.err = err
+		if i.err == nil {
+			i.err = err
+		}
 		return false
 	}
 	return true
-}
-
-func wasmExportedFunctionFuel(code []byte, exportName string) (uint64, error) {
-	parser := wasmModuleParser{data: code}
-	return parser.exportedFunctionFuel(exportName)
-}
-
-type wasmModuleParser struct {
-	data             []byte
-	offset           int
-	importedFuncs    uint32
-	exportedFuncs    map[string]uint32
-	codeBodyFuelByID []uint64
-}
-
-func (p *wasmModuleParser) exportedFunctionFuel(exportName string) (uint64, error) {
-	if len(p.data) < 8 || string(p.data[:4]) != "\x00asm" {
-		return 0, errors.New("invalid wasm magic")
-	}
-	p.offset = 8
-	p.exportedFuncs = make(map[string]uint32)
-	for p.offset < len(p.data) {
-		sectionID := p.data[p.offset]
-		p.offset++
-		sectionSize, ok := p.readU32()
-		if !ok {
-			return 0, errors.New("invalid wasm section size")
-		}
-		sectionStart := p.offset
-		sectionEnd := sectionStart + int(sectionSize)
-		if sectionEnd < sectionStart || sectionEnd > len(p.data) {
-			return 0, errors.New("invalid wasm section bounds")
-		}
-		section := p.data[sectionStart:sectionEnd]
-		switch sectionID {
-		case 2:
-			if err := p.parseImportSection(section); err != nil {
-				return 0, err
-			}
-		case 7:
-			if err := p.parseExportSection(section); err != nil {
-				return 0, err
-			}
-		case 10:
-			if err := p.parseCodeSection(section); err != nil {
-				return 0, err
-			}
-		}
-		p.offset = sectionEnd
-	}
-	funcIndex, ok := p.exportedFuncs[exportName]
-	if !ok {
-		return 0, nil
-	}
-	if funcIndex < p.importedFuncs {
-		return 0, nil
-	}
-	bodyIndex := funcIndex - p.importedFuncs
-	if int(bodyIndex) >= len(p.codeBodyFuelByID) {
-		return 0, errors.New("wasm exported function has no code body")
-	}
-	return p.codeBodyFuelByID[bodyIndex], nil
-}
-
-func (p *wasmModuleParser) parseImportSection(section []byte) error {
-	reader := wasmSectionReader{data: section}
-	count, ok := reader.readU32()
-	if !ok {
-		return errors.New("invalid wasm import count")
-	}
-	for i := uint32(0); i < count; i++ {
-		if _, ok := reader.readName(); !ok {
-			return errors.New("invalid wasm import module name")
-		}
-		if _, ok := reader.readName(); !ok {
-			return errors.New("invalid wasm import name")
-		}
-		kind, ok := reader.readByte()
-		if !ok {
-			return errors.New("invalid wasm import kind")
-		}
-		switch kind {
-		case 0x00:
-			if _, ok := reader.readU32(); !ok {
-				return errors.New("invalid wasm imported function type")
-			}
-			p.importedFuncs++
-		case 0x01:
-			if _, ok := reader.readTableType(); !ok {
-				return errors.New("invalid wasm imported table type")
-			}
-		case 0x02:
-			if _, ok := reader.readLimits(); !ok {
-				return errors.New("invalid wasm imported memory type")
-			}
-		case 0x03:
-			if _, ok := reader.readGlobalType(); !ok {
-				return errors.New("invalid wasm imported global type")
-			}
-		default:
-			return errors.New("unsupported wasm import kind")
-		}
-	}
-	return nil
-}
-
-func (p *wasmModuleParser) parseExportSection(section []byte) error {
-	reader := wasmSectionReader{data: section}
-	count, ok := reader.readU32()
-	if !ok {
-		return errors.New("invalid wasm export count")
-	}
-	for i := uint32(0); i < count; i++ {
-		name, ok := reader.readName()
-		if !ok {
-			return errors.New("invalid wasm export name")
-		}
-		kind, ok := reader.readByte()
-		if !ok {
-			return errors.New("invalid wasm export kind")
-		}
-		index, ok := reader.readU32()
-		if !ok {
-			return errors.New("invalid wasm export index")
-		}
-		if kind == 0x00 {
-			p.exportedFuncs[name] = index
-		}
-	}
-	return nil
-}
-
-func (p *wasmModuleParser) parseCodeSection(section []byte) error {
-	reader := wasmSectionReader{data: section}
-	count, ok := reader.readU32()
-	if !ok {
-		return errors.New("invalid wasm code body count")
-	}
-	p.codeBodyFuelByID = make([]uint64, 0, count)
-	for i := uint32(0); i < count; i++ {
-		size, ok := reader.readU32()
-		if !ok {
-			return errors.New("invalid wasm code body size")
-		}
-		body, ok := reader.readBytes(size)
-		if !ok {
-			return errors.New("invalid wasm code body")
-		}
-		p.codeBodyFuelByID = append(p.codeBodyFuelByID, uint64(len(body))*wasmInstructionGas)
-	}
-	return nil
-}
-
-func (p *wasmModuleParser) readU32() (uint32, bool) {
-	reader := wasmSectionReader{data: p.data, offset: p.offset}
-	value, ok := reader.readU32()
-	p.offset = reader.offset
-	return value, ok
 }
 
 type wasmSectionReader struct {
@@ -473,6 +1111,9 @@ func (r *wasmSectionReader) readU32() (uint32, bool) {
 		if !ok {
 			return 0, false
 		}
+		if i == 4 && b&0xf0 != 0 {
+			return 0, false
+		}
 		result |= uint32(b&0x7f) << shift
 		if b&0x80 == 0 {
 			return result, true
@@ -480,6 +1121,30 @@ func (r *wasmSectionReader) readU32() (uint32, bool) {
 		shift += 7
 	}
 	return 0, false
+}
+
+func (r *wasmSectionReader) exhausted() bool {
+	return r.offset == len(r.data)
+}
+
+func (r *wasmSectionReader) readLimitBounds() (minimum uint32, maximum uint32, hasMaximum bool, ok bool) {
+	flag, ok := r.readByte()
+	if !ok {
+		return 0, 0, false, false
+	}
+	minimum, ok = r.readU32()
+	if !ok {
+		return 0, 0, false, false
+	}
+	switch flag {
+	case 0x00:
+		return minimum, 0, false, true
+	case 0x01:
+		maximum, ok = r.readU32()
+		return minimum, maximum, true, ok
+	default:
+		return 0, 0, false, false
+	}
 }
 
 func (r *wasmSectionReader) readLimits() (struct{}, bool) {

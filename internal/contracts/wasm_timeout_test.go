@@ -1,45 +1,49 @@
 package contracts
 
 import (
+	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	"chainlab/internal/state"
 )
 
-func TestWASMCallInterruptsInfiniteLoop(t *testing.T) {
+func TestWASMCallStopsInfiniteLoopWithDeterministicFuel(t *testing.T) {
 	creator := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	store := state.NewStore()
-	runtime := NewRuntime()
-
 	loopContract, err := NewWasmContract(wasmInfiniteLoopContractForTest())
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime.Register("wasm.loop.v1", loopContract)
 
-	addr, _, err := runtime.Deploy(store, creator, "wasm.loop.v1", "seed-loop", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	done := make(chan error, 1)
-	go func() {
-		_, _, callErr := runtime.CallMetered(store, addr, creator, "set", nil)
-		done <- callErr
-	}()
-
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Fatal("infinite loop wasm call returned nil error")
+	var firstGas uint64
+	for run := 0; run < 2; run++ {
+		store := state.NewStore()
+		runtime := NewRuntime()
+		runtime.Register("wasm.loop.v1", loopContract)
+		addr, _, err := runtime.Deploy(store, creator, "wasm.loop.v1", "seed-loop", nil)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if !strings.Contains(strings.ToLower(err.Error()), "wasm execution timeout") {
-			t.Fatalf("infinite loop wasm error = %q, want wasm execution timeout", err)
+
+		gasLimit := loopContract.resources.instantiationGas() + 500
+		if gasLimit <= loopContract.resources.instantiationGas() {
+			t.Fatal("loop test must reserve guest fuel after instantiation")
 		}
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("infinite loop wasm call did not return before timeout guard")
+		_, gasUsed, err := runtime.CallMeteredWithLimit(store, addr, creator, "set", nil, gasLimit)
+		if !errors.Is(err, ErrContractOutOfGas) {
+			t.Fatalf("infinite loop wasm error = %v, want contract out of gas", err)
+		}
+		if !strings.Contains(strings.ToLower(err.Error()), "out of gas") {
+			t.Fatalf("infinite loop wasm error = %q", err)
+		}
+		if gasUsed != gasLimit {
+			t.Fatalf("infinite loop gas used = %d, want %d", gasUsed, gasLimit)
+		}
+		if run == 0 {
+			firstGas = gasUsed
+		} else if gasUsed != firstGas {
+			t.Fatalf("infinite loop gas differs: first=%d second=%d", firstGas, gasUsed)
+		}
 	}
 }
 

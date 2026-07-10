@@ -65,6 +65,15 @@ func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, 
 	if err != nil {
 		return types.Receipt{}, err
 	}
+	if tx.GasLimit < baseGas {
+		return types.Receipt{}, errors.New("gas limit too low")
+	}
+	if tx.Type == types.TxBatch && len(tx.Batch) > types.MaxBatchOperations {
+		return types.Receipt{}, fmt.Errorf("batch exceeds %d operations", types.MaxBatchOperations)
+	}
+	if err := validateFeeCapacity(store, tx, context.BaseFeePerGas); err != nil {
+		return types.Receipt{}, err
+	}
 
 	working := store.Clone()
 	if err := working.IncrementNonce(tx.From); err != nil {
@@ -98,7 +107,8 @@ func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, 
 			"operations": strconv.Itoa(len(tx.Batch)),
 		}})
 		for index, operation := range tx.Batch {
-			events, operationGas, err := e.executeBatchOperation(working, tx, operation, index)
+			remainingGas := tx.GasLimit - gasUsed
+			events, operationGas, err := e.executeBatchOperation(working, tx, operation, index, remainingGas)
 			if err != nil {
 				return types.Receipt{}, err
 			}
@@ -269,15 +279,19 @@ func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, 
 			return types.Receipt{}, err
 		}
 		gasUsed = EstimateWASMUploadGas(bytecode)
-		if err := contracts.ValidateWasmCode(bytecode); err != nil {
+		if tx.GasLimit < gasUsed {
+			return types.Receipt{}, errors.New("gas limit too low")
+		}
+		if err := e.runtime.ValidateAndCacheWasmCode(bytecode); err != nil {
 			return types.Receipt{}, err
 		}
 		codeID := types.WASMCodeID(bytecode)
 		working.SetContractCode(types.ContractCode{
-			CodeID:   codeID,
-			Runtime:  "wasm",
-			Creator:  strings.ToLower(tx.From),
-			Bytecode: "0x" + hex.EncodeToString(bytecode),
+			CodeID:          codeID,
+			Runtime:         "wasm",
+			MeteringVersion: contracts.WASMMeteringVersion,
+			Creator:         strings.ToLower(tx.From),
+			Bytecode:        "0x" + hex.EncodeToString(bytecode),
 		})
 		receipt.CodeID = codeID
 		receipt.Events = append(receipt.Events, types.Event{Type: "wasm.code_uploaded", Attributes: map[string]string{
@@ -290,7 +304,8 @@ func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, 
 		if codeID == "" {
 			return types.Receipt{}, errors.New("deploy requires code_id")
 		}
-		address, events, resourceGas, err := e.runtime.DeployMetered(working, tx.From, codeID, tx.Hash(), tx.Payload)
+		resourceLimit := tx.GasLimit - gasUsed
+		address, events, resourceGas, err := e.runtime.DeployMeteredInTransaction(working, tx.From, codeID, tx.Hash(), tx.Payload, resourceLimit)
 		if err != nil {
 			return types.Receipt{}, err
 		}
@@ -305,7 +320,8 @@ func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, 
 		if tx.To == "" || method == "" {
 			return types.Receipt{}, errors.New("call requires to and method")
 		}
-		events, resourceGas, err := e.runtime.CallMetered(working, tx.To, tx.From, method, tx.Payload)
+		resourceLimit := tx.GasLimit - gasUsed
+		events, resourceGas, err := e.runtime.CallMeteredInTransaction(working, tx.To, tx.From, method, tx.Payload, resourceLimit)
 		if err != nil {
 			return types.Receipt{}, err
 		}
@@ -332,20 +348,15 @@ func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, 
 	if err != nil {
 		return types.Receipt{}, err
 	}
-	feePayer := tx.From
+	feePayer := transactionFeePayer(tx)
 	if strings.TrimSpace(tx.Paymaster) != "" {
-		feePayer = tx.Paymaster
 		receipt.FeePayer = tx.Paymaster
 		receipt.Events = append(receipt.Events, types.Event{Type: "paymaster.sponsored", Attributes: map[string]string{
 			"user":      strings.ToLower(tx.From),
 			"paymaster": strings.ToLower(tx.Paymaster),
 		}})
-	} else if tx.Type == types.TxAccountRecovery {
-		action, _ := accountRecoveryAction(tx.Payload)
-		if action == "approve" || action == "execute" {
-			feePayer = strings.ToLower(strings.TrimSpace(tx.Signer))
-			receipt.FeePayer = feePayer
-		}
+	} else if feePayer != strings.ToLower(strings.TrimSpace(tx.From)) {
+		receipt.FeePayer = feePayer
 	}
 	if err := e.chargeFee(working, feePayer, fee.TotalFee, fee.PriorityFee); err != nil {
 		return types.Receipt{}, err
@@ -359,17 +370,20 @@ func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, 
 	return receipt, nil
 }
 
-func (e *Executor) executeBatchOperation(store *state.Store, tx types.Transaction, operation types.BatchOperation, index int) ([]types.Event, uint64, error) {
+func (e *Executor) executeBatchOperation(store *state.Store, tx types.Transaction, operation types.BatchOperation, index int, gasLimit uint64) ([]types.Event, uint64, error) {
 	switch operation.Type {
 	case types.TxTransfer:
 		if strings.TrimSpace(operation.To) == "" {
 			return nil, 0, fmt.Errorf("batch operation %d transfer requires to", index)
 		}
-		if err := store.Transfer(tx.From, operation.To, operation.Value); err != nil {
-			return nil, 0, err
-		}
 		gas, err := EstimateGas(types.TxTransfer)
 		if err != nil {
+			return nil, 0, err
+		}
+		if gasLimit < gas {
+			return nil, 0, errors.New("gas limit too low")
+		}
+		if err := store.Transfer(tx.From, operation.To, operation.Value); err != nil {
 			return nil, 0, err
 		}
 		return []types.Event{{
@@ -385,11 +399,14 @@ func (e *Executor) executeBatchOperation(store *state.Store, tx types.Transactio
 		if strings.TrimSpace(operation.To) == "" || strings.TrimSpace(method) == "" {
 			return nil, 0, fmt.Errorf("batch operation %d call requires to and method", index)
 		}
-		events, resourceGas, err := e.runtime.CallMetered(store, operation.To, tx.From, method, operation.Payload)
+		gas, err := EstimateGas(types.TxCall)
 		if err != nil {
 			return nil, 0, err
 		}
-		gas, err := EstimateGas(types.TxCall)
+		if gasLimit < gas {
+			return nil, 0, errors.New("gas limit too low")
+		}
+		events, resourceGas, err := e.runtime.CallMeteredInTransaction(store, operation.To, tx.From, method, operation.Payload, gasLimit-gas)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -591,6 +608,69 @@ func feeCaps(tx types.Transaction) (uint64, uint64) {
 	return tx.MaxFeePerGas, tx.MaxPriorityFeePerGas
 }
 
+func validateFeeCapacity(store *state.Store, tx types.Transaction, baseFeePerGas uint64) error {
+	if _, err := CalculateFee(tx, 0, baseFeePerGas); err != nil {
+		return err
+	}
+	maxFeePerGas, _ := feeCaps(tx)
+	maximumFee, err := checkedMul(tx.GasLimit, maxFeePerGas)
+	if err != nil {
+		return err
+	}
+	feePayer := transactionFeePayer(tx)
+	feeBalance := store.GetAccount(feePayer).Balance
+	if feeBalance < maximumFee {
+		return errors.New("insufficient funds")
+	}
+	valueExposure, err := transactionValueExposure(tx)
+	if err != nil {
+		return err
+	}
+	if feePayer == strings.ToLower(strings.TrimSpace(tx.From)) {
+		if valueExposure > feeBalance-maximumFee {
+			return errors.New("insufficient funds")
+		}
+	} else if store.GetAccount(tx.From).Balance < valueExposure {
+		return errors.New("insufficient funds")
+	}
+	return nil
+}
+
+func transactionValueExposure(tx types.Transaction) (uint64, error) {
+	switch tx.Type {
+	case types.TxTransfer, types.TxStake:
+		return tx.Value, nil
+	case types.TxBatch:
+		var total uint64
+		for _, operation := range tx.Batch {
+			if operation.Type != types.TxTransfer {
+				continue
+			}
+			var err error
+			total, err = checkedAdd(total, operation.Value)
+			if err != nil {
+				return 0, errors.New("batch value overflow")
+			}
+		}
+		return total, nil
+	default:
+		return 0, nil
+	}
+}
+
+func transactionFeePayer(tx types.Transaction) string {
+	if strings.TrimSpace(tx.Paymaster) != "" {
+		return strings.ToLower(strings.TrimSpace(tx.Paymaster))
+	}
+	if tx.Type == types.TxAccountRecovery {
+		action, _ := accountRecoveryAction(tx.Payload)
+		if action == "approve" || action == "execute" {
+			return strings.ToLower(strings.TrimSpace(tx.Signer))
+		}
+	}
+	return strings.ToLower(strings.TrimSpace(tx.From))
+}
+
 func (e *Executor) chargeFee(store *state.Store, from string, totalFee uint64, priorityFee uint64) error {
 	if totalFee == 0 {
 		return nil
@@ -640,6 +720,9 @@ func EstimateGas(txType types.TxType) (uint64, error) {
 func EstimateGasForBatch(batch []types.BatchOperation) (uint64, error) {
 	if len(batch) == 0 {
 		return 0, errors.New("batch requires at least one operation")
+	}
+	if len(batch) > types.MaxBatchOperations {
+		return 0, fmt.Errorf("batch exceeds %d operations", types.MaxBatchOperations)
 	}
 	total, err := EstimateGas(types.TxBatch)
 	if err != nil {
@@ -760,7 +843,11 @@ func parseWASMUploadPayload(payload map[string]string) ([]byte, error) {
 	if raw == "" {
 		return nil, errors.New("wasm upload requires bytecode")
 	}
-	bytecode, err := hex.DecodeString(strings.TrimPrefix(raw, "0x"))
+	raw = strings.TrimPrefix(raw, "0x")
+	if len(raw) > contracts.MaxWASMModuleBytes*2 {
+		return nil, fmt.Errorf("wasm module size exceeds %d bytes", contracts.MaxWASMModuleBytes)
+	}
+	bytecode, err := hex.DecodeString(raw)
 	if err != nil {
 		return nil, fmt.Errorf("invalid wasm bytecode hex: %w", err)
 	}

@@ -7,6 +7,7 @@ import (
 const (
 	DefaultBlockGasLimit uint64 = 30_000_000
 	InitialBaseFeePerGas uint64 = 1
+	MaxBatchOperations          = 128
 )
 
 type TxType string
@@ -129,10 +130,11 @@ type Receipt struct {
 }
 
 type ContractCode struct {
-	CodeID   string `json:"code_id"`
-	Runtime  string `json:"runtime"`
-	Creator  string `json:"creator"`
-	Bytecode string `json:"bytecode"`
+	CodeID          string `json:"code_id"`
+	Runtime         string `json:"runtime"`
+	MeteringVersion string `json:"metering_version"`
+	Creator         string `json:"creator"`
+	Bytecode        string `json:"bytecode"`
 }
 
 type TransactionRecord struct {

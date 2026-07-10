@@ -1,11 +1,87 @@
 package contracts_test
 
 import (
+	"errors"
 	"testing"
 
 	"chainlab/internal/contracts"
 	"chainlab/internal/state"
+	"chainlab/internal/types"
 )
+
+var errMutatingContract = errors.New("mutating contract failed")
+
+type mutatingContract struct{}
+
+func (mutatingContract) Deploy(ctx contracts.Context, _ map[string]string) ([]types.Event, error) {
+	ctx.Store.SetStorage(ctx.Address, "partial", "deploy")
+	return nil, errMutatingContract
+}
+
+func (mutatingContract) Call(ctx contracts.Context, _ string, _ map[string]string) ([]types.Event, error) {
+	ctx.Store.SetStorage(ctx.Address, "partial", "call")
+	return nil, errMutatingContract
+}
+
+func (mutatingContract) Read(ctx contracts.Context, _ string, _ map[string]string) (string, error) {
+	ctx.Store.SetStorage(ctx.Address, "partial", "read")
+	return "mutated", nil
+}
+
+type callFailingContract struct{}
+
+func (callFailingContract) Deploy(ctx contracts.Context, _ map[string]string) ([]types.Event, error) {
+	ctx.Store.SetStorage(ctx.Address, "ready", "true")
+	return nil, nil
+}
+
+func (callFailingContract) Call(ctx contracts.Context, _ string, _ map[string]string) ([]types.Event, error) {
+	ctx.Store.SetStorage(ctx.Address, "partial", "call")
+	return nil, errMutatingContract
+}
+
+func (callFailingContract) Read(ctx contracts.Context, _ string, _ map[string]string) (string, error) {
+	ctx.Store.SetStorage(ctx.Address, "partial", "read")
+	return "mutated", nil
+}
+
+func TestRuntimeContractFailuresAndReadsAreAtomic(t *testing.T) {
+	creator := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	store := state.NewStore()
+	runtime := contracts.NewRuntime()
+	runtime.Register("mutating.deploy.v1", mutatingContract{})
+	rootBefore := store.Root()
+	if _, _, err := runtime.Deploy(store, creator, "mutating.deploy.v1", "seed", nil); !errors.Is(err, errMutatingContract) {
+		t.Fatalf("mutating deploy error = %v", err)
+	}
+	if got := store.Root(); got != rootBefore {
+		t.Fatalf("failed deploy changed root: before=%s after=%s", rootBefore, got)
+	}
+
+	runtime.Register("mutating.call.v1", callFailingContract{})
+	address, _, err := runtime.Deploy(store, creator, "mutating.call.v1", "seed", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootBefore = store.Root()
+	if _, err := runtime.Call(store, address, creator, "fail", nil); !errors.Is(err, errMutatingContract) {
+		t.Fatalf("mutating call error = %v", err)
+	}
+	if got := store.Root(); got != rootBefore {
+		t.Fatalf("failed call changed root: before=%s after=%s", rootBefore, got)
+	}
+
+	value, err := runtime.Read(store, address, creator, "mutate", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value != "mutated" {
+		t.Fatalf("read value = %q", value)
+	}
+	if got := store.Root(); got != rootBefore {
+		t.Fatalf("read changed root: before=%s after=%s", rootBefore, got)
+	}
+}
 
 func TestCounterContract(t *testing.T) {
 	store := state.NewStore()

@@ -3,6 +3,8 @@ package contracts
 import (
 	"testing"
 
+	wasmtime "github.com/bytecodealliance/wasmtime-go/v46"
+
 	"chainlab/internal/state"
 )
 
@@ -11,11 +13,11 @@ func TestWASMCallGasChargesInstructionFuel(t *testing.T) {
 	store := state.NewStore()
 	runtime := NewRuntime()
 
-	emptyContract, err := NewWasmContract(wasmNoopContractForTest(0))
+	emptyContract, err := NewWasmContract(wasmComputeContractForTest(0))
 	if err != nil {
 		t.Fatal(err)
 	}
-	heavyContract, err := NewWasmContract(wasmNoopContractForTest(128))
+	heavyContract, err := NewWasmContract(wasmComputeContractForTest(128))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,10 +47,40 @@ func TestWASMCallGasChargesInstructionFuel(t *testing.T) {
 	}
 }
 
-func wasmNoopContractForTest(noops int) []byte {
-	call := make([]byte, 0, noops+1)
-	for i := 0; i < noops; i++ {
-		call = append(call, 0x01)
+func TestWASMInstantiationGasPricesDeclaredResources(t *testing.T) {
+	code, err := wasmtime.Wat2Wasm(`
+(module
+  (table 3 3 funcref)
+  (memory (export "memory") 2 2)
+  (func (export "deploy"))
+  (func (export "call"))
+  (func (export "read")))`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contract, err := NewWasmContract(code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const wantCodeBytes = 80
+	const wantInstantiationGas = 2210
+	if len(code) != wantCodeBytes || contract.resources.instantiationGas() != wantInstantiationGas {
+		t.Fatalf("version-1 instantiation vector changed: code_bytes=%d gas=%d", len(code), contract.resources.instantiationGas())
+	}
+	if contract.resources.codeBytes != uint64(len(code)) || contract.resources.memoryPages != 2 || contract.resources.tableElements != 3 {
+		t.Fatalf("module resources = %+v, code bytes=%d", contract.resources, len(code))
+	}
+	want := wasmInstantiateGas + uint64(len(code))*wasmInstantiationByteGas +
+		2*wasmMemoryPageGas + 3*wasmTableElementGas
+	if got := contract.resources.instantiationGas(); got != want {
+		t.Fatalf("instantiation gas = %d, want %d", got, want)
+	}
+}
+
+func wasmComputeContractForTest(operations int) []byte {
+	call := make([]byte, 0, operations*3+1)
+	for i := 0; i < operations; i++ {
+		call = append(call, 0x41, 0x00, 0x1a)
 	}
 	call = append(call, 0x0b)
 
