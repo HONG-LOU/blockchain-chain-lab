@@ -95,7 +95,7 @@ git diff --check
 
 The race run covered every package. The demo completed at height 21 with transfer, sponsored transfer, batch, smart account, multisig, native contracts, WASM, staking, and governance results intact. `govulncheck` initially found 15 reachable standard-library vulnerabilities under Go 1.25.5; raising the enforced minimum to Go 1.25.12 reduced the result to zero reachable vulnerabilities. It still reported 17 advisories in required modules whose vulnerable symbols are not called.
 
-The earlier account-recovery milestone was recorded in the Obsidian diary and `ota/chainlab-production-chain.md` project record as notes commit `d4ddad6`. The current runtime/txpool milestone will be recorded after its implementation commits.
+The earlier account-recovery milestone was recorded in the Obsidian diary and `ota/chainlab-production-chain.md` project record as notes commit `d4ddad6`. This runtime/txpool milestone and its remaining production gates were committed and pushed as notes commit `d5ddb2e`.
 
 ## Current Production Blockers
 

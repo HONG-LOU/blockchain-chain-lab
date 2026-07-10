@@ -55,7 +55,7 @@ admission, bounded host resources, read isolation, and atomic direct calls.
 - [ ] Version and meter native-contract work, and define charged failed-
   transaction receipts so signed OOG/trap calls cannot be replayed for free.
 - [x] Commit the implementation in reviewable commits.
-- [ ] Write the Obsidian diary and ChainLab project record, commit them, and
+- [x] Write the Obsidian diary and ChainLab project record, commit them, and
   push the notes repository.
 
 ## Explicit Non-Goals
