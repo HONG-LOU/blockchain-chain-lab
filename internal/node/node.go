@@ -38,7 +38,8 @@ type Node struct {
 	proposerKey       chaincrypto.PrivateKey
 	proposer          string
 	state             *state.Store
-	executor          *core.Executor
+	runtime           *contracts.Runtime
+	executor          transactionExecutor
 	consensus         *consensus.POA
 	blocks            []types.Block
 	genesisState      state.Snapshot
@@ -52,6 +53,11 @@ type Node struct {
 	eventIndex        []types.EventRecord
 	dataDir           string
 	blockGasLimit     uint64
+	haltErr           error
+}
+
+type transactionExecutor interface {
+	ExecuteWithContext(*state.Store, types.Transaction, core.ExecutionContext) (types.Receipt, error)
 }
 
 type finalityVoteRecord struct {
@@ -67,6 +73,12 @@ const (
 	DefaultMaxPriorityFeePerGas uint64 = 1
 	baseFeeChangeDenominator    uint64 = 8
 	txpoolReplacementPriceBump  uint64 = 10
+	maxTransactionBytes                = 2 * 1024 * 1024
+	maxTxPoolBytes                     = 128 * 1024 * 1024
+	maxTxPoolTransactions              = 4096
+	maxQueuedTransactions              = 2048
+	maxTransactionsPerSender           = 64
+	maxQueuedNonceGap           uint64 = 64
 )
 
 var errReplacementTransactionUnderpriced = errors.New("replacement transaction underpriced")
@@ -140,16 +152,18 @@ func New(config Config) (*Node, error) {
 	if blockGasLimit == 0 {
 		blockGasLimit = DefaultBlockGasLimit
 	}
-	feeCollector := config.FeeCollector
-	if feeCollector == "" {
-		feeCollector = proposer
+	if configured := normalizedAddress(config.FeeCollector); configured != "" && configured != proposer {
+		return nil, errors.New("fee collector must equal the block proposer")
 	}
+	feeCollector := proposer
 
+	runtime := contracts.NewRuntimeWithDefaults()
 	n := &Node{
 		chainID:           config.ChainID,
 		proposerKey:       config.ProposerKey,
 		proposer:          proposer,
-		executor:          core.NewExecutor(config.ChainID, feeCollector, contracts.NewRuntimeWithDefaults()),
+		runtime:           runtime,
+		executor:          core.NewExecutor(config.ChainID, feeCollector, runtime),
 		consensus:         consensus.NewPOA(validators),
 		knownBlocks:       make(map[string]types.Block),
 		finalityVotes:     make(map[string]map[string]types.FinalitySignature),
@@ -183,6 +197,11 @@ func New(config Config) (*Node, error) {
 			n.blocks = append([]types.Block(nil), loaded.Blocks...)
 			if len(n.blocks) == 0 {
 				return nil, errors.New("persisted chain has no blocks")
+			}
+			for _, block := range n.blocks {
+				if block.Header.GasLimit != blockGasLimit {
+					return nil, errors.New("persisted block gas limit does not match config")
+				}
 			}
 			for _, block := range loaded.KnownBlocks {
 				n.knownBlocks[block.Hash()] = block
@@ -237,6 +256,9 @@ func (n *Node) SubmitTx(tx types.Transaction) error {
 func (n *Node) RequestFaucet(to string, amount uint64) (types.Transaction, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	if n.haltErr != nil {
+		return types.Transaction{}, fmt.Errorf("node halted after runtime fault: %w", n.haltErr)
+	}
 
 	to = strings.TrimSpace(to)
 	if to == "" {
@@ -248,6 +270,7 @@ func (n *Node) RequestFaucet(to string, amount uint64) (types.Transaction, error
 
 	working, err := n.pendingStateLocked()
 	if err != nil {
+		n.recordRuntimeFaultLocked(err)
 		return types.Transaction{}, err
 	}
 	account := working.GetAccount(n.proposer)
@@ -272,26 +295,63 @@ func (n *Node) RequestFaucet(to string, amount uint64) (types.Transaction, error
 	return tx, nil
 }
 
-func (n *Node) submitTxLocked(tx types.Transaction) error {
+func (n *Node) submitTxLocked(tx types.Transaction) (err error) {
+	if n.haltErr != nil {
+		return fmt.Errorf("node halted after runtime fault: %w", n.haltErr)
+	}
+	defer func() {
+		n.recordRuntimeFaultLocked(err)
+	}()
+	tx = cloneTransaction(tx)
+	txSize := uint64(len(hash.MustCanonicalBytes(tx)))
+	if txSize > maxTransactionBytes {
+		return fmt.Errorf("transaction exceeds %d bytes", maxTransactionBytes)
+	}
+	if tx.GasLimit > n.blockGasLimit {
+		return fmt.Errorf("transaction gas limit exceeds block gas limit %d", n.blockGasLimit)
+	}
 	pendingReplacementIndex := transactionReplacementIndex(n.mempool, tx)
+	queuedReplacementIndex := transactionReplacementIndex(n.queued, tx)
 	if pendingReplacementIndex >= 0 {
 		if err := canReplacePendingTransaction(n.mempool[pendingReplacementIndex], tx); err != nil {
 			return err
 		}
-		if err := n.validateMempoolWithReplacementLocked(pendingReplacementIndex, tx); err != nil {
+		if err := n.validateReplacementTxPoolBytesLocked(n.mempool[pendingReplacementIndex], txSize); err != nil {
 			return err
 		}
-		n.mempool[pendingReplacementIndex] = tx
+		candidateMempool := append([]types.Transaction(nil), n.mempool...)
+		candidateMempool[pendingReplacementIndex] = tx
+		blockHeight := n.blocks[len(n.blocks)-1].Header.Height + 1
+		baseFee := n.nextBaseFeeLocked()
+		nextMempool, nextQueued, err := n.promoteQueuedForState(
+			n.state,
+			candidateMempool,
+			n.queued,
+			blockHeight,
+			baseFee,
+		)
+		if err != nil {
+			return err
+		}
+		n.mempool = nextMempool
+		n.queued = nextQueued
 		return nil
+	}
+	if queuedReplacementIndex < 0 {
+		if err := n.validateNewTxPoolCapacityLocked(tx, txSize); err != nil {
+			return err
+		}
 	}
 
 	working, err := n.pendingStateLocked()
 	if err != nil {
 		return err
 	}
-	queuedReplacementIndex := transactionReplacementIndex(n.queued, tx)
 	if queuedReplacementIndex >= 0 {
 		if err := canReplacePendingTransaction(n.queued[queuedReplacementIndex], tx); err != nil {
+			return err
+		}
+		if err := n.validateReplacementTxPoolBytesLocked(n.queued[queuedReplacementIndex], txSize); err != nil {
 			return err
 		}
 		if err := n.submitQueuedReplacementLocked(queuedReplacementIndex, tx, working); err != nil {
@@ -304,6 +364,12 @@ func (n *Node) submitTxLocked(tx types.Transaction) error {
 	baseFee := n.nextBaseFeeLocked()
 	pendingAccount := working.GetAccount(tx.From)
 	if tx.Nonce > pendingAccount.Nonce {
+		if tx.Nonce-pendingAccount.Nonce > maxQueuedNonceGap {
+			return fmt.Errorf("transaction nonce gap exceeds %d", maxQueuedNonceGap)
+		}
+		if len(n.queued) >= maxQueuedTransactions {
+			return fmt.Errorf("queued transaction limit %d reached", maxQueuedTransactions)
+		}
 		if err := n.validateQueuedTransactionLocked(tx, working); err != nil {
 			return err
 		}
@@ -313,34 +379,116 @@ func (n *Node) submitTxLocked(tx types.Transaction) error {
 	if _, err := n.executor.ExecuteWithContext(working, tx, core.ExecutionContext{BlockHeight: blockHeight, BaseFeePerGas: baseFee}); err != nil {
 		return err
 	}
-	n.mempool = append(n.mempool, tx)
-	n.promoteQueuedLocked()
+	candidateMempool := append([]types.Transaction(nil), n.mempool...)
+	candidateMempool = append(candidateMempool, tx)
+	nextMempool, nextQueued, err := n.promoteQueuedForState(
+		n.state,
+		candidateMempool,
+		n.queued,
+		blockHeight,
+		baseFee,
+	)
+	if err != nil {
+		return err
+	}
+	n.mempool = nextMempool
+	n.queued = nextQueued
 	return nil
+}
+
+func (n *Node) validateNewTxPoolCapacityLocked(tx types.Transaction, txSize uint64) error {
+	if len(n.mempool)+len(n.queued) >= maxTxPoolTransactions {
+		return fmt.Errorf("transaction pool limit %d reached", maxTxPoolTransactions)
+	}
+	currentBytes := n.txPoolBytesLocked()
+	if currentBytes >= maxTxPoolBytes || txSize > maxTxPoolBytes-currentBytes {
+		return fmt.Errorf("transaction pool byte limit %d reached", maxTxPoolBytes)
+	}
+	from := normalizedAddress(tx.From)
+	count := 0
+	for _, existing := range n.mempool {
+		if normalizedAddress(existing.From) == from {
+			count++
+		}
+	}
+	for _, existing := range n.queued {
+		if normalizedAddress(existing.From) == from {
+			count++
+		}
+	}
+	if count >= maxTransactionsPerSender {
+		return fmt.Errorf("sender transaction limit %d reached", maxTransactionsPerSender)
+	}
+	return nil
+}
+
+func (n *Node) validateReplacementTxPoolBytesLocked(previous types.Transaction, replacementSize uint64) error {
+	previousSize := uint64(len(hash.MustCanonicalBytes(previous)))
+	currentSize := n.txPoolBytesLocked()
+	if currentSize < previousSize {
+		return errors.New("transaction pool byte accounting underflow")
+	}
+	retainedSize := currentSize - previousSize
+	if retainedSize >= maxTxPoolBytes || replacementSize > maxTxPoolBytes-retainedSize {
+		return fmt.Errorf("transaction pool byte limit %d reached", maxTxPoolBytes)
+	}
+	return nil
+}
+
+func (n *Node) txPoolBytesLocked() uint64 {
+	var total uint64
+	for _, tx := range n.mempool {
+		total += uint64(len(hash.MustCanonicalBytes(tx)))
+	}
+	for _, tx := range n.queued {
+		total += uint64(len(hash.MustCanonicalBytes(tx)))
+	}
+	return total
 }
 
 func (n *Node) ProduceBlock() (types.Block, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	if n.haltErr != nil {
+		return types.Block{}, fmt.Errorf("node halted after runtime fault: %w", n.haltErr)
+	}
 
 	working := n.state.Clone()
 	receipts := make([]types.Receipt, 0, len(n.mempool))
+	included := make([]types.Transaction, 0, len(n.mempool))
+	remaining := make([]types.Transaction, 0, len(n.mempool))
 	parent := n.blocks[len(n.blocks)-1]
 	blockHeight := parent.Header.Height + 1
 	baseFee := n.nextBaseFeeLocked()
 	var gasUsed uint64
-	for _, tx := range n.mempool {
-		receipt, err := n.executor.ExecuteWithContext(working, tx, core.ExecutionContext{BlockHeight: blockHeight, BaseFeePerGas: baseFee})
+	blockFull := false
+	for index, tx := range n.mempool {
+		if blockFull {
+			remaining = append(remaining, n.mempool[index:]...)
+			break
+		}
+		candidate := working.Clone()
+		receipt, err := n.executor.ExecuteWithContext(candidate, tx, core.ExecutionContext{BlockHeight: blockHeight, BaseFeePerGas: baseFee})
 		if err != nil {
-			return types.Block{}, err
+			if errors.Is(err, contracts.ErrWasmRuntimeFault) {
+				n.recordRuntimeFaultLocked(err)
+				return types.Block{}, err
+			}
+			remaining = append(remaining, tx)
+			continue
 		}
 		nextGasUsed, err := checkedAdd(gasUsed, receipt.GasUsed)
 		if err != nil {
 			return types.Block{}, err
 		}
 		if nextGasUsed > n.blockGasLimit {
-			return types.Block{}, errors.New("block gas limit exceeded")
+			remaining = append(remaining, tx)
+			blockFull = true
+			continue
 		}
+		working = candidate
 		gasUsed = nextGasUsed
+		included = append(included, tx)
 		receipts = append(receipts, receipt)
 	}
 
@@ -354,12 +502,46 @@ func (n *Node) ProduceBlock() (types.Block, error) {
 			GasLimit:      n.blockGasLimit,
 			GasUsed:       gasUsed,
 			BaseFeePerGas: baseFee,
-			TxRoot:        types.TransactionRoot(n.mempool),
+			TxRoot:        types.TransactionRoot(included),
 			ReceiptRoot:   types.ReceiptRoot(receipts),
 			StateRoot:     working.Root(),
 		},
-		Transactions: append([]types.Transaction(nil), n.mempool...),
+		Transactions: append([]types.Transaction(nil), included...),
 		Receipts:     receipts,
+	}
+	nextMempool, demoted, err := n.revalidateMempoolForState(
+		working,
+		remaining,
+		blockHeight+1,
+		NextBaseFee(block, n.blockGasLimit),
+	)
+	if err != nil {
+		n.recordRuntimeFaultLocked(err)
+		return types.Block{}, err
+	}
+	candidateQueued := append([]types.Transaction(nil), n.queued...)
+	candidateQueued = append(candidateQueued, demoted...)
+	candidateQueued, err = n.revalidateQueuedForState(
+		working,
+		nextMempool,
+		candidateQueued,
+		blockHeight+1,
+		NextBaseFee(block, n.blockGasLimit),
+	)
+	if err != nil {
+		n.recordRuntimeFaultLocked(err)
+		return types.Block{}, err
+	}
+	nextMempool, candidateQueued, err = n.promoteQueuedForState(
+		working,
+		nextMempool,
+		candidateQueued,
+		blockHeight+1,
+		NextBaseFee(block, n.blockGasLimit),
+	)
+	if err != nil {
+		n.recordRuntimeFaultLocked(err)
+		return types.Block{}, err
 	}
 	if err := consensus.SignBlock(n.proposerKey, &block); err != nil {
 		return types.Block{}, err
@@ -368,22 +550,110 @@ func (n *Node) ProduceBlock() (types.Block, error) {
 		return types.Block{}, err
 	}
 
-	n.state.ReplaceWith(working)
-	n.refreshConsensusLocked()
-	n.blocks = append(n.blocks, block)
-	n.knownBlocks[block.Hash()] = block
-	n.indexBlock(block)
-	n.mempool = nil
-	n.promoteQueuedLocked()
-	if err := n.persistLocked(); err != nil {
+	blockHash := block.Hash()
+	candidateBlocks := append([]types.Block(nil), n.blocks...)
+	candidateBlocks = append(candidateBlocks, block)
+	n.knownBlocks[blockHash] = block
+	if err := n.persistCandidateLocked(working, candidateBlocks); err != nil {
+		delete(n.knownBlocks, blockHash)
 		return types.Block{}, err
 	}
-	return block, nil
+	n.state.ReplaceWith(working)
+	n.refreshConsensusLocked()
+	n.blocks = candidateBlocks
+	n.indexBlock(block)
+	n.mempool = nextMempool
+	n.queued = candidateQueued
+	return cloneBlock(block), nil
+}
+
+func (n *Node) revalidateMempoolForState(base *state.Store, txs []types.Transaction, blockHeight uint64, baseFee uint64) ([]types.Transaction, []types.Transaction, error) {
+	working := base.Clone()
+	pending := make([]types.Transaction, 0, len(txs))
+	demoted := make([]types.Transaction, 0)
+	for _, tx := range txs {
+		account := working.GetAccount(tx.From)
+		if tx.Nonce > account.Nonce {
+			demoted = append(demoted, tx)
+			continue
+		}
+		if tx.Nonce < account.Nonce {
+			continue
+		}
+		if _, err := n.executor.ExecuteWithContext(working, tx, core.ExecutionContext{BlockHeight: blockHeight, BaseFeePerGas: baseFee}); err != nil {
+			if errors.Is(err, contracts.ErrWasmRuntimeFault) {
+				return nil, nil, err
+			}
+			continue
+		}
+		pending = append(pending, tx)
+	}
+	return pending, demoted, nil
+}
+
+func (n *Node) revalidateQueuedForState(base *state.Store, mempool []types.Transaction, queued []types.Transaction, blockHeight uint64, baseFee uint64) ([]types.Transaction, error) {
+	working := base.Clone()
+	poolBytes := uint64(0)
+	senderCounts := make(map[string]int)
+	for _, tx := range mempool {
+		if _, err := n.executor.ExecuteWithContext(working, tx, core.ExecutionContext{BlockHeight: blockHeight, BaseFeePerGas: baseFee}); err != nil {
+			return nil, err
+		}
+		poolBytes += uint64(len(hash.MustCanonicalBytes(tx)))
+		senderCounts[normalizedAddress(tx.From)]++
+	}
+
+	type senderNonce struct {
+		sender string
+		nonce  uint64
+	}
+	seen := make(map[senderNonce]struct{})
+	validated := make([]types.Transaction, 0, min(len(queued), maxQueuedTransactions))
+	for _, tx := range queued {
+		sender := normalizedAddress(tx.From)
+		key := senderNonce{sender: sender, nonce: tx.Nonce}
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		account := working.GetAccount(tx.From)
+		if tx.Nonce < account.Nonce {
+			continue
+		}
+		if tx.Nonce > account.Nonce && tx.Nonce-account.Nonce > maxQueuedNonceGap {
+			continue
+		}
+		if len(validated) >= maxQueuedTransactions || len(mempool)+len(validated) >= maxTxPoolTransactions || senderCounts[sender] >= maxTransactionsPerSender {
+			continue
+		}
+		txSize := uint64(len(hash.MustCanonicalBytes(tx)))
+		if poolBytes >= maxTxPoolBytes || txSize > maxTxPoolBytes-poolBytes {
+			continue
+		}
+		check := working.Clone()
+		if tx.Nonce > account.Nonce {
+			check.SetNonce(tx.From, tx.Nonce)
+		}
+		if _, err := n.executor.ExecuteWithContext(check, tx, core.ExecutionContext{BlockHeight: blockHeight, BaseFeePerGas: baseFee}); err != nil {
+			if errors.Is(err, contracts.ErrWasmRuntimeFault) {
+				return nil, err
+			}
+			continue
+		}
+		seen[key] = struct{}{}
+		validated = append(validated, tx)
+		poolBytes += txSize
+		senderCounts[sender]++
+	}
+	return validated, nil
 }
 
 func (n *Node) ImportBlock(block types.Block) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	if n.haltErr != nil {
+		return fmt.Errorf("node halted after runtime fault: %w", n.haltErr)
+	}
+	block = cloneBlock(block)
 
 	if block.Header.ChainID != n.chainID {
 		return errors.New("imported block chain id does not match node")
@@ -398,32 +668,92 @@ func (n *Node) ImportBlock(block types.Block) error {
 	}
 	parentState, err := n.replayStateLocked(parent.Hash())
 	if err != nil {
+		n.recordRuntimeFaultLocked(err)
 		return err
 	}
 	if _, err := n.validateBlockOnStateLocked(parent, parentState, block); err != nil {
+		n.recordRuntimeFaultLocked(err)
 		return err
 	}
 
 	n.knownBlocks[blockHash] = block
+	candidateState := n.state
+	candidateBlocks := n.blocks
+	nextMempool := n.mempool
+	nextQueued := n.queued
+	canonicalChange := false
 	if block.Header.Height > n.blocks[len(n.blocks)-1].Header.Height {
 		chain, working, err := n.replayKnownChainLocked(blockHash)
 		if err != nil {
+			n.recordRuntimeFaultLocked(err)
+			delete(n.knownBlocks, blockHash)
 			return err
 		}
-		n.blocks = chain
-		n.state.ReplaceWith(working)
+		included := transactionHashSet(transactionsInBlocks(chain))
+		candidateMempool := filterTransactionsByHash(n.mempool, included)
+		candidateQueued := filterTransactionsByHash(n.queued, included)
+		head := chain[len(chain)-1]
+		candidateMempool, demoted, err := n.revalidateMempoolForState(
+			working,
+			candidateMempool,
+			head.Header.Height+1,
+			NextBaseFee(head, n.blockGasLimit),
+		)
+		if err != nil {
+			n.recordRuntimeFaultLocked(err)
+			delete(n.knownBlocks, blockHash)
+			return err
+		}
+		candidateQueued = append(candidateQueued, demoted...)
+		candidateQueued, err = n.revalidateQueuedForState(
+			working,
+			candidateMempool,
+			candidateQueued,
+			head.Header.Height+1,
+			NextBaseFee(head, n.blockGasLimit),
+		)
+		if err != nil {
+			n.recordRuntimeFaultLocked(err)
+			delete(n.knownBlocks, blockHash)
+			return err
+		}
+		candidateMempool, candidateQueued, err = n.promoteQueuedForState(
+			working,
+			candidateMempool,
+			candidateQueued,
+			head.Header.Height+1,
+			NextBaseFee(head, n.blockGasLimit),
+		)
+		if err != nil {
+			n.recordRuntimeFaultLocked(err)
+			delete(n.knownBlocks, blockHash)
+			return err
+		}
+		candidateState = working
+		candidateBlocks = chain
+		nextMempool = candidateMempool
+		nextQueued = candidateQueued
+		canonicalChange = true
+	}
+	if err := n.persistCandidateLocked(candidateState, candidateBlocks); err != nil {
+		delete(n.knownBlocks, blockHash)
+		return err
+	}
+	if canonicalChange {
+		n.blocks = candidateBlocks
+		n.state.ReplaceWith(candidateState)
 		n.refreshConsensusLocked()
 		n.rebuildTxIndex()
-		n.removeMempoolTransactions(transactionsInBlocks(chain))
-		n.promoteQueuedLocked()
+		n.mempool = nextMempool
+		n.queued = nextQueued
 	}
-	return n.persistLocked()
+	return nil
 }
 
 func (n *Node) Head() types.Block {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	return n.blocks[len(n.blocks)-1]
+	return cloneBlock(n.blocks[len(n.blocks)-1])
 }
 
 func (n *Node) Block(height uint64) (types.Block, bool) {
@@ -432,19 +762,25 @@ func (n *Node) Block(height uint64) (types.Block, bool) {
 	if height >= uint64(len(n.blocks)) {
 		return types.Block{}, false
 	}
-	return n.blocks[height], true
+	return cloneBlock(n.blocks[height]), true
 }
 
 func (n *Node) BlockByHash(hash string) (types.Block, bool) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	block, ok := n.knownBlocks[strings.ToLower(strings.TrimSpace(hash))]
-	return block, ok
+	return cloneBlock(block), ok
 }
 
-func (n *Node) SubmitFinalityVote(vote types.FinalitySignature) error {
+func (n *Node) SubmitFinalityVote(vote types.FinalitySignature) (err error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	if n.haltErr != nil {
+		return fmt.Errorf("node halted after runtime fault: %w", n.haltErr)
+	}
+	defer func() {
+		n.recordRuntimeFaultLocked(err)
+	}()
 
 	vote.Validator = strings.ToLower(strings.TrimSpace(vote.Validator))
 	if vote.Validator == "" {
@@ -490,9 +826,16 @@ func (n *Node) SubmitFinalityVote(vote types.FinalitySignature) error {
 	if err := engine.ValidateBlock(parent, certified); err != nil {
 		return err
 	}
-	n.blocks[certified.Header.Height] = certified
+	candidateBlocks := append([]types.Block(nil), n.blocks...)
+	candidateBlocks[certified.Header.Height] = certified
+	previousKnown := n.knownBlocks[blockHash]
 	n.knownBlocks[blockHash] = certified
-	return n.persistLocked()
+	if err := n.persistCandidateLocked(n.state, candidateBlocks); err != nil {
+		n.knownBlocks[blockHash] = previousKnown
+		return err
+	}
+	n.blocks = candidateBlocks
+	return nil
 }
 
 func (n *Node) FinalityEvidence() []types.FinalityEquivocationEvidence {
@@ -557,7 +900,7 @@ func (n *Node) Transaction(hash string) (types.TransactionRecord, bool) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	record, ok := n.txIndex[hash]
-	return record, ok
+	return cloneTransactionRecord(record), ok
 }
 
 func (n *Node) Events(filter EventFilter) []types.EventRecord {
@@ -655,15 +998,15 @@ func (n *Node) Validators() []string {
 func (n *Node) Mempool() []types.Transaction {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	return append([]types.Transaction(nil), n.mempool...)
+	return cloneTransactions(n.mempool)
 }
 
 func (n *Node) TxPool() MempoolSnapshot {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	pending := append([]types.Transaction(nil), n.mempool...)
-	queued := append([]types.Transaction(nil), n.queued...)
+	pending := cloneTransactions(n.mempool)
+	queued := cloneTransactions(n.queued)
 	return MempoolSnapshot{
 		Pending:      pending,
 		Queued:       queued,
@@ -688,9 +1031,9 @@ func (n *Node) FeeMarket() FeeMarketSnapshot {
 
 func (n *Node) ReadContract(from string, to string, method string, args map[string]string) (string, error) {
 	n.mu.Lock()
-	defer n.mu.Unlock()
-	runtime := contracts.NewRuntimeWithDefaults()
-	return runtime.Read(n.state.Clone(), to, from, method, args)
+	working := n.state.Clone()
+	n.mu.Unlock()
+	return n.runtime.Read(working, to, from, method, args)
 }
 
 func (n *Node) Proposal(id string) types.Proposal {
@@ -743,7 +1086,11 @@ func (n *Node) matchFinalityVoteLocked(vote types.FinalitySignature) (types.Bloc
 
 func (n *Node) validatorsForBlockOrCurrentLocked(block types.Block) []string {
 	validators, err := n.validatorsForBlockLocked(block)
-	if err != nil || len(validators) == 0 {
+	if err != nil {
+		n.recordRuntimeFaultLocked(err)
+		return n.state.Validators()
+	}
+	if len(validators) == 0 {
 		return n.state.Validators()
 	}
 	return validators
@@ -950,33 +1297,27 @@ func transactionReplacementIndex(txs []types.Transaction, tx types.Transaction) 
 	return -1
 }
 
-func (n *Node) validateMempoolWithReplacementLocked(index int, replacement types.Transaction) error {
-	working := n.state.Clone()
-	blockHeight := n.blocks[len(n.blocks)-1].Header.Height + 1
-	baseFee := n.nextBaseFeeLocked()
-	for i, pending := range n.mempool {
-		candidate := pending
-		if i == index {
-			candidate = replacement
-		}
-		if _, err := n.executor.ExecuteWithContext(working, candidate, core.ExecutionContext{BlockHeight: blockHeight, BaseFeePerGas: baseFee}); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (n *Node) submitQueuedReplacementLocked(index int, replacement types.Transaction, working *state.Store) error {
 	pendingAccount := working.GetAccount(replacement.From)
 	if replacement.Nonce == pendingAccount.Nonce {
 		blockHeight := n.blocks[len(n.blocks)-1].Header.Height + 1
 		baseFee := n.nextBaseFeeLocked()
-		if _, err := n.executor.ExecuteWithContext(working, replacement, core.ExecutionContext{BlockHeight: blockHeight, BaseFeePerGas: baseFee}); err != nil {
+		candidateQueued := append([]types.Transaction(nil), n.queued...)
+		candidateQueued = append(candidateQueued[:index], candidateQueued[index+1:]...)
+		candidateMempool := append([]types.Transaction(nil), n.mempool...)
+		candidateMempool = append(candidateMempool, replacement)
+		nextMempool, nextQueued, err := n.promoteQueuedForState(
+			n.state,
+			candidateMempool,
+			candidateQueued,
+			blockHeight,
+			baseFee,
+		)
+		if err != nil {
 			return err
 		}
-		n.queued = append(n.queued[:index], n.queued[index+1:]...)
-		n.mempool = append(n.mempool, replacement)
-		n.promoteQueuedLocked()
+		n.mempool = nextMempool
+		n.queued = nextQueued
 		return nil
 	}
 	if replacement.Nonce < pendingAccount.Nonce {
@@ -1002,33 +1343,68 @@ func (n *Node) validateQueuedTransactionLocked(tx types.Transaction, working *st
 	return err
 }
 
-func (n *Node) promoteQueuedLocked() {
-	for {
-		working, err := n.pendingStateLocked()
-		if err != nil {
-			return
+func (n *Node) promoteQueuedForState(
+	base *state.Store,
+	mempool []types.Transaction,
+	queued []types.Transaction,
+	blockHeight uint64,
+	baseFee uint64,
+) ([]types.Transaction, []types.Transaction, error) {
+	working := base.Clone()
+	for _, tx := range mempool {
+		if _, err := n.executor.ExecuteWithContext(working, tx, core.ExecutionContext{BlockHeight: blockHeight, BaseFeePerGas: baseFee}); err != nil {
+			return nil, nil, err
 		}
-		blockHeight := n.blocks[len(n.blocks)-1].Header.Height + 1
-		baseFee := n.nextBaseFeeLocked()
+	}
+
+	nextMempool := append([]types.Transaction(nil), mempool...)
+	nextQueued := append([]types.Transaction(nil), queued...)
+	for {
+		filtered := nextQueued[:0]
+		for _, tx := range nextQueued {
+			if tx.Nonce < working.GetAccount(tx.From).Nonce {
+				continue
+			}
+			filtered = append(filtered, tx)
+		}
+		nextQueued = filtered
+		if len(nextQueued) > maxQueuedTransactions {
+			nextQueued = nextQueued[:maxQueuedTransactions]
+		}
+
 		promoted := false
-		for i, tx := range n.queued {
+		for i, tx := range nextQueued {
 			account := working.GetAccount(tx.From)
 			if tx.Nonce != account.Nonce {
 				continue
 			}
 			candidate := working.Clone()
 			if _, err := n.executor.ExecuteWithContext(candidate, tx, core.ExecutionContext{BlockHeight: blockHeight, BaseFeePerGas: baseFee}); err != nil {
+				if errors.Is(err, contracts.ErrWasmRuntimeFault) {
+					return nil, nil, err
+				}
 				continue
 			}
-			n.queued = append(n.queued[:i], n.queued[i+1:]...)
-			n.mempool = append(n.mempool, tx)
+			nextQueued = append(nextQueued[:i], nextQueued[i+1:]...)
+			nextMempool = append(nextMempool, tx)
+			working = candidate
 			promoted = true
 			break
 		}
 		if !promoted {
-			return
+			return nextMempool, nextQueued, nil
 		}
 	}
+}
+
+func (n *Node) recordRuntimeFaultLocked(err error) bool {
+	if !errors.Is(err, contracts.ErrWasmRuntimeFault) {
+		return false
+	}
+	if n.haltErr == nil {
+		n.haltErr = err
+	}
+	return true
 }
 
 func normalizedAddress(address string) string {
@@ -1085,16 +1461,22 @@ func (n *Node) knownChainLocked(blockHash string) ([]types.Block, error) {
 
 func (n *Node) validateBlockOnStateLocked(parent types.Block, parentState *state.Store, block types.Block) (*state.Store, error) {
 	working := parentState.Clone()
-	executor := core.NewExecutor(n.chainID, block.Header.Proposer, contracts.NewRuntimeWithDefaults())
+	executor := core.NewExecutor(n.chainID, block.Header.Proposer, n.runtime)
 	receipts := make([]types.Receipt, 0, len(block.Transactions))
 	if block.Header.GasLimit == 0 {
 		return nil, errors.New("block gas limit is required")
+	}
+	if block.Header.GasLimit != parent.Header.GasLimit {
+		return nil, errors.New("imported block gas limit mismatch")
 	}
 	if block.Header.BaseFeePerGas != NextBaseFee(parent, n.blockGasLimit) {
 		return nil, errors.New("imported block base fee mismatch")
 	}
 	var gasUsed uint64
 	for _, tx := range block.Transactions {
+		if tx.GasLimit > block.Header.GasLimit {
+			return nil, errors.New("transaction gas limit exceeds block gas limit")
+		}
 		receipt, err := executor.ExecuteWithContext(working, tx, core.ExecutionContext{BlockHeight: block.Header.Height, BaseFeePerGas: block.Header.BaseFeePerGas})
 		if err != nil {
 			return nil, err
@@ -1327,6 +1709,63 @@ func cloneEventRecord(record types.EventRecord) types.EventRecord {
 	return record
 }
 
+func cloneTransaction(tx types.Transaction) types.Transaction {
+	tx.Payload = cloneStringMap(tx.Payload)
+	if tx.Batch != nil {
+		tx.Batch = append([]types.BatchOperation(nil), tx.Batch...)
+		for index := range tx.Batch {
+			tx.Batch[index].Payload = cloneStringMap(tx.Batch[index].Payload)
+		}
+	}
+	if tx.Authorizations != nil {
+		tx.Authorizations = append([]types.Authorization(nil), tx.Authorizations...)
+	}
+	return tx
+}
+
+func cloneTransactions(txs []types.Transaction) []types.Transaction {
+	if txs == nil {
+		return nil
+	}
+	cloned := make([]types.Transaction, len(txs))
+	for index, tx := range txs {
+		cloned[index] = cloneTransaction(tx)
+	}
+	return cloned
+}
+
+func cloneReceipt(receipt types.Receipt) types.Receipt {
+	if receipt.Events != nil {
+		receipt.Events = append([]types.Event(nil), receipt.Events...)
+		for index := range receipt.Events {
+			receipt.Events[index] = cloneEvent(receipt.Events[index])
+		}
+	}
+	return receipt
+}
+
+func cloneBlock(block types.Block) types.Block {
+	block.Transactions = cloneTransactions(block.Transactions)
+	if block.Receipts != nil {
+		block.Receipts = append([]types.Receipt(nil), block.Receipts...)
+		for index := range block.Receipts {
+			block.Receipts[index] = cloneReceipt(block.Receipts[index])
+		}
+	}
+	if block.FinalityCertificate != nil {
+		certificate := *block.FinalityCertificate
+		certificate.Signatures = append([]types.FinalitySignature(nil), certificate.Signatures...)
+		block.FinalityCertificate = &certificate
+	}
+	return block
+}
+
+func cloneTransactionRecord(record types.TransactionRecord) types.TransactionRecord {
+	record.Transaction = cloneTransaction(record.Transaction)
+	record.Receipt = cloneReceipt(record.Receipt)
+	return record
+}
+
 func cloneEvent(event types.Event) types.Event {
 	if event.Attributes == nil {
 		return event
@@ -1336,6 +1775,9 @@ func cloneEvent(event types.Event) types.Event {
 }
 
 func cloneStringMap(values map[string]string) map[string]string {
+	if values == nil {
+		return nil
+	}
 	cloned := make(map[string]string, len(values))
 	for key, value := range values {
 		cloned[key] = value
@@ -1343,28 +1785,22 @@ func cloneStringMap(values map[string]string) map[string]string {
 	return cloned
 }
 
-func (n *Node) removeMempoolTransactions(txs []types.Transaction) {
-	if len(txs) == 0 || len(n.mempool) == 0 {
-		return
-	}
-	included := make(map[string]struct{}, len(txs))
+func transactionHashSet(txs []types.Transaction) map[string]struct{} {
+	hashes := make(map[string]struct{}, len(txs))
 	for _, tx := range txs {
-		included[tx.Hash()] = struct{}{}
+		hashes[tx.Hash()] = struct{}{}
 	}
-	remaining := n.mempool[:0]
-	for _, tx := range n.mempool {
-		if _, ok := included[tx.Hash()]; !ok {
-			remaining = append(remaining, tx)
+	return hashes
+}
+
+func filterTransactionsByHash(txs []types.Transaction, excluded map[string]struct{}) []types.Transaction {
+	filtered := make([]types.Transaction, 0, len(txs))
+	for _, tx := range txs {
+		if _, skip := excluded[tx.Hash()]; !skip {
+			filtered = append(filtered, tx)
 		}
 	}
-	n.mempool = remaining
-	queued := n.queued[:0]
-	for _, tx := range n.queued {
-		if _, ok := included[tx.Hash()]; !ok {
-			queued = append(queued, tx)
-		}
-	}
-	n.queued = queued
+	return filtered
 }
 
 func transactionsInBlocks(blocks []types.Block) []types.Transaction {
@@ -1376,6 +1812,10 @@ func transactionsInBlocks(blocks []types.Block) []types.Transaction {
 }
 
 func (n *Node) persistLocked() error {
+	return n.persistCandidateLocked(n.state, n.blocks)
+}
+
+func (n *Node) persistCandidateLocked(candidateState *state.Store, candidateBlocks []types.Block) error {
 	if n.dataDir == "" {
 		return nil
 	}
@@ -1385,8 +1825,8 @@ func (n *Node) persistLocked() error {
 	snapshot := diskSnapshot{
 		ChainID:          n.chainID,
 		GenesisState:     n.genesisState,
-		State:            n.state.Snapshot(),
-		Blocks:           n.blocks,
+		State:            candidateState.Snapshot(),
+		Blocks:           candidateBlocks,
 		KnownBlocks:      n.knownBlockListLocked(),
 		FinalityEvidence: n.finalityEvidenceListLocked(),
 	}

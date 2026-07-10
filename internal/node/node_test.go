@@ -316,6 +316,384 @@ func TestNodeFeeMarketAdjustsBaseFeeAndRecordsGasUsed(t *testing.T) {
 	}
 }
 
+func TestNodeRejectsTransactionGasLimitAboveBlockLimit(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		BlockGasLimit:  42_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx := signedNodeTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     alice,
+		To:       "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Nonce:    0,
+		Value:    1,
+		GasLimit: 42_001,
+		GasPrice: 1,
+	})
+	if err := n.SubmitTx(tx); err == nil || !strings.Contains(err.Error(), "exceeds block gas limit") {
+		t.Fatalf("oversized transaction admission error = %v", err)
+	}
+	if len(n.Mempool()) != 0 {
+		t.Fatalf("oversized transaction entered mempool: %+v", n.Mempool())
+	}
+}
+
+func TestNodeBoundsTransactionSizeAndQueuedNonceGap(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oversized := signedNodeTx(t, key, types.Transaction{
+		ChainID: "chainlab-local", Type: types.TxTransfer, From: alice,
+		To: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Nonce: 0,
+		Value: 1, GasLimit: 21_000, GasPrice: 1,
+		Payload: map[string]string{"padding": strings.Repeat("x", 2*1024*1024)},
+	})
+	if err := n.SubmitTx(oversized); err == nil || !strings.Contains(err.Error(), "transaction exceeds") {
+		t.Fatalf("oversized transaction error = %v", err)
+	}
+	gap := signedNodeTx(t, key, types.Transaction{
+		ChainID: "chainlab-local", Type: types.TxTransfer, From: alice,
+		To: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Nonce: 65,
+		Value: 1, GasLimit: 21_000, GasPrice: 1,
+	})
+	if err := n.SubmitTx(gap); err == nil || !strings.Contains(err.Error(), "nonce gap exceeds 64") {
+		t.Fatalf("queued nonce-gap error = %v", err)
+	}
+	if snapshot := n.TxPool(); snapshot.PendingCount != 0 || snapshot.QueuedCount != 0 {
+		t.Fatalf("bounded transactions entered pool: %+v", snapshot)
+	}
+}
+
+func TestNodeReadAPIsReturnDeepCopies(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx := signedNodeTx(t, key, types.Transaction{
+		ChainID: "chainlab-local", Type: types.TxTransfer, From: alice,
+		To: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Nonce: 0,
+		Value: 1, GasLimit: 21_000, GasPrice: 1,
+		Payload: map[string]string{"marker": "original"},
+	})
+	if err := n.SubmitTx(tx); err != nil {
+		t.Fatal(err)
+	}
+	tx.Payload["marker"] = "caller-mutated"
+	pool := n.Mempool()
+	pool[0].Payload["marker"] = "mempool-mutated"
+	snapshot := n.TxPool()
+	snapshot.Pending[0].Payload["marker"] = "snapshot-mutated"
+	if got := n.Mempool()[0].Payload["marker"]; got != "original" {
+		t.Fatalf("internal mempool payload = %q", got)
+	}
+
+	produced, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	txHash := produced.Transactions[0].Hash()
+	produced.Transactions[0].Payload["marker"] = "block-mutated"
+	produced.Receipts[0].Events[0].Attributes["from"] = "receipt-mutated"
+	head := n.Head()
+	if head.Transactions[0].Payload["marker"] != "original" || head.Receipts[0].Events[0].Attributes["from"] != alice {
+		t.Fatalf("internal head was mutated through return value: %+v", head)
+	}
+	byHeight, ok := n.Block(head.Header.Height)
+	if !ok {
+		t.Fatal("block by height not found")
+	}
+	byHeight.Transactions[0].Payload["marker"] = "height-mutated"
+	byHash, ok := n.BlockByHash(head.Hash())
+	if !ok || byHash.Transactions[0].Payload["marker"] != "original" {
+		t.Fatalf("block lookup shared mutable data: %+v", byHash)
+	}
+	record, ok := n.Transaction(txHash)
+	if !ok {
+		t.Fatal("transaction record not found")
+	}
+	record.Transaction.Payload["marker"] = "record-mutated"
+	record.Receipt.Events[0].Attributes["from"] = "record-receipt-mutated"
+	again, _ := n.Transaction(txHash)
+	if again.Transaction.Payload["marker"] != "original" || again.Receipt.Events[0].Attributes["from"] != alice {
+		t.Fatalf("transaction record shared mutable data: %+v", again)
+	}
+}
+
+func TestNodeProducesFittingMempoolPrefixAndRetainsRemainder(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		BlockGasLimit:  30_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := signedNodeTx(t, key, types.Transaction{
+		ChainID: "chainlab-local", Type: types.TxTransfer, From: alice, To: bob,
+		Nonce: 0, Value: 1, GasLimit: 30_000, GasPrice: 2,
+	})
+	second := signedNodeTx(t, key, types.Transaction{
+		ChainID: "chainlab-local", Type: types.TxTransfer, From: alice, To: carol,
+		Nonce: 1, Value: 1, GasLimit: 30_000, GasPrice: 2,
+	})
+	if err := n.SubmitTx(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.SubmitTx(second); err != nil {
+		t.Fatal(err)
+	}
+	firstBlock, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(firstBlock.Transactions) != 1 || firstBlock.Transactions[0].Hash() != first.Hash() {
+		t.Fatalf("first block transactions = %+v", firstBlock.Transactions)
+	}
+	pool := n.Mempool()
+	if len(pool) != 1 || pool[0].Hash() != second.Hash() {
+		t.Fatalf("retained mempool = %+v", pool)
+	}
+	if n.Account(bob).Balance != 1 || n.Account(carol).Balance != 0 {
+		t.Fatalf("balances after prefix block: bob=%d carol=%d", n.Account(bob).Balance, n.Account(carol).Balance)
+	}
+	secondBlock, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(secondBlock.Transactions) != 1 || secondBlock.Transactions[0].Hash() != second.Hash() {
+		t.Fatalf("second block transactions = %+v", secondBlock.Transactions)
+	}
+	if len(n.Mempool()) != 0 || n.Account(carol).Balance != 1 {
+		t.Fatalf("remainder was not committed: pool=%+v carol=%d", n.Mempool(), n.Account(carol).Balance)
+	}
+}
+
+func TestNodeDropsUnderpricedSuffixAfterBaseFeeRise(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		BlockGasLimit:  30_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := signedNodeTx(t, key, types.Transaction{
+		ChainID: "chainlab-local", Type: types.TxTransfer, From: alice,
+		To: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Nonce: 0,
+		Value: 1, GasLimit: 30_000, GasPrice: 2,
+	})
+	underpriced := signedNodeTx(t, key, types.Transaction{
+		ChainID: "chainlab-local", Type: types.TxTransfer, From: alice,
+		To: "0xcccccccccccccccccccccccccccccccccccccccc", Nonce: 1,
+		Value: 1, GasLimit: 30_000, GasPrice: 1,
+	})
+	if err := n.SubmitTx(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.SubmitTx(underpriced); err != nil {
+		t.Fatal(err)
+	}
+	block, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(block.Transactions) != 1 || block.Transactions[0].Hash() != first.Hash() {
+		t.Fatalf("base-fee raising block transactions = %+v", block.Transactions)
+	}
+	if len(n.Mempool()) != 0 {
+		t.Fatalf("underpriced suffix remained pending: %+v", n.Mempool())
+	}
+	replacement := signedNodeTx(t, key, types.Transaction{
+		ChainID: "chainlab-local", Type: types.TxTransfer, From: alice,
+		To: "0xdddddddddddddddddddddddddddddddddddddddd", Nonce: 1,
+		Value: 1, GasLimit: 30_000, GasPrice: 2,
+	})
+	if err := n.SubmitTx(replacement); err != nil {
+		t.Fatalf("replacement after base-fee revalidation: %v", err)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestImportBlockRevalidatesConflictingPendingNonce(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	config := node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+	}
+	producer, err := node.New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observer, err := node.New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conflicting := signedNodeTx(t, key, types.Transaction{
+		ChainID: "chainlab-local", Type: types.TxTransfer, From: alice,
+		To: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Nonce: 0,
+		Value: 1, GasLimit: 21_000, GasPrice: 1,
+	})
+	canonical := signedNodeTx(t, key, types.Transaction{
+		ChainID: "chainlab-local", Type: types.TxTransfer, From: alice,
+		To: "0xcccccccccccccccccccccccccccccccccccccccc", Nonce: 0,
+		Value: 1, GasLimit: 21_000, GasPrice: 1,
+	})
+	if err := observer.SubmitTx(conflicting); err != nil {
+		t.Fatal(err)
+	}
+	if err := producer.SubmitTx(canonical); err != nil {
+		t.Fatal(err)
+	}
+	block, err := producer.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := observer.ImportBlock(block); err != nil {
+		t.Fatal(err)
+	}
+	if len(observer.Mempool()) != 0 {
+		t.Fatalf("conflicting nonce remained pending after import: %+v", observer.Mempool())
+	}
+	next := signedNodeTx(t, key, types.Transaction{
+		ChainID: "chainlab-local", Type: types.TxTransfer, From: alice,
+		To: "0xdddddddddddddddddddddddddddddddddddddddd", Nonce: 1,
+		Value: 1, GasLimit: 21_000, GasPrice: 1,
+	})
+	if err := observer.SubmitTx(next); err != nil {
+		t.Fatalf("next nonce after imported conflict: %v", err)
+	}
+}
+
+func TestImportBlockRejectsProposerGasLimitOverride(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	config := node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		BlockGasLimit:  42_000,
+	}
+	producer, err := node.New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observer, err := node.New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := producer.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	block.Header.GasLimit++
+	if err := consensus.SignBlock(key, &block); err != nil {
+		t.Fatal(err)
+	}
+	if err := observer.ImportBlock(block); err == nil || !strings.Contains(err.Error(), "gas limit mismatch") {
+		t.Fatalf("proposer gas-limit override error = %v", err)
+	}
+}
+
+func TestImportBlockRejectsTransactionGasLimitAboveBlockLimit(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	config := node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		BlockGasLimit:  42_000,
+	}
+	producer, err := node.New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observer, err := node.New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx := signedNodeTx(t, key, types.Transaction{
+		ChainID: "chainlab-local", Type: types.TxTransfer, From: alice,
+		To: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Nonce: 0,
+		Value: 1, GasLimit: 21_000, GasPrice: 1,
+	})
+	if err := producer.SubmitTx(tx); err != nil {
+		t.Fatal(err)
+	}
+	block, err := producer.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oversized := block.Transactions[0]
+	oversized.GasLimit = block.Header.GasLimit + 1
+	oversized.Signature = ""
+	oversized = signedNodeTx(t, key, oversized)
+	block.Transactions[0] = oversized
+	block.Header.TxRoot = types.TransactionRoot(block.Transactions)
+	if err := consensus.SignBlock(key, &block); err != nil {
+		t.Fatal(err)
+	}
+	if err := observer.ImportBlock(block); err == nil || !strings.Contains(err.Error(), "transaction gas limit exceeds") {
+		t.Fatalf("oversized in-block transaction error = %v", err)
+	}
+}
+
 func TestNodeSponsoredTransferUsesPaymasterInBlock(t *testing.T) {
 	userKey, err := chaincrypto.GenerateKey()
 	if err != nil {
@@ -328,7 +706,6 @@ func TestNodeSponsoredTransferUsesPaymasterInBlock(t *testing.T) {
 	user := chaincrypto.AddressFromPrivateKey(userKey)
 	paymaster := chaincrypto.AddressFromPrivateKey(paymasterKey)
 	receiver := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	feeCollector := "0xfee0000000000000000000000000000000000000"
 	n, err := node.New(node.Config{
 		ChainID:     "chainlab-local",
 		ProposerKey: paymasterKey,
@@ -336,7 +713,6 @@ func TestNodeSponsoredTransferUsesPaymasterInBlock(t *testing.T) {
 			user:      100,
 			paymaster: 100_000,
 		},
-		FeeCollector: feeCollector,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -370,11 +746,23 @@ func TestNodeSponsoredTransferUsesPaymasterInBlock(t *testing.T) {
 	if got := n.Account(receiver).Balance; got != 100 {
 		t.Fatalf("receiver balance = %d", got)
 	}
-	if got := n.Account(paymaster).Balance; got != 58_000 {
+	if got := n.Account(paymaster).Balance; got != 79_000 {
 		t.Fatalf("paymaster balance = %d", got)
 	}
-	if got := n.Account(feeCollector).Balance; got != 21_000 {
-		t.Fatalf("fee collector balance = %d", got)
+}
+
+func TestNodeRejectsFeeCollectorDifferentFromProposer(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = node.New(node.Config{
+		ChainID:      "chainlab-local",
+		ProposerKey:  key,
+		FeeCollector: "0xfee0000000000000000000000000000000000000",
+	})
+	if err == nil || !strings.Contains(err.Error(), "must equal the block proposer") {
+		t.Fatalf("divergent fee collector error = %v", err)
 	}
 }
 
