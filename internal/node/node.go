@@ -2161,34 +2161,7 @@ func NextBaseFee(parent types.Block, fallbackGasLimit uint64) uint64 {
 	if parentGasLimit == 0 {
 		parentGasLimit = DefaultBlockGasLimit
 	}
-	target := parentGasLimit / 2
-	if target == 0 {
-		target = 1
-	}
-	if parent.Header.GasUsed == target {
-		return parentBaseFee
-	}
-	if parent.Header.GasUsed > target {
-		delta := parent.Header.GasUsed - target
-		increase := baseFeeChange(parentBaseFee, delta, target, baseFeeChangeDenominator)
-		if increase == 0 {
-			increase = 1
-		}
-		if math.MaxUint64-parentBaseFee < increase {
-			return math.MaxUint64
-		}
-		return parentBaseFee + increase
-	}
-	delta := target - parent.Header.GasUsed
-	decrease := baseFeeChange(parentBaseFee, delta, target, baseFeeChangeDenominator)
-	if decrease >= parentBaseFee {
-		return InitialBaseFeePerGas
-	}
-	next := parentBaseFee - decrease
-	if next < InitialBaseFeePerGas {
-		return InitialBaseFeePerGas
-	}
-	return next
+	return core.NextBaseFee(parentBaseFee, parent.Header.GasUsed, parentGasLimit)
 }
 
 func effectiveHeaderBaseFee(block types.Block) uint64 {

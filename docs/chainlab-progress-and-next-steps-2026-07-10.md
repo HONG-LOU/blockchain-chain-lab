@@ -110,6 +110,18 @@ Verification coverage includes smart-account and delegated-EOA end-to-end rotati
 - WebSockets are capped at 64 connections, 64 subscriptions per connection, 1,024 subscriptions per node, and 64 log subscriptions. Read-idle, Ping, and write deadlines release dead/slow clients; queues and per-block log-match work are bounded. Subscription TTL, principal-aware quotas, and sustained-load evidence remain open.
 - `/health` and `/health/ready` return 503 during a sticky halt; `/health/live` remains available to distinguish a live but unsafe process.
 
+### Initial CometBFT ABCI++ Application Lifecycle
+
+- CometBFT is pinned at v0.39.3. The module checksum in `go.sum` matches the signed `sum.golang.org` lookup, and all newly resolved transitive checksums match the v0.39.3 upstream `go.sum`.
+- `internal/abci` implements every v0.39.3 `Application` method. `Info`, strict latest-state `Query`, `CheckTx`, bounded `InsertTx`/`ReapTxs`, `InitChain`, proposal methods, finalize/commit, empty vote extensions, and explicit no-snapshot responses no longer inherit permissive defaults.
+- Canonical genesis app state binds `chainlab-v1`, chain ID, block gas, and the complete ChainLab state. `InitChain` requires an exact fixed validator set derived from compressed secp256k1 keys, equal voting power, a 16 MiB CometBFT block ceiling, matching block gas, bounded positive evidence retention, and disabled vote extensions.
+- `PrepareProposal` performs bounded sequential simulation. `ProcessProposal` and `FinalizeBlock` independently replay every transaction from the committed state and reject malformed, invalid, over-count, over-byte, over-gas, wrong-height, and unknown-proposer blocks. Included deterministic failures retain their failed receipt and nonce/fee settlement.
+- `FinalizeBlock` creates an unpublished candidate. Only an in-sequence `Commit` switches the committed state and app hash; duplicate or out-of-sequence finalize/commit calls fail. The application hash binds protocol, chain, height, Comet block hash, proposer, gas/base-fee state, transaction root, receipt root, normalized evidence root, and state root.
+- Receipt events are converted with sorted attributes, so Go map iteration cannot change CometBFT transaction results. Fixed-set misbehavior is validated, normalized, committed into the evidence root, and emitted as events, but protocol v1 deliberately does not claim validator updates or evidence-to-slashing completion.
+- The app-side mempool is capped at 4,096 transactions and 128 MiB, supports sequential nonces, deduplicates exact wire transactions, respects reap byte/gas limits, removes committed transactions, and deterministically rebuilds after commit.
+- Differential tests feed the same successful and included-failure transaction corpus through the local PoA harness and ABCI++, comparing every receipt plus state, transaction, and receipt roots. A fixed `chainlab-v1` ABCI golden vector also matches across fresh processes.
+- This is an in-memory application foundation, not a completed CometBFT network. Socket/builtin server wiring, durable restart, real multi-process rounds/P2P/block sync, validator updates, evidence slashing, snapshots, and state sync remain open production gates.
+
 ## Verification Evidence
 
 The implementation has passed full unit, race, vet, module-integrity, build, demo, and fresh-process vector runs during this hardening milestone:
@@ -121,6 +133,8 @@ go vet ./...
 go mod verify
 go build -o $env:TEMP\chainlab-production-verify.exe ./cmd/chainlab
 go test -count=2 -run 'FreshProcess' ./internal/core
+go test -count=1 ./internal/abci
+go test -count=2 -run 'ABCIExecutionMatchesAcrossFreshProcesses' ./internal/abci
 go run ./cmd/chainlab demo
 git diff --check
 ```
@@ -131,13 +145,18 @@ After fixing node lock lifecycle coverage and revision-binding the pending-filte
 
 Coverage includes the 64/65 WASM call-depth boundary, recursion/indirect/tail-call rejection, charged transfer/native/WASM/paymaster/batch failures, exact native gas vectors, fresh-process determinism, failed receipt production/import, strict snapshot schemas, canonical replay, corrupt/missing identity files, finality-lock reorg/restart attacks, conflicting certificates, vote persistence, fork-capacity limits, immutable concurrent reads, RPC failed status/cumulative gas, and ingress/query bounds.
 
+The final ABCI++ application tree additionally passed full unit tests, the full race suite, a focused ABCI race run, vet, tidy-diff, production CLI build, demo, two-run ABCI/core fresh-process vectors, and an offline `govulncheck` v1.6.0 scan with zero reachable vulnerabilities. The expanded dependency graph contains advisories in three imported packages and 20 required modules, but no vulnerable symbol is called.
+
+Windows `go mod verify` is not recorded as green for the CometBFT tree. The signed v0.39.3 module zip contains `.github/workflows/e2e-nightly-38x.yml ` with a trailing space; Windows normalizes the extracted cache path to the no-space name, so Go reports the directory as modified even though the file bytes match. Both `goproxy.cn/sumdb/sum.golang.org` and `sum.golang.google.cn` returned the committed module sums `h1:UegHXskZNomsijmm29nL5NkeXtnzkme6fg+q1hPQnEI=` and `h1:PmNfvtw256BC41ad0FABts236CSZnvZ0kjPOciBwTdM=`. All 60 newly added non-Comet checksum lines match CometBFT v0.39.3's upstream `go.sum`. A clean Linux module-cache verification remains part of the Linux/amd64 validator release gate.
+
 ## Current Production Blockers
 
 Ordered by consensus and security dependency rather than feature visibility:
 
 1. **Authoritative CometBFT ABCI++ lifecycle**
-   - Implement proposal preparation/processing, finalize/commit, validator updates, evidence, queries, snapshots, block sync, and state sync as one versioned production lifecycle.
-   - Replace the custom PoA/HTTP relay as the authoritative network with multi-process Byzantine consensus and P2P. Keep the local harness for deterministic differential testing only.
+   - The initial in-memory `chainlab-v1` lifecycle now implements strict proposal preparation/processing, candidate finalize/commit, queries, bounded app-side mempool methods, fixed-set evidence commitment, and explicit vote/snapshot behavior with fresh-process and harness differential tests.
+   - Wire it to a real CometBFT socket or builtin process, persist and restore authoritative height/app hash, and replace the custom PoA/HTTP relay with multi-process Byzantine consensus and P2P. Keep the local harness for deterministic differential testing only.
+   - Complete validator updates, evidence-to-slashing rules, snapshot export/import, block sync, state sync, rolling restart, partition, and Byzantine fault tests as one versioned production lifecycle.
    - Design finalized epoch transitions before enabling validator join/leave.
 
 2. **Crash-consistent transactional storage**
@@ -169,11 +188,10 @@ Ordered by consensus and security dependency rather than feature visibility:
 
 ## Next Immediate Work
 
-1. Commit this local hardening milestone and record its exact test/security evidence. The ChainLab repository has no configured remote, so the code commit is local until a remote is deliberately added.
-2. Define the first production protocol version and carry deterministic execution, included-failure settlement, native metering, fixed-validator rules, and finality safety assertions into differential ABCI++ tests.
-3. Build the smallest end-to-end CometBFT multi-process network with authoritative proposal/finalize/commit behavior, then add evidence, snapshot, block-sync, and state-sync paths.
-4. Introduce transactional versioned storage and power-loss testing before treating long-lived validator data as durable.
-5. Establish the Linux/amd64 validator release target, remote-signer boundary, JIT/RSS limits, reproducible build artifacts, and baseline operational telemetry.
+1. Build the smallest end-to-end CometBFT multi-process network with authoritative proposal/finalize/commit behavior, then prove restarts, P2P rounds, evidence, block sync, and state sync.
+2. Introduce transactional versioned storage and power-loss testing before treating long-lived validator application state as durable.
+3. Design certified validator epoch transitions and evidence-to-slashing behavior before enabling validator updates.
+4. Establish the Linux/amd64 validator release target, remote-signer boundary, JIT/RSS limits, reproducible build artifacts, and baseline operational telemetry.
 
 Asset and deployment work stays downstream of the production core: specify the native gas asset and economics, define a production fungible-token standard and issuer controls, add wallet/indexer/explorer/oracle/DEX interfaces, select an audited IBC/bridge or issuer-native stablecoin path, and size validator/sentry/RPC/archive hardware from Linux multi-process load results rather than estimates.
 

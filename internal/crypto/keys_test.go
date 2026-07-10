@@ -86,3 +86,23 @@ func TestPrivateKeyHexRoundTrip(t *testing.T) {
 		t.Fatal("decoded key should derive the same address")
 	}
 }
+
+func TestAddressFromCompressedPublicKey(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	address, err := chaincrypto.AddressFromCompressedPublicKey(key.PubKey().SerializeCompressed())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if address != chaincrypto.AddressFromPrivateKey(key) {
+		t.Fatalf("compressed public key address = %s", address)
+	}
+	if _, err := chaincrypto.AddressFromCompressedPublicKey(key.PubKey().SerializeUncompressed()); err == nil {
+		t.Fatal("uncompressed public key should fail")
+	}
+	if _, err := chaincrypto.AddressFromCompressedPublicKey([]byte{2, 3}); err == nil {
+		t.Fatal("malformed compressed public key should fail")
+	}
+}

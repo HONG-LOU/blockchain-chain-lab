@@ -9,6 +9,14 @@ const (
 	MaxValidators = 4096
 	// MaxChainIDBytes bounds every consensus envelope that repeats the chain ID.
 	MaxChainIDBytes = 128
+	// MaxTransactionBytes bounds a consensus transaction at every ingress.
+	MaxTransactionBytes = 2 * 1024 * 1024
+	// MaxBlockBytes is the protocol-wide CometBFT block-size ceiling.
+	MaxBlockBytes = 16 * 1024 * 1024
+	// MaxProposalTxBytes leaves room for block metadata and consensus evidence.
+	MaxProposalTxBytes = 12 * 1024 * 1024
+	// MaxTransactionsPerBlock bounds replay work independently of bytes and gas.
+	MaxTransactionsPerBlock = 4096
 	// MaxWASMModuleBytes is the protocol admission and snapshot bound.
 	MaxWASMModuleBytes = 512 * 1024
 	// WASMMeteringVersion identifies the only admitted version-1 WASM schedule.

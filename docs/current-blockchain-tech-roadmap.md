@@ -23,6 +23,7 @@ The existing local PoA node remains a fast development/differential-test harness
 
 ## Current Verified Harness Boundary
 
+- The first `chainlab-v1` CometBFT v0.39.3 ABCI++ application foundation now strictly binds canonical genesis and consensus parameters, reuses the deterministic executor, performs bounded prepare and full process/finalize replay, publishes only on commit, commits execution metadata into app hash, exposes bounded app-side mempool methods, and has fresh-process plus local-harness receipt/root differential tests. It is in-memory and not yet connected to a real CometBFT process, durable database, snapshot/state sync path, or multi-process fault network.
 - The local harness now persists a checksum- and generation-bound snapshot v2 plus a data-directory manifest, replays canonical and known branches from an explicitly timestamped genesis, validates every replayed state root, and refuses silent genesis recreation when initialized data is incomplete. Public genesis and validator secrets are separate artifacts. This is fail-closed development persistence, not the transactional production database.
 - A valid highest certificate is a monotonic local finality lock. A branch that does not descend from it is rejected, compatible certificate subsets are merged, conflicting quorum certificates produce a persistent sticky halt, and uncertified `finalized` remains at genesis. Head-depth observations are exposed only as `depth_confirmation`.
 - The validator set is explicit and fixed by genesis. `validator.join` and `validator.leave` are rejected until the CometBFT path defines certified epoch transitions. Double-sign slashing accepts only canonical, signature-verified evidence, consumes one offence per validator height regardless of evidence pair, and does not mutate the fixed set.
@@ -43,8 +44,9 @@ The existing local PoA node remains a fast development/differential-test harness
 
 ## Gate 2: CometBFT ABCI++ Production Path
 
-- Implement `Info`, `Query`, `CheckTx`, `PrepareProposal`, `ProcessProposal`, `FinalizeBlock`, `Commit`, validator updates, evidence handling, and snapshot/state-sync methods against the version selected in the production manifest.
-- Make CometBFT height/app-hash the authoritative production block lifecycle.
+- Preserve and extend the implemented v0.39.3 `chainlab-v1` foundation for `Info`, `Query`, `CheckTx`, `InsertTx`, `ReapTxs`, `InitChain`, `PrepareProposal`, `ProcessProposal`, `FinalizeBlock`, `Commit`, strict empty vote extensions, fixed-set evidence commitment, and explicit unsupported snapshot restore behavior.
+- Connect the application to real CometBFT processes and durable storage so CometBFT height/app-hash becomes the authoritative production block lifecycle across restart and replay.
+- Implement validator updates, evidence-to-slashing rules, verified snapshot export/import, and state-sync application before claiming the complete ABCI++ lifecycle.
 - Replace the harness's fixed genesis validator set with explicitly versioned voting power, epochs, certified set transitions, evidence-to-slashing rules, quorum rounding, genesis, chain ID, and upgrade compatibility in the authoritative CometBFT lifecycle.
 - Run multi-process tests for normal rounds, delayed/missing proposers, equivocation evidence, partitions, reconnects, state sync, validator changes, and rolling restarts.
 - Differential-test ABCI++ execution against the local harness using the same transaction corpus and roots.

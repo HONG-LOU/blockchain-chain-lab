@@ -41,6 +41,17 @@ func AddressFromPrivateKey(key PrivateKey) string {
 	return addressFromPublicKey(key.PubKey())
 }
 
+func AddressFromCompressedPublicKey(encoded []byte) (string, error) {
+	publicKey, err := secp.ParsePubKey(encoded)
+	if err != nil {
+		return "", errors.New("public key must be a compressed secp256k1 key")
+	}
+	if len(encoded) != secp.PubKeyBytesLenCompressed {
+		return "", errors.New("public key must be a compressed secp256k1 key")
+	}
+	return addressFromPublicKey(publicKey), nil
+}
+
 func NormalizeAddress(encoded string) (string, error) {
 	address := strings.ToLower(strings.TrimSpace(encoded))
 	if len(address) != 42 || !strings.HasPrefix(address, "0x") {

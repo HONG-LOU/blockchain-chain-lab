@@ -11,15 +11,15 @@ import (
 
 const (
 	// MaxTransactionBytes is the consensus-visible canonical transaction limit.
-	MaxTransactionBytes = 2 * 1024 * 1024
+	MaxTransactionBytes = types.MaxTransactionBytes
 	// MaxBlockBytes is the consensus-visible canonical block limit.
-	MaxBlockBytes = 16 * 1024 * 1024
+	MaxBlockBytes = types.MaxBlockBytes
 	// MaxFinalityCertificateBytes reserves space so every valid base block can
 	// later carry a maximum-size quorum certificate.
 	MaxFinalityCertificateBytes = 4 * 1024 * 1024
 	MaxUncertifiedBlockBytes    = MaxBlockBytes - MaxFinalityCertificateBytes
 	// MaxTransactionsPerBlock bounds validation work independently of block bytes.
-	MaxTransactionsPerBlock = 4096
+	MaxTransactionsPerBlock = types.MaxTransactionsPerBlock
 	// MaxFinalitySignaturesPerBlock bounds certificate verification and copying.
 	MaxFinalitySignaturesPerBlock = types.MaxValidators
 	// These bounds contain authenticated fork spam from an authorized but
