@@ -3,6 +3,7 @@ package abci
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -55,6 +56,13 @@ func TestPersistentApplicationSnapshotRoundTripAcrossChunksAndRestart(t *testing
 	if targetInfo.LastBlockHeight != sourceInfo.LastBlockHeight || !bytes.Equal(targetInfo.LastBlockAppHash, sourceInfo.LastBlockAppHash) {
 		t.Fatalf("target info = %+v, source = %+v", targetInfo, sourceInfo)
 	}
+	targetStorage := queryStorageInfo(t, target)
+	if targetStorage.MinimumHeight != sourceInfo.LastBlockHeight || targetStorage.CurrentHeight != sourceInfo.LastBlockHeight {
+		t.Fatalf("state-sync storage range = %+v", targetStorage)
+	}
+	if _, err := target.persistence.(*applicationDB).LoadHeight(0); !errors.Is(err, ErrHistoricalStatePruned) {
+		t.Fatalf("state-sync prehistory error = %v", err)
+	}
 	prepared, err := target.PrepareProposal(context.Background(), &abcitypes.RequestPrepareProposal{
 		Height: 2, MaxTxBytes: types.MaxProposalTxBytes, ProposerAddress: fixture.proposerAddress,
 	})
@@ -76,6 +84,9 @@ func TestPersistentApplicationSnapshotRoundTripAcrossChunksAndRestart(t *testing
 	}
 	if restartedInfo.LastBlockHeight != sourceInfo.LastBlockHeight || !bytes.Equal(restartedInfo.LastBlockAppHash, sourceInfo.LastBlockAppHash) {
 		t.Fatalf("restarted info = %+v", restartedInfo)
+	}
+	if storage := queryStorageInfo(t, restarted); storage.MinimumHeight != sourceInfo.LastBlockHeight {
+		t.Fatalf("restarted state-sync storage range = %+v", storage)
 	}
 	relisted, err := restarted.ListSnapshots(context.Background(), &abcitypes.RequestListSnapshots{})
 	if err != nil || len(relisted.Snapshots) != 1 || !bytes.Equal(relisted.Snapshots[0].Hash, snapshot.Hash) {

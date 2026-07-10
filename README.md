@@ -40,11 +40,11 @@ It currently implements:
 - EVM-style block/log/pending transaction filter polling with `eth_newBlockFilter`, `eth_newPendingTransactionFilter`, `eth_newFilter`, `eth_getFilterLogs`, `eth_getFilterChanges`, and `eth_uninstallFilter`
 - local multi-node devnet sync over HTTP peers: transaction relay, block import, produced-block broadcast, and finality vote relay
 - CLI commands for keys, genesis, nodes, signed transfers, block production, queries, and demos
-- a pinned CometBFT v0.39.3 `chainlab-v1` ABCI++ application with strict genesis/consensus-parameter binding, bounded app-side mempool methods, deterministic proposal replay, candidate-only finalize, commit publication, empty vote extensions, Pebble-backed versioned commits, and verified snapshot restore
+- a pinned CometBFT v0.39.3 ABCI++ application with strict genesis/consensus-parameter binding, deterministic proposal replay, candidate-only finalize, evidence-driven `chainlab-v2` validator removal, Pebble-backed incremental history profiles, and verified snapshot restore
 - generated four-validator private networks with independent secp256k1 validator keys, P2P identities, homes, ABCI sockets, RPC endpoints, full-mesh persistent peers, and real CometBFT processes
 - multi-process evidence for CometBFT rounds/P2P, raw-transaction commitment, progress with one of four validators stopped, lagging-node block sync, durable application restart, fresh application replay, destructive-data state sync through two light-client RPC sources, and identical common-height block/app hashes plus current state-root/account state after recovery
 
-The ABCI++ lifecycle now writes each committed height to a Pebble atomic batch with a synchronized WAL. Height, application commitment/hash, per-key state, raw transactions, receipts, and block-hash index advance together; restart recomputes roots and rejects missing, extra, non-canonical, or corrupted entries. Verified 1 MiB-chunk snapshots are independently bound to genesis, trusted app hash, state root, content hash, and checksum, and a real CometBFT validator has recovered through state sync after its Comet and application data were removed. The storage currently writes a complete per-key state version at each height and keeps every version; incremental MVCC/delta storage, migrations, pruned/full/archive modes, backups, evidence-to-slashing, validator epochs, partitions, Byzantine/load evidence, and remote signing remain open.
+The ABCI++ lifecycle writes each committed height to one synchronized Pebble batch. A flat live state, per-height delta, periodic checkpoint, commitment/app hash, transactions, receipts, current-height pointer, history boundary, and block index advance atomically. Store V2 has deterministic V1 migration, archive/full/pruned retention profiles, verified historical reads, compaction, consistent Pebble backups, restart/profile identity checks, and fail-closed root/count/checksum validation. Verified 1 MiB-chunk snapshots are independently bound to genesis and trusted app hash, and a real CometBFT validator has recovered through state sync. Full-state in-memory diff generation, broader filesystem faults, Linux load/soak, external rollback protection, protocol upgrades/proofs, remote signing, and the remaining Byzantine network cases are still open.
 
 The current implementation is not yet approved for public mainnet launch. [Mainstream Chain Capability And Production Gates](docs/mainstream-chain-capability-and-production-gates-2026-07-10.md) is the authoritative gate set; [the production technology roadmap](docs/current-blockchain-tech-roadmap.md) orders the implementation work. Mainnet requires deterministic execution, CometBFT ABCI++ consensus/networking, transactional storage, protocol upgrades, security testing, economics, and operational evidence.
 
@@ -72,7 +72,31 @@ go run ./cmd/chainlab-abci --genesis data/comet-private/node0/config/chainlab-ge
 go run ./cmd/chainlab-comet node --home data/comet-private/node0
 ```
 
-Repeat with the generated node-specific addresses for `node1` through `node3`. Generated keys are for isolated private-network testing, not production custody. The runtime locks Comet to the `flood` mempool because v0.39.3's socket server does not dispatch `InsertTx`/`ReapTxs`; the application-side mempool remains covered through direct lifecycle tests but is not claimed as socket-transport evidence. ChainLab's app hash commits block identity and therefore changes on empty blocks, so the generated Comet config deliberately creates blocks continuously with a bounded commit interval. Each application data directory is single-writer Pebble storage; snapshot export/import and real state sync are implemented, while production validators still require retention/migration policy, remote signing, broader fault/load evidence, and the remaining security gates.
+Repeat with the generated node-specific addresses for `node1` through `node3`. Generated keys are for isolated private-network testing, not production custody. The runtime locks Comet to the `flood` mempool because v0.39.3's socket server does not dispatch `InsertTx`/`ReapTxs`; the application-side mempool remains covered through direct lifecycle tests but is not claimed as socket-transport evidence. ChainLab's app hash commits block identity and therefore changes on empty blocks, so the generated Comet config deliberately creates blocks continuously with a bounded commit interval. Each application data directory is single-writer Pebble storage. Production validators still require remote signing, broader fault/load evidence, and the remaining security gates.
+
+### Application Storage Profiles
+
+The default is `full`, retaining at least 10,000 recent heights with checkpoints every 100 heights. Profile identity is stored in the database and must match on restart. Select another profile when first creating the application database:
+
+```powershell
+# Keep every available height.
+go run ./cmd/chainlab-abci --genesis genesis.json --data-dir app-data --storage-mode archive
+
+# Keep only the latest committed height.
+go run ./cmd/chainlab-abci --genesis genesis.json --data-dir app-data --storage-mode pruned
+
+# Set an explicit bounded history window and checkpoint interval.
+go run ./cmd/chainlab-abci --genesis genesis.json --data-dir app-data --storage-mode full --retain-heights 50000 --checkpoint-interval 500
+```
+
+Create a consistent offline-openable backup in a new directory outside the data directory, or compact before serving:
+
+```powershell
+go run ./cmd/chainlab-abci --genesis genesis.json --data-dir app-data --backup-to backups/app-2026-07-11
+go run ./cmd/chainlab-abci --genesis genesis.json --data-dir app-data --compact
+```
+
+See [Application Store V2](docs/chainlab-application-storage-v2.md) for exact retention, migration, historical-query, state-sync, backup, and remaining-performance guarantees.
 
 ## CLI
 

@@ -85,6 +85,12 @@ func TestPersistentApplicationRestoresAtomicCommittedVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	databaseClosed := false
+	t.Cleanup(func() {
+		if !databaseClosed {
+			_ = database.Close()
+		}
+	})
 	current, exists, err := pebbleValue(database, applicationStoreCurrentKey)
 	if err != nil || !exists {
 		t.Fatalf("current version exists=%t err=%v", exists, err)
@@ -94,13 +100,13 @@ func TestPersistentApplicationRestoresAtomicCommittedVersion(t *testing.T) {
 		t.Fatalf("current height = %d err=%v", height, err)
 	}
 	for _, version := range []int64{0, 1} {
-		_, exists, err := pebbleValue(database, applicationVersionKey(applicationVersionPrefix(version), "manifest", nil))
+		_, exists, err := pebbleValue(database, applicationVersionKey(applicationVersionPrefixV2(version), "manifest", nil))
 		if err != nil || !exists {
 			t.Fatalf("version %d manifest exists=%t err=%v", version, exists, err)
 		}
 	}
 	for _, namespace := range []string{"tx", "receipt"} {
-		key := applicationVersionKey(applicationVersionPrefix(1), namespace, []byte("00000000"))
+		key := applicationVersionKey(applicationVersionPrefixV2(1), namespace, []byte("00000000"))
 		if _, exists, err := pebbleValue(database, key); err != nil || !exists {
 			t.Fatalf("version 1 %s exists=%t err=%v", namespace, exists, err)
 		}
@@ -120,6 +126,7 @@ func TestPersistentApplicationRestoresAtomicCommittedVersion(t *testing.T) {
 	if err := database.Close(); err != nil {
 		t.Fatal(err)
 	}
+	databaseClosed = true
 
 	other := newApplicationFixture(t, 1_000_000)
 	if _, err := NewApplication(Config{Genesis: other.genesis, DataDir: dataDir}); err == nil || !strings.Contains(err.Error(), "genesis identity") {
@@ -159,7 +166,13 @@ func TestPersistentApplicationRejectsReceiptRootCorruption(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	receiptKey := applicationVersionKey(applicationVersionPrefix(1), "receipt", []byte("00000000"))
+	databaseClosed := false
+	t.Cleanup(func() {
+		if !databaseClosed {
+			_ = database.Close()
+		}
+	})
+	receiptKey := applicationVersionKey(applicationVersionPrefixV2(1), "receipt", []byte("00000000"))
 	receiptRaw, exists, err := pebbleValue(database, receiptKey)
 	if err != nil || !exists {
 		t.Fatalf("receipt exists=%t err=%v", exists, err)
@@ -179,6 +192,7 @@ func TestPersistentApplicationRejectsReceiptRootCorruption(t *testing.T) {
 	if err := database.Close(); err != nil {
 		t.Fatal(err)
 	}
+	databaseClosed = true
 	if _, err := NewApplication(Config{Genesis: fixture.genesis, DataDir: dataDir}); err == nil || !strings.Contains(err.Error(), "receipt root mismatch") {
 		t.Fatalf("corrupt receipt error = %v", err)
 	}
@@ -202,14 +216,21 @@ func TestPersistentApplicationRejectsMissingVersionEntry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	accountKey := applicationVersionKey(applicationVersionPrefix(0), "account", []byte(fixture.account))
+	databaseClosed := false
+	t.Cleanup(func() {
+		if !databaseClosed {
+			_ = database.Close()
+		}
+	})
+	accountKey := flatStateDiskKey(applicationV2LivePrefix, flatStateEntry{Kind: flatKindAccount, Key: []byte(fixture.account)})
 	if err := database.Delete(accountKey, pebble.Sync); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewApplication(Config{Genesis: fixture.genesis, DataDir: dataDir}); err == nil || !strings.Contains(err.Error(), "entry counts") {
+	databaseClosed = true
+	if _, err := NewApplication(Config{Genesis: fixture.genesis, DataDir: dataDir}); err == nil || !strings.Contains(err.Error(), "entry count") {
 		t.Fatalf("missing entry error = %v", err)
 	}
 }

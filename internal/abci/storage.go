@@ -23,8 +23,8 @@ import (
 )
 
 const (
-	applicationStoreProtocol = "chainlab-app-store-v1"
-	applicationStoreDirMode  = 0o700
+	applicationStoreProtocolV1 = "chainlab-app-store-v1"
+	applicationStoreDirMode    = 0o700
 )
 
 var (
@@ -49,9 +49,13 @@ type applicationPersistence interface {
 
 type applicationDB struct {
 	db            *pebble.DB
+	path          string
 	genesis       GenesisDocument
 	genesisHash   string
+	profile       StorageProfile
 	currentHeight int64
+	minimumHeight int64
+	currentFlat   flatState
 	closed        bool
 }
 
@@ -80,7 +84,7 @@ type applicationVersionManifest struct {
 	Checksum                string                `json:"checksum"`
 }
 
-func openApplicationDB(path string) (*applicationDB, error) {
+func openApplicationDB(path string, profile StorageProfile) (*applicationDB, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, errors.New("application data directory is required")
 	}
@@ -95,7 +99,9 @@ func openApplicationDB(path string) (*applicationDB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open application database: %w", err)
 	}
-	return &applicationDB{db: db, currentHeight: -1}, nil
+	return &applicationDB{
+		db: db, path: absolute, profile: profile, currentHeight: -1, minimumHeight: -1,
+	}, nil
 }
 
 func prepareApplicationDataDirectory(path string) error {
@@ -127,67 +133,18 @@ func (store *applicationDB) LoadOrCreate(
 	genesis GenesisDocument,
 	initial persistedApplicationState,
 ) (persistedApplicationState, error) {
-	if store == nil || store.db == nil || store.closed {
-		return persistedApplicationState{}, errors.New("application database is closed")
-	}
-	genesisBytes, err := genesis.CanonicalBytes()
-	if err != nil {
-		return persistedApplicationState{}, err
-	}
-	store.genesis = genesis
-	store.genesisHash = hash.KeccakHex(genesisBytes)
-	identityRaw, identityExists, err := pebbleValue(store.db, applicationStoreIdentityKey)
-	if err != nil {
-		return persistedApplicationState{}, err
-	}
-	currentRaw, currentExists, err := pebbleValue(store.db, applicationStoreCurrentKey)
-	if err != nil {
-		return persistedApplicationState{}, err
-	}
-	if !identityExists && !currentExists {
-		empty, err := pebbleDatabaseEmpty(store.db)
-		if err != nil {
-			return persistedApplicationState{}, err
-		}
-		if !empty {
-			return persistedApplicationState{}, errors.New("application database metadata is missing")
-		}
-		if err := store.save(initial, true, false); err != nil {
-			return persistedApplicationState{}, err
-		}
-		return clonePersistedApplicationState(initial), nil
-	}
-	if !identityExists || !currentExists {
-		return persistedApplicationState{}, errors.New("application database metadata is incomplete")
-	}
-	var identity applicationStoreIdentity
-	if err := decodeCanonicalJSON(identityRaw, &identity); err != nil {
-		return persistedApplicationState{}, fmt.Errorf("decode application database identity: %w", err)
-	}
-	if identity.Protocol != applicationStoreProtocol || identity.GenesisHash != store.genesisHash {
-		return persistedApplicationState{}, errors.New("application database genesis identity does not match configured genesis")
-	}
-	height, err := decodeApplicationHeight(currentRaw)
-	if err != nil {
-		return persistedApplicationState{}, err
-	}
-	loaded, err := store.loadVersion(height)
-	if err != nil {
-		return persistedApplicationState{}, err
-	}
-	store.currentHeight = height
-	return loaded, nil
+	return store.loadOrCreateV2(genesis, initial)
 }
 
 func (store *applicationDB) Save(value persistedApplicationState) error {
-	return store.save(value, false, false)
+	return store.saveV2(value, false)
 }
 
 func (store *applicationDB) Restore(value persistedApplicationState) error {
-	return store.save(value, false, true)
+	return store.restoreV2(value)
 }
 
-func (store *applicationDB) save(value persistedApplicationState, creating bool, restoring bool) error {
+func (store *applicationDB) saveV1(value persistedApplicationState, creating bool, restoring bool) error {
 	if store == nil || store.db == nil || store.closed {
 		return errors.New("application database is closed")
 	}
@@ -209,7 +166,7 @@ func (store *applicationDB) save(value persistedApplicationState, creating bool,
 	} else if height != store.currentHeight && height != store.currentHeight+1 {
 		return fmt.Errorf("application database height %d cannot advance from %d", height, store.currentHeight)
 	}
-	manifest, snapshot, err := store.manifest(value)
+	manifest, snapshot, err := store.manifestV1(value)
 	if err != nil {
 		return err
 	}
@@ -223,7 +180,7 @@ func (store *applicationDB) save(value persistedApplicationState, creating bool,
 	}
 	if creating {
 		identityRaw, err := hash.CanonicalBytes(applicationStoreIdentity{
-			Protocol: applicationStoreProtocol, GenesisHash: store.genesisHash,
+			Protocol: applicationStoreProtocolV1, GenesisHash: store.genesisHash,
 		})
 		if err != nil {
 			return err
@@ -272,7 +229,7 @@ func (store *applicationDB) save(value persistedApplicationState, creating bool,
 	return nil
 }
 
-func (store *applicationDB) manifest(
+func (store *applicationDB) manifestV1(
 	value persistedApplicationState,
 ) (applicationVersionManifest, state.Snapshot, error) {
 	if value.committed.store == nil {
@@ -280,7 +237,7 @@ func (store *applicationDB) manifest(
 	}
 	snapshot := value.committed.store.Snapshot()
 	manifest := applicationVersionManifest{
-		Protocol:       applicationStoreProtocol,
+		Protocol:       applicationStoreProtocolV1,
 		GenesisHash:    store.genesisHash,
 		Height:         value.committed.commitment.Height,
 		Initialized:    value.initialized,
@@ -310,7 +267,7 @@ func (store *applicationDB) manifest(
 	return manifest, snapshot, nil
 }
 
-func (store *applicationDB) loadVersion(height int64) (persistedApplicationState, error) {
+func (store *applicationDB) loadVersionV1(height int64) (persistedApplicationState, error) {
 	prefix := applicationVersionPrefix(height)
 	manifestRaw, exists, err := pebbleValue(store.db, applicationVersionKey(prefix, "manifest", nil))
 	if err != nil {
@@ -323,7 +280,7 @@ func (store *applicationDB) loadVersion(height int64) (persistedApplicationState
 	if err := decodeCanonicalJSON(manifestRaw, &manifest); err != nil {
 		return persistedApplicationState{}, fmt.Errorf("decode application version %d manifest: %w", height, err)
 	}
-	if manifest.Protocol != applicationStoreProtocol || manifest.GenesisHash != store.genesisHash || manifest.Height != height {
+	if manifest.Protocol != applicationStoreProtocolV1 || manifest.GenesisHash != store.genesisHash || manifest.Height != height {
 		return persistedApplicationState{}, fmt.Errorf("application version %d manifest identity is invalid", height)
 	}
 	expectedChecksum, err := applicationManifestChecksum(manifest)

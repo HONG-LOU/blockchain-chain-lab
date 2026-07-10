@@ -111,6 +111,7 @@ func (g GenesisDocument) CanonicalBytes() ([]byte, error) {
 type Config struct {
 	Genesis     GenesisDocument
 	DataDir     string
+	Storage     StorageProfile
 	persistence applicationPersistence
 }
 
@@ -191,7 +192,11 @@ func NewApplication(config Config) (*Application, error) {
 	persisted := persistedApplicationState{committed: committed, proposers: make(map[string]string)}
 	persistence := config.persistence
 	if persistence == nil && config.DataDir != "" {
-		persistence, err = openApplicationDB(config.DataDir)
+		profile, profileErr := normalizeStorageProfile(config.Storage)
+		if profileErr != nil {
+			return nil, profileErr
+		}
+		persistence, err = openApplicationDB(config.DataDir, profile)
 		if err != nil {
 			return nil, err
 		}
@@ -490,21 +495,46 @@ func (a *Application) Query(_ context.Context, req *abcitypes.RequestQuery) (*ab
 	if req == nil {
 		return nil, errors.New("query request is required")
 	}
-	height := a.committed.commitment.Height
+	queryState := a.committed
+	height := queryState.commitment.Height
 	response := &abcitypes.ResponseQuery{Height: height, Codespace: Codespace}
 	if req.Prove {
 		response.Code = CodeUnsupported
-		response.Log = "state proofs are not available in protocol version 1"
+		response.Log = "state proofs are not implemented"
+		return response, nil
+	}
+	if req.Path == "/storage" && req.Height != 0 && req.Height != height {
+		response.Code = CodeUnsupported
+		response.Log = "storage information is available only at the latest height"
 		return response, nil
 	}
 	if req.Height != 0 && req.Height != height {
-		response.Code = CodeUnsupported
-		response.Log = "only the latest committed height is available"
-		return response, nil
+		history, available := a.persistence.(historicalApplicationPersistence)
+		if !available {
+			response.Code = CodeUnsupported
+			response.Log = "historical application state is unavailable"
+			return response, nil
+		}
+		historical, err := history.LoadHeight(req.Height)
+		if err != nil {
+			response.Code = CodeUnsupported
+			switch {
+			case errors.Is(err, ErrHistoricalStatePruned):
+				response.Log = "historical application state was pruned"
+			case errors.Is(err, ErrHistoricalStateUnavailable):
+				response.Log = "historical application state is unavailable"
+			default:
+				return nil, fmt.Errorf("load historical application height %d: %w", req.Height, err)
+			}
+			return response, nil
+		}
+		queryState = historical.committed
+		height = queryState.commitment.Height
+		response.Height = height
 	}
 	switch req.Path {
 	case "/app":
-		value, err := hash.CanonicalBytes(a.committed.commitment)
+		value, err := hash.CanonicalBytes(queryState.commitment)
 		if err != nil {
 			return nil, err
 		}
@@ -512,7 +542,7 @@ func (a *Application) Query(_ context.Context, req *abcitypes.RequestQuery) (*ab
 		response.Value = value
 	case "/state/root":
 		response.Key = []byte("state_root")
-		response.Value = []byte(a.committed.commitment.StateRoot)
+		response.Value = []byte(queryState.commitment.StateRoot)
 	case "/account":
 		address, err := chaincrypto.NormalizeAddress(string(req.Data))
 		if err != nil || address != string(req.Data) {
@@ -520,7 +550,7 @@ func (a *Application) Query(_ context.Context, req *abcitypes.RequestQuery) (*ab
 			response.Log = "account query requires a canonical address"
 			return response, nil
 		}
-		value, err := hash.CanonicalBytes(a.committed.store.GetAccount(address))
+		value, err := hash.CanonicalBytes(queryState.store.GetAccount(address))
 		if err != nil {
 			return nil, err
 		}
@@ -538,7 +568,7 @@ func (a *Application) Query(_ context.Context, req *abcitypes.RequestQuery) (*ab
 			response.Log = "validator query requires a canonical account address"
 			return response, nil
 		}
-		identity, found := a.committed.store.ValidatorIdentityByAccount(address)
+		identity, found := queryState.store.ValidatorIdentityByAccount(address)
 		if !found {
 			response.Code = CodeInvalidRequest
 			response.Log = "validator identity is unknown"
@@ -547,11 +577,24 @@ func (a *Application) Query(_ context.Context, req *abcitypes.RequestQuery) (*ab
 		value, err := hash.CanonicalBytes(struct {
 			Identity state.ValidatorIdentity `json:"identity"`
 			Stake    uint64                  `json:"stake"`
-		}{Identity: identity, Stake: a.committed.store.StakeOf(address)})
+		}{Identity: identity, Stake: queryState.store.StakeOf(address)})
 		if err != nil {
 			return nil, err
 		}
 		response.Key = []byte(address)
+		response.Value = value
+	case "/storage":
+		history, available := a.persistence.(historicalApplicationPersistence)
+		if !available {
+			response.Code = CodeUnsupported
+			response.Log = "persistent storage information is unavailable"
+			return response, nil
+		}
+		value, err := hash.CanonicalBytes(history.HistoryRange())
+		if err != nil {
+			return nil, err
+		}
+		response.Key = []byte("storage")
 		response.Value = value
 	default:
 		response.Code = CodeUnsupported
@@ -671,6 +714,38 @@ func (a *Application) Close() error {
 		return nil
 	}
 	return a.persistence.Close()
+}
+
+func (a *Application) Backup(path string) error {
+	if a == nil {
+		return errors.New("application is required")
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed {
+		return errors.New("application is closed")
+	}
+	history, available := a.persistence.(historicalApplicationPersistence)
+	if !available {
+		return errors.New("persistent application storage is required")
+	}
+	return history.Backup(path)
+}
+
+func (a *Application) CompactStorage() error {
+	if a == nil {
+		return errors.New("application is required")
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed {
+		return errors.New("application is closed")
+	}
+	history, available := a.persistence.(historicalApplicationPersistence)
+	if !available {
+		return errors.New("persistent application storage is required")
+	}
+	return history.Compact()
 }
 
 func (a *Application) proposerLocked(address []byte, height int64) (string, error) {

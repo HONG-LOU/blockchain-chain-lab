@@ -11,7 +11,6 @@ import (
 	"testing"
 
 	chaincrypto "chainlab/internal/crypto"
-	"chainlab/internal/hash"
 	"chainlab/internal/state"
 	"chainlab/internal/types"
 
@@ -163,33 +162,45 @@ func commitApplicationCandidateAtKillBoundary(t *testing.T, application *Applica
 	if !ok || application.candidate == nil {
 		t.Fatal("persistent application candidate is unavailable")
 	}
+	candidateStore := application.candidate.state.store
+	for _, account := range candidateStore.Snapshot().Accounts {
+		for index := 0; index < candidateStore.StorageEntryCount(account.Address); index++ {
+			key := fmt.Sprintf("load:%04d", index)
+			if err := candidateStore.SetStorage(account.Address, key, strings.Repeat("y", 4096)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	application.candidate.state.commitment.StateRoot = candidateStore.Root()
+	application.candidate.state.appHash = applicationHash(application.candidate.state.commitment)
 	value := persistedApplicationState{
 		committed: application.candidate.state, initialized: true,
 		proposers: cloneStringMap(application.proposers),
 		txs:       cloneTransactions(application.candidate.txs),
 		receipts:  cloneReceipts(application.candidate.receipts),
 	}
-	manifest, snapshot, err := persistence.manifest(value)
+	next, err := flattenStateSnapshot(value.committed.store.Snapshot())
 	if err != nil {
 		t.Fatal(err)
 	}
-	prefix := applicationVersionPrefix(manifest.Height)
+	sets, deletes := diffFlatState(persistence.currentFlat, next)
+	manifest, err := persistence.manifestV2(value, next, sets, deletes, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := applicationVersionPrefixV2(manifest.Height)
 	batch := persistence.db.NewBatch()
 	defer batch.Close()
-	if err := writeApplicationSnapshot(batch, prefix, snapshot); err != nil {
+	if err := applyFlatStateToLiveBatch(batch, sets, deletes); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeApplicationBlockResults(batch, prefix, value.txs, value.receipts); err != nil {
-		t.Fatal(err)
-	}
-	manifestRaw, err := hash.CanonicalBytes(manifest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := batch.Set(applicationVersionKey(prefix, "manifest", nil), manifestRaw, nil); err != nil {
+	if err := writeApplicationVersionV2(batch, prefix, manifest, sets, deletes, nil, value.txs, value.receipts); err != nil {
 		t.Fatal(err)
 	}
 	if err := batch.Set(applicationStoreCurrentKey, encodeApplicationHeight(manifest.Height), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := batch.Set(applicationStoreMinimumHistoryKey, encodeApplicationHeight(0), nil); err != nil {
 		t.Fatal(err)
 	}
 	blockIndexKey, err := applicationBlockIndexKey(manifest.Commitment.BlockHash)
@@ -252,7 +263,7 @@ func storageHelperCommand(dataDir string, genesisPath string, key chaincrypto.Pr
 
 func countApplicationVersionEntries(t *testing.T, database *pebble.DB, height int64) int {
 	t.Helper()
-	prefix := applicationVersionPrefix(height)
+	prefix := applicationVersionPrefixV2(height)
 	iterator, err := database.NewIter(&pebble.IterOptions{
 		LowerBound: prefix, UpperBound: applicationPrefixUpperBound(prefix),
 	})
