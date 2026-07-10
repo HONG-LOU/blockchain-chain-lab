@@ -110,9 +110,9 @@ Verification coverage includes smart-account and delegated-EOA end-to-end rotati
 - WebSockets are capped at 64 connections, 64 subscriptions per connection, 1,024 subscriptions per node, and 64 log subscriptions. Read-idle, Ping, and write deadlines release dead/slow clients; queues and per-block log-match work are bounded. Subscription TTL, principal-aware quotas, and sustained-load evidence remain open.
 - `/health` and `/health/ready` return 503 during a sticky halt; `/health/live` remains available to distinguish a live but unsafe process.
 
-### Initial CometBFT ABCI++ Application Lifecycle
+### Initial CometBFT ABCI++ And Multi-Process Lifecycle
 
-- CometBFT is pinned at v0.39.3. The module checksum in `go.sum` matches the signed `sum.golang.org` lookup, and all newly resolved transitive checksums match the v0.39.3 upstream `go.sum`.
+- CometBFT is pinned at v0.39.3. Its module checksum in `go.sum` matches the signed `sum.golang.org` lookup. The initial ABCI dependency set matched upstream v0.39.3 sums; the full node dependency set is also sumdb-verified and deliberately raises `go-libp2p` to v0.48.0, `quic-go` to v0.59.1, and gRPC-Go to v1.79.3 to close reachable advisories while retaining v0.39.3 process compatibility evidence.
 - `internal/abci` implements every v0.39.3 `Application` method. `Info`, strict latest-state `Query`, `CheckTx`, bounded `InsertTx`/`ReapTxs`, `InitChain`, proposal methods, finalize/commit, empty vote extensions, and explicit no-snapshot responses no longer inherit permissive defaults.
 - Canonical genesis app state binds `chainlab-v1`, chain ID, block gas, and the complete ChainLab state. `InitChain` requires an exact fixed validator set derived from compressed secp256k1 keys, equal voting power, a 16 MiB CometBFT block ceiling, matching block gas, bounded positive evidence retention, and disabled vote extensions.
 - `PrepareProposal` performs bounded sequential simulation. `ProcessProposal` and `FinalizeBlock` independently replay every transaction from the committed state and reject malformed, invalid, over-count, over-byte, over-gas, wrong-height, and unknown-proposer blocks. Included deterministic failures retain their failed receipt and nonce/fee settlement.
@@ -120,21 +120,31 @@ Verification coverage includes smart-account and delegated-EOA end-to-end rotati
 - Receipt events are converted with sorted attributes, so Go map iteration cannot change CometBFT transaction results. Fixed-set misbehavior is validated, normalized, committed into the evidence root, and emitted as events, but protocol v1 deliberately does not claim validator updates or evidence-to-slashing completion.
 - The app-side mempool is capped at 4,096 transactions and 128 MiB, supports sequential nonces, deduplicates exact wire transactions, respects reap byte/gas limits, removes committed transactions, and deterministically rebuilds after commit.
 - Differential tests feed the same successful and included-failure transaction corpus through the local PoA harness and ABCI++, comparing every receipt plus state, transaction, and receipt roots. A fixed `chainlab-v1` ABCI golden vector also matches across fresh processes.
-- This is an in-memory application foundation, not a completed CometBFT network. Socket/builtin server wiring, durable restart, real multi-process rounds/P2P/block sync, validator updates, evidence slashing, snapshots, and state sync remain open production gates.
+- `cmd/chainlab-abci` loads a bounded regular file, requires canonical application-genesis bytes, and runs the official v0.39.3 socket server with signal-aware shutdown. An official socket client now exercises `Info`, `InitChain`, `CheckTx`, proposal processing, finalize/commit, and query across the wire.
+- `cmd/chainlab-comet` and `internal/cometnode` generate and run four independent secp256k1 validator homes. Each home has a distinct private-validator key/last-sign state, P2P key, Comet database, ABCI/RPC/P2P port, full-mesh persistent peers, canonical app genesis, and a strict fail-closed node document. Startup cross-checks the private key, public identity, equal-power genesis set, app state, consensus parameters, and generated files before Comet starts.
+- A real OS-process integration test runs four ABCI servers plus four Comet nodes, verifies a full peer mesh and raw transaction commitment, stops one validator while the remaining three continue, block-syncs the lagging node, restarts that node's fresh in-memory app and replays its local Comet block store, then broadcasts another transaction from the recovered node. At each checkpoint every app commitment is internally height-consistent, all nodes agree on a common-height block/header app hash, and their current state root and sender nonce converge even if live RPC sampling catches adjacent heights. Comet RPC's `latest_app_hash` is the latest block header's previous-height application commitment, so it is not compared directly with a current-height ABCI query.
+- Socket mode is deliberately locked to Comet's bounded `flood` mempool. CometBFT v0.39.3 defines `InsertTx`/`ReapTxs` on its interfaces and client but does not dispatch them in the socket server, so app-mempool-over-socket is not claimed. The direct app-side mempool tests remain useful but cover a different transport boundary.
+- The app hash binds height and block identity, so it changes for every empty block. `create_empty_blocks=false` would still trigger unbounded proof-block production; generated nodes instead configure explicit continuous blocks with a 750 ms commit interval. Normal restart keeps Comet's default `double_sign_check_height=0`; setting it positive rejects any retained validator key found in recent valid commits, while monotonic H/R/S protection remains in `priv_validator_state.json`.
+- This is still an in-memory application and an initial private-network foundation, not a completed production network. Transactional application persistence, snapshot export/import, state sync, evidence-to-slashing, validator epochs, partitions, Byzantine faults, rolling upgrades, remote signing, and Linux load/soak evidence remain open production gates.
 
 ## Verification Evidence
 
-The implementation has passed full unit, race, vet, module-integrity, build, demo, and fresh-process vector runs during this hardening milestone:
+The implementation has passed full unit, race, vet, dependency-tidiness, build, demo, and fresh-process vector runs during this hardening milestone:
 
 ```powershell
 go test -count=1 ./...
 go test -race -count=1 ./...
 go vet ./...
-go mod verify
+go mod tidy -diff
 go build -o $env:TEMP\chainlab-production-verify.exe ./cmd/chainlab
 go test -count=2 -run 'FreshProcess' ./internal/core
 go test -count=1 ./internal/abci
+go test -count=1 ./internal/cometnode
+go test -count=3 -run 'FourValidatorProcessesRestartReplayAndBlockSync' ./internal/cometnode
 go test -count=2 -run 'ABCIExecutionMatchesAcrossFreshProcesses' ./internal/abci
+go build -o $env:TEMP\chainlab-abci-production-verify.exe ./cmd/chainlab-abci
+go build -o $env:TEMP\chainlab-comet-production-verify.exe ./cmd/chainlab-comet
+go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 go run ./cmd/chainlab demo
 git diff --check
 ```
@@ -145,18 +155,20 @@ After fixing node lock lifecycle coverage and revision-binding the pending-filte
 
 Coverage includes the 64/65 WASM call-depth boundary, recursion/indirect/tail-call rejection, charged transfer/native/WASM/paymaster/batch failures, exact native gas vectors, fresh-process determinism, failed receipt production/import, strict snapshot schemas, canonical replay, corrupt/missing identity files, finality-lock reorg/restart attacks, conflicting certificates, vote persistence, fork-capacity limits, immutable concurrent reads, RPC failed status/cumulative gas, and ingress/query bounds.
 
-The final ABCI++ application tree additionally passed full unit tests, the full race suite, a focused ABCI race run, vet, tidy-diff, production CLI build, demo, two-run ABCI/core fresh-process vectors, and an offline `govulncheck` v1.6.0 scan with zero reachable vulnerabilities. The expanded dependency graph contains advisories in three imported packages and 20 required modules, but no vulnerable symbol is called.
+The final ABCI++ application tree additionally passed full unit tests, the full race suite, a focused ABCI race run, vet, tidy-diff, production CLI build, demo, two-run ABCI/core fresh-process vectors, and an offline `govulncheck` v1.6.0 scan with zero reachable vulnerabilities. That earlier application-only graph contained advisories in three imported packages and 20 required modules, but no vulnerable symbol was called.
 
-Windows `go mod verify` is not recorded as green for the CometBFT tree. The signed v0.39.3 module zip contains `.github/workflows/e2e-nightly-38x.yml ` with a trailing space; Windows normalizes the extracted cache path to the no-space name, so Go reports the directory as modified even though the file bytes match. Both `goproxy.cn/sumdb/sum.golang.org` and `sum.golang.google.cn` returned the committed module sums `h1:UegHXskZNomsijmm29nL5NkeXtnzkme6fg+q1hPQnEI=` and `h1:PmNfvtw256BC41ad0FABts236CSZnvZ0kjPOciBwTdM=`. All 60 newly added non-Comet checksum lines match CometBFT v0.39.3's upstream `go.sum`. A clean Linux module-cache verification remains part of the Linux/amd64 validator release gate.
+Adding the complete Comet node initially made three advisories symbol-reachable: QPACK trailer expansion in `quic-go` v0.59.0, gRPC missing-leading-slash authorization bypass in v1.79.2, and an unpatched `pion/dtls/v2` AES-GCM nonce issue pulled through Comet's compiled libp2p/WebRTC path even though ChainLab disables libp2p at runtime. The dependency floor now uses `quic-go` v0.59.1 and gRPC-Go v1.79.3, while `go-libp2p` v0.48.0 migrates the STUN/WebRTC graph to `pion/dtls/v3` and removes `dtls/v2` from the main module. The four-validator process suite, full tests, race, vet, and all builds pass with these overrides. A final fixed `govulncheck` v1.6.0 scan reports zero reachable vulnerabilities; two imported-package and 20 required-module advisories remain without reachable vulnerable symbols.
+
+Windows `go mod verify` is not recorded as green for the CometBFT tree. The signed v0.39.3 module zip contains `.github/workflows/e2e-nightly-38x.yml ` with a trailing space; Windows normalizes the extracted cache path to the no-space name, so Go reports the directory as modified even though the file bytes match. Both `goproxy.cn/sumdb/sum.golang.org` and `sum.golang.google.cn` returned the committed module sums `h1:UegHXskZNomsijmm29nL5NkeXtnzkme6fg+q1hPQnEI=` and `h1:PmNfvtw256BC41ad0FABts236CSZnvZ0kjPOciBwTdM=`. The initial 60 non-Comet ABCI checksum lines match CometBFT v0.39.3's upstream `go.sum`; the larger node graph and security overrides were resolved through signed sumdb. A clean Linux module-cache verification remains part of the Linux/amd64 validator release gate.
 
 ## Current Production Blockers
 
 Ordered by consensus and security dependency rather than feature visibility:
 
 1. **Authoritative CometBFT ABCI++ lifecycle**
-   - The initial in-memory `chainlab-v1` lifecycle now implements strict proposal preparation/processing, candidate finalize/commit, queries, bounded app-side mempool methods, fixed-set evidence commitment, and explicit vote/snapshot behavior with fresh-process and harness differential tests.
-   - Wire it to a real CometBFT socket or builtin process, persist and restore authoritative height/app hash, and replace the custom PoA/HTTP relay with multi-process Byzantine consensus and P2P. Keep the local harness for deterministic differential testing only.
-   - Complete validator updates, evidence-to-slashing rules, snapshot export/import, block sync, state sync, rolling restart, partition, and Byzantine fault tests as one versioned production lifecycle.
+   - The initial `chainlab-v1` lifecycle now runs across real socket and Comet node processes. Four-validator tests cover proposal/finalize/commit, full-mesh P2P, transaction gossip, 3-of-4 progress, Comet restart, block sync, fresh-app replay, common-height block/app-hash equality, and current state-root convergence. Keep the local harness for deterministic differential testing only.
+   - Replace replay-only in-memory recovery with atomic persistent application height/app hash/state, then implement verified snapshot export/import and state-sync application.
+   - Complete validator updates, evidence-to-slashing rules, rolling restart/upgrade, partition, delayed/missing proposer, equivocation, and Byzantine fault tests as one versioned production lifecycle.
    - Design finalized epoch transitions before enabling validator join/leave.
 
 2. **Crash-consistent transactional storage**
@@ -188,8 +200,8 @@ Ordered by consensus and security dependency rather than feature visibility:
 
 ## Next Immediate Work
 
-1. Build the smallest end-to-end CometBFT multi-process network with authoritative proposal/finalize/commit behavior, then prove restarts, P2P rounds, evidence, block sync, and state sync.
-2. Introduce transactional versioned storage and power-loss testing before treating long-lived validator application state as durable.
+1. Introduce transactional versioned application storage and power-loss testing, binding authoritative height/app hash/state atomically instead of depending on full replay after every application restart.
+2. Add verified snapshot export/import and CometBFT state sync, then extend the current multi-process network with partitions, evidence, missing proposers, rolling restart/upgrade, and Byzantine fault cases.
 3. Design certified validator epoch transitions and evidence-to-slashing behavior before enabling validator updates.
 4. Establish the Linux/amd64 validator release target, remote-signer boundary, JIT/RSS limits, reproducible build artifacts, and baseline operational telemetry.
 

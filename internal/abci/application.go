@@ -191,6 +191,10 @@ func decodeGenesisDocument(raw []byte) (GenesisDocument, error) {
 	return document, nil
 }
 
+func DecodeGenesisDocument(raw []byte) (GenesisDocument, error) {
+	return decodeGenesisDocument(raw)
+}
+
 func (a *Application) Info(context.Context, *abcitypes.RequestInfo) (*abcitypes.ResponseInfo, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -281,6 +285,10 @@ func validateConsensusParams(params *cmtproto.ConsensusParams, blockGasLimit uin
 		return fmt.Errorf("CometBFT evidence max bytes must be between 1 and %d", maxEvidenceBytes)
 	}
 	return nil
+}
+
+func ValidateConsensusParams(params *cmtproto.ConsensusParams, blockGasLimit uint64) error {
+	return validateConsensusParams(params, blockGasLimit)
 }
 
 func bindGenesisValidators(updates []abcitypes.ValidatorUpdate, expected []string) (map[string]string, error) {

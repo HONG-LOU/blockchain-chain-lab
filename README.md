@@ -41,8 +41,10 @@ It currently implements:
 - local multi-node devnet sync over HTTP peers: transaction relay, block import, produced-block broadcast, and finality vote relay
 - CLI commands for keys, genesis, nodes, signed transfers, block production, queries, and demos
 - a pinned CometBFT v0.39.3 `chainlab-v1` ABCI++ application foundation with strict genesis/consensus-parameter binding, bounded app-side mempool methods, deterministic proposal replay, candidate-only finalize, commit publication, empty vote extensions, and explicit unsupported snapshot restore behavior
+- generated four-validator private networks with independent secp256k1 validator keys, P2P identities, homes, ABCI sockets, RPC endpoints, full-mesh persistent peers, and real CometBFT processes
+- multi-process evidence for CometBFT rounds/P2P, raw-transaction commitment, progress with one of four validators stopped, lagging-node block sync, fresh in-memory application replay from the local Comet block store, and identical common-height block/app hashes plus current state-root/account state after recovery
 
-The ABCI++ foundation is currently an in-memory application lifecycle with unit, fresh-process, and local-harness differential evidence. It is not yet wired to a real CometBFT process or durable application database. The repository therefore does not yet provide a production Byzantine-fault-tolerant network, production P2P, evidence-to-slashing behavior, epoch-based validator transitions, block sync, or state sync. The local harness's checksummed JSON snapshot is a fail-closed development persistence format, not a transactional production database, WAL, archive store, or crash-tested atomic index layer.
+The ABCI++ lifecycle is now wired to real CometBFT socket and node processes, but the application state is still in memory. A fresh application can recover by replaying the local Comet block store, and a lagging Comet node has passed a real block-sync test, but this is not a durable application database or a completed production network. Evidence-to-slashing behavior, epoch-based validator transitions, application snapshots/state sync, partitions, Byzantine faults, load/soak evidence, remote signing, and transactional state storage remain open. The local harness's checksummed JSON snapshot is a fail-closed development persistence format, not a transactional production database, WAL, archive store, or crash-tested atomic index layer.
 
 The current implementation is not yet approved for public mainnet launch. [Mainstream Chain Capability And Production Gates](docs/mainstream-chain-capability-and-production-gates-2026-07-10.md) is the authoritative gate set; [the production technology roadmap](docs/current-blockchain-tech-roadmap.md) orders the implementation work. Mainnet requires deterministic execution, CometBFT ABCI++ consensus/networking, transactional storage, protocol upgrades, security testing, economics, and operational evidence.
 
@@ -54,6 +56,23 @@ The minimum supported toolchain is Go 1.25.12. The patch floor is security-sensi
 go test ./...
 go run ./cmd/chainlab demo
 ```
+
+## CometBFT Private Network
+
+Generate four independent validator homes without overwriting an existing directory:
+
+```powershell
+go run ./cmd/chainlab-comet init --out data/comet-private --chain-id chainlab-private
+```
+
+Each `node0` through `node3` home contains its own private-validator key and last-sign state, P2P key, Comet genesis, canonical ChainLab application genesis, and strict `chainlab-node.json`. Start one application and one Comet process per home, using the addresses in `network.json`:
+
+```powershell
+go run ./cmd/chainlab-abci --genesis data/comet-private/node0/config/chainlab-genesis.json --listen tcp://127.0.0.1:26658
+go run ./cmd/chainlab-comet node --home data/comet-private/node0
+```
+
+Repeat with the generated node-specific addresses for `node1` through `node3`. Generated keys are for isolated private-network testing, not production custody. The runtime locks Comet to the `flood` mempool because v0.39.3's socket server does not dispatch `InsertTx`/`ReapTxs`; the application-side mempool remains covered through direct lifecycle tests but is not claimed as socket-transport evidence. ChainLab's app hash commits block identity and therefore changes on empty blocks, so the generated Comet config deliberately creates blocks continuously with a bounded commit interval. Application state remains in memory, snapshot restore/state sync is explicitly unsupported, and production validators still require the transactional-storage and signer gates.
 
 ## CLI
 
