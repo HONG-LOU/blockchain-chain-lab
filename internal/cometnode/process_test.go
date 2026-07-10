@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -29,13 +30,17 @@ import (
 )
 
 const (
-	processHelperModeEnv    = "CHAINLAB_PROCESS_HELPER_MODE"
-	processHelperHomeEnv    = "CHAINLAB_PROCESS_HELPER_HOME"
-	processHelperGenesisEnv = "CHAINLAB_PROCESS_HELPER_GENESIS"
-	processHelperListenEnv  = "CHAINLAB_PROCESS_HELPER_LISTEN"
+	processHelperModeEnv         = "CHAINLAB_PROCESS_HELPER_MODE"
+	processHelperHomeEnv         = "CHAINLAB_PROCESS_HELPER_HOME"
+	processHelperGenesisEnv      = "CHAINLAB_PROCESS_HELPER_GENESIS"
+	processHelperListenEnv       = "CHAINLAB_PROCESS_HELPER_LISTEN"
+	processHelperDataDirEnv      = "CHAINLAB_PROCESS_HELPER_DATA_DIR"
+	processHelperStateSyncRPCEnv = "CHAINLAB_PROCESS_HELPER_STATE_SYNC_RPC"
+	processHelperTrustHeightEnv  = "CHAINLAB_PROCESS_HELPER_TRUST_HEIGHT"
+	processHelperTrustHashEnv    = "CHAINLAB_PROCESS_HELPER_TRUST_HASH"
 )
 
-func TestFourValidatorProcessesRestartReplayAndBlockSync(t *testing.T) {
+func TestFourValidatorProcessesRestartReplayBlockAndStateSync(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping multi-process CometBFT network in short mode")
 	}
@@ -74,6 +79,7 @@ func TestFourValidatorProcessesRestartReplayAndBlockSync(t *testing.T) {
 			processHelperModeEnv:    "abci",
 			processHelperGenesisEnv: filepath.Join(home, filepath.FromSlash(AppGenesisPath)),
 			processHelperListenEnv:  generatedNode.ABCIListenAddress,
+			processHelperDataDirEnv: filepath.Join(root, filepath.FromSlash(generatedNode.ApplicationData)),
 		})
 		processes = append(processes, apps[index])
 	}
@@ -129,10 +135,32 @@ func TestFourValidatorProcessesRestartReplayAndBlockSync(t *testing.T) {
 		t.Fatal(err)
 	}
 	home3 := filepath.Join(root, network.Nodes[3].Home)
+	apps[3] = startHelperProcess(t, root, "app-3-durable-restart", map[string]string{
+		processHelperModeEnv:    "abci",
+		processHelperGenesisEnv: filepath.Join(home3, filepath.FromSlash(AppGenesisPath)),
+		processHelperListenEnv:  network.Nodes[3].ABCIListenAddress,
+		processHelperDataDirEnv: filepath.Join(root, filepath.FromSlash(network.Nodes[3].ApplicationData)),
+	})
+	processes = append(processes, apps[3])
+	waitForTCP(t, network.Nodes[3].ABCIListenAddress, 15*time.Second)
+	cometNodes[3] = startHelperProcess(t, root, "comet-3-durable-app", map[string]string{
+		processHelperModeEnv: "comet",
+		processHelperHomeEnv: home3,
+	})
+	processes = append(processes, cometNodes[3])
+	durableRestartHeight := waitForConsistentNetworkState(t, clients, blockSyncHeight, sender, 2, 45*time.Second)
+	if err := cometNodes[3].stop(); err != nil {
+		t.Fatal(err)
+	}
+	if err := apps[3].stop(); err != nil {
+		t.Fatal(err)
+	}
+
 	apps[3] = startHelperProcess(t, root, "app-3-fresh-replay", map[string]string{
 		processHelperModeEnv:    "abci",
 		processHelperGenesisEnv: filepath.Join(home3, filepath.FromSlash(AppGenesisPath)),
 		processHelperListenEnv:  network.Nodes[3].ABCIListenAddress,
+		processHelperDataDirEnv: filepath.Join(root, "fresh-app-3"),
 	})
 	processes = append(processes, apps[3])
 	waitForTCP(t, network.Nodes[3].ABCIListenAddress, 15*time.Second)
@@ -141,10 +169,46 @@ func TestFourValidatorProcessesRestartReplayAndBlockSync(t *testing.T) {
 		processHelperHomeEnv: home3,
 	})
 	processes = append(processes, cometNodes[3])
-	replayHeight := waitForConsistentNetworkState(t, clients, blockSyncHeight, sender, 2, 45*time.Second)
+	replayHeight := waitForConsistentNetworkState(t, clients, durableRestartHeight, sender, 2, 45*time.Second)
 
 	broadcastTransfer(t, clients[3], senderKey, network.ChainID, sender, receiver, 2, 3)
-	_ = waitForConsistentNetworkState(t, clients, replayHeight+1, sender, 3, 45*time.Second)
+	thirdHeight := waitForConsistentNetworkState(t, clients, replayHeight+1, sender, 3, 45*time.Second)
+
+	if err := cometNodes[3].stop(); err != nil {
+		t.Fatal(err)
+	}
+	if err := apps[3].stop(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	trustedBlock, err := clients[0].Block(ctx, &thirdHeight)
+	cancel()
+	if err != nil || trustedBlock.Block == nil || len(trustedBlock.BlockID.Hash) != 32 {
+		t.Fatalf("trusted state-sync block = %+v err=%v", trustedBlock, err)
+	}
+	resetNodeDataForStateSync(t, home3)
+	apps[3] = startHelperProcess(t, root, "app-3-state-sync", map[string]string{
+		processHelperModeEnv:    "abci",
+		processHelperGenesisEnv: filepath.Join(home3, filepath.FromSlash(AppGenesisPath)),
+		processHelperListenEnv:  network.Nodes[3].ABCIListenAddress,
+		processHelperDataDirEnv: filepath.Join(root, filepath.FromSlash(network.Nodes[3].ApplicationData)),
+	})
+	processes = append(processes, apps[3])
+	waitForTCP(t, network.Nodes[3].ABCIListenAddress, 15*time.Second)
+	cometNodes[3] = startHelperProcess(t, root, "comet-3-state-sync", map[string]string{
+		processHelperModeEnv:         "comet",
+		processHelperHomeEnv:         home3,
+		processHelperStateSyncRPCEnv: strings.Join([]string{httpAddress(network.Nodes[0].RPCListenAddress), httpAddress(network.Nodes[1].RPCListenAddress)}, ","),
+		processHelperTrustHeightEnv:  strconv.FormatInt(thirdHeight, 10),
+		processHelperTrustHashEnv:    hex.EncodeToString(trustedBlock.BlockID.Hash),
+	})
+	processes = append(processes, cometNodes[3])
+	stateSyncHeight := waitForConsistentNetworkState(t, clients, thirdHeight, sender, 3, 120*time.Second)
+	if !cometNodes[3].logContains("Snapshot restored") {
+		t.Fatalf("state-sync node did not report snapshot restoration:\n%s", cometNodes[3].tailLog())
+	}
+	broadcastTransfer(t, clients[3], senderKey, network.ChainID, sender, receiver, 3, 4)
+	_ = waitForConsistentNetworkState(t, clients, stateSyncHeight+1, sender, 4, 45*time.Second)
 }
 
 func TestChainLabProcessHelper(t *testing.T) {
@@ -166,9 +230,23 @@ func TestChainLabProcessHelper(t *testing.T) {
 		if loadErr != nil {
 			t.Fatal(loadErr)
 		}
-		err = chainabci.Serve(ctx, os.Getenv(processHelperListenEnv), genesis, logger)
+		err = chainabci.ServeWithConfig(ctx, os.Getenv(processHelperListenEnv), chainabci.Config{
+			Genesis: genesis,
+			DataDir: os.Getenv(processHelperDataDirEnv),
+		}, logger)
 	case "comet":
-		err = Run(ctx, os.Getenv(processHelperHomeEnv), os.Stdout)
+		options := RunOptions{}
+		if rpcServers := os.Getenv(processHelperStateSyncRPCEnv); rpcServers != "" {
+			trustHeight, parseErr := strconv.ParseInt(os.Getenv(processHelperTrustHeightEnv), 10, 64)
+			if parseErr != nil {
+				t.Fatal(parseErr)
+			}
+			options.StateSync = &StateSyncOptions{
+				RPCServers: strings.Split(rpcServers, ","), TrustHeight: trustHeight,
+				TrustHash: os.Getenv(processHelperTrustHashEnv),
+			}
+		}
+		err = RunWithOptions(ctx, os.Getenv(processHelperHomeEnv), os.Stdout, options)
 	default:
 		t.Fatalf("unknown process helper mode %q", mode)
 	}
@@ -267,6 +345,34 @@ func (process *helperProcess) tailLog() string {
 		raw = raw[len(raw)-maximum:]
 	}
 	return string(raw)
+}
+
+func (process *helperProcess) logContains(text string) bool {
+	raw, err := os.ReadFile(process.logPath)
+	return err == nil && bytes.Contains(raw, []byte(text))
+}
+
+func resetNodeDataForStateSync(t *testing.T, home string) {
+	t.Helper()
+	dataDir := filepath.Join(home, "data")
+	statePath := filepath.Join(dataDir, "priv_validator_state.json")
+	stateRaw, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, stateRaw, info.Mode().Perm()); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func availablePortRange(t *testing.T, count int) int {

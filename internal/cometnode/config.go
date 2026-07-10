@@ -3,6 +3,7 @@ package cometnode
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,6 +34,7 @@ const (
 	NodeProtocol          = "chainlab-comet-node-v1"
 	NodeDocumentPath      = "config/chainlab-node.json"
 	AppGenesisPath        = "config/chainlab-genesis.json"
+	AppDataPath           = "data/chainlab-app"
 	maxNodeDocumentBytes  = 64 * 1024
 	maxCometGenesisBytes  = chainabci.MaxGenesisDocumentBytes + 1024*1024
 	maxPrivateKeyBytes    = 16 * 1024
@@ -49,6 +51,16 @@ type NodeDocument struct {
 	P2PListenAddress   string `json:"p2p_listen_address"`
 	PersistentPeers    string `json:"persistent_peers"`
 	ApplicationGenesis string `json:"application_genesis"`
+}
+
+type RunOptions struct {
+	StateSync *StateSyncOptions
+}
+
+type StateSyncOptions struct {
+	RPCServers  []string
+	TrustHeight int64
+	TrustHash   string
 }
 
 func (document NodeDocument) CanonicalBytes() ([]byte, error) {
@@ -149,6 +161,10 @@ func BuildConfig(home string, document NodeDocument) (*cmtcfg.Config, error) {
 }
 
 func Run(ctx context.Context, home string, out io.Writer) error {
+	return RunWithOptions(ctx, home, out, RunOptions{})
+}
+
+func RunWithOptions(ctx context.Context, home string, out io.Writer, options RunOptions) error {
 	if ctx == nil {
 		return errors.New("node context is required")
 	}
@@ -165,6 +181,11 @@ func Run(ctx context.Context, home string, out io.Writer) error {
 	config, err := BuildConfig(home, document)
 	if err != nil {
 		return err
+	}
+	if options.StateSync != nil {
+		if err := applyStateSyncOptions(config, *options.StateSync); err != nil {
+			return err
+		}
 	}
 	baseLogger := cmtlog.NewTMLogger(cmtlog.NewSyncWriter(out))
 	logger, err := cmtflags.ParseLogLevel(config.LogLevel, baseLogger, cmtcfg.DefaultLogLevel)
@@ -188,6 +209,39 @@ func Run(ctx context.Context, home string, out io.Writer) error {
 	case <-cometNode.Quit():
 		return errors.New("CometBFT node stopped unexpectedly")
 	}
+}
+
+func applyStateSyncOptions(config *cmtcfg.Config, options StateSyncOptions) error {
+	if len(options.RPCServers) != 2 {
+		return errors.New("state sync requires exactly two RPC servers")
+	}
+	for index, server := range options.RPCServers {
+		if !strings.HasPrefix(server, "http://") && !strings.HasPrefix(server, "https://") {
+			return fmt.Errorf("state sync RPC server %d must use http or https", index)
+		}
+	}
+	if options.TrustHeight <= 0 {
+		return errors.New("state sync trust height must be positive")
+	}
+	trustHash := strings.ToUpper(strings.TrimSpace(options.TrustHash))
+	decodedHash, err := hex.DecodeString(trustHash)
+	if err != nil || len(decodedHash) != 32 {
+		return errors.New("state sync trust hash must be a 32-byte hex value")
+	}
+	config.StateSync.Enable = true
+	config.StateSync.RPCServers = append([]string(nil), options.RPCServers...)
+	config.StateSync.TrustHeight = options.TrustHeight
+	config.StateSync.TrustHash = trustHash
+	config.StateSync.TrustPeriod = 7 * 24 * time.Hour
+	config.StateSync.DiscoveryTime = 5 * time.Second
+	config.StateSync.ChunkRequestTimeout = 10 * time.Second
+	config.StateSync.ChunkFetchers = 4
+	config.StateSync.MaxSnapshotChunks = 512
+	config.StateSync.TempDir = filepath.Join(config.RootDir, "data", "state-sync")
+	if err := config.ValidateBasic(); err != nil {
+		return fmt.Errorf("validate state-sync CometBFT config: %w", err)
+	}
+	return nil
 }
 
 func validateNodeDocument(document NodeDocument) error {

@@ -23,7 +23,7 @@ The existing local PoA node remains a fast development/differential-test harness
 
 ## Current Verified Harness Boundary
 
-- The `chainlab-v1` CometBFT v0.39.3 ABCI++ application strictly binds canonical genesis and consensus parameters, reuses the deterministic executor, performs bounded prepare and full process/finalize replay, publishes only on commit, commits execution metadata into app hash, exposes bounded app-side mempool methods, and has fresh-process plus local-harness receipt/root differential tests. It now runs through official socket clients and an eight-process four-validator CometBFT network with P2P rounds, raw transaction commitment, 3-of-4 progress, Comet restart, block sync, fresh-app replay, and cross-node state convergence. The app remains in memory and still lacks durable state, snapshot/state sync, evidence slashing, validator epochs, and the broader fault network.
+- The `chainlab-v1` CometBFT v0.39.3 ABCI++ application strictly binds canonical genesis and consensus parameters, reuses the deterministic executor, performs bounded prepare and full process/finalize replay, and publishes only after a synchronized Pebble WAL batch atomically binds versioned state, height/app hash, transactions, receipts, and block index. Official socket and four-validator process tests cover P2P rounds, raw transaction commitment, 3-of-4 progress, Comet restart, block sync, durable app restart, fresh-app replay, destructive-data state sync through two trusted RPC sources, and cross-node convergence. Evidence slashing, validator epochs, incremental MVCC/retention, and the broader fault network remain open.
 - The compiled Comet node graph requires security floors above v0.39.3's original transitives: `go-libp2p` v0.48.0 removes the unpatched `pion/dtls/v2` WebRTC/STUN path, `quic-go` v0.59.1 fixes QPACK trailer expansion, and gRPC-Go v1.79.3 fixes the missing-leading-slash authorization bypass. The real process suite and full race/build gates pass these overrides; version changes require the same compatibility evidence before release.
 - The local harness now persists a checksum- and generation-bound snapshot v2 plus a data-directory manifest, replays canonical and known branches from an explicitly timestamped genesis, validates every replayed state root, and refuses silent genesis recreation when initialized data is incomplete. Public genesis and validator secrets are separate artifacts. This is fail-closed development persistence, not the transactional production database.
 - A valid highest certificate is a monotonic local finality lock. A branch that does not descend from it is rejected, compatible certificate subsets are merged, conflicting quorum certificates produce a persistent sticky halt, and uncertified `finalized` remains at genesis. Head-depth observations are exposed only as `depth_confirmation`.
@@ -45,20 +45,20 @@ The existing local PoA node remains a fast development/differential-test harness
 
 ## Gate 2: CometBFT ABCI++ Production Path
 
-- Preserve and extend the implemented v0.39.3 `chainlab-v1` foundation for `Info`, `Query`, `CheckTx`, `InsertTx`, `ReapTxs`, `InitChain`, `PrepareProposal`, `ProcessProposal`, `FinalizeBlock`, `Commit`, strict empty vote extensions, fixed-set evidence commitment, and explicit unsupported snapshot restore behavior.
-- Preserve the implemented socket and four-validator process path while adding durable application storage so CometBFT height/app-hash/state become one atomic authoritative lifecycle instead of replay-only recovery.
-- Implement validator updates, evidence-to-slashing rules, verified snapshot export/import, and state-sync application before claiming the complete ABCI++ lifecycle.
+- Preserve and extend the implemented v0.39.3 `chainlab-v1` foundation for `Info`, `Query`, `CheckTx`, `InsertTx`, `ReapTxs`, `InitChain`, `PrepareProposal`, `ProcessProposal`, `FinalizeBlock`, `Commit`, strict empty vote extensions, fixed-set evidence commitment, and verified snapshot export/import.
+- Preserve the implemented socket, atomic durable application commit, block sync, app replay, and real Comet state-sync path as one authoritative height/app-hash/state lifecycle.
+- Implement validator updates and evidence-to-slashing rules before claiming the complete ABCI++ lifecycle.
 - Replace the harness's fixed genesis validator set with explicitly versioned voting power, epochs, certified set transitions, evidence-to-slashing rules, quorum rounding, genesis, chain ID, and upgrade compatibility in the authoritative CometBFT lifecycle.
-- Extend the implemented normal-round, reconnect, restart, app-replay, and block-sync process test with delayed/missing proposers, equivocation evidence, partitions, state sync, validator changes, load, and rolling upgrades.
+- Extend the implemented normal-round, reconnect, restart, app-replay, block-sync, and state-sync process test with delayed/missing proposers, equivocation evidence, partitions, validator changes, load, and rolling upgrades.
 - Differential-test ABCI++ execution against the local harness using the same transaction corpus and roots.
 
 ## Gate 3: Durable State And History
 
-- Preserve snapshot-v2 checksum, manifest, replay, finality-lock, evidence, and fail-closed schema invariants while replacing JSON persistence.
-- Preserve commit-uncertain sticky halt semantics, then replace the ambiguity with a WAL-backed authoritative recovery decision.
-- Commit application state, receipts, indexes, and app hash atomically per finalized block.
-- Recover after kill/power-loss fault injection at every commit phase without partial state.
-- Add schema/version metadata, deterministic migrations, corruption detection, backup/restore, and snapshot import verification.
+- Preserve snapshot-v2 checksum, manifest, replay, finality-lock, evidence, and fail-closed schema invariants while the local harness remains a differential tool.
+- Preserve the implemented Pebble synchronized-WAL atomic state/receipt/index/app-hash commit and fail-closed manifest/root/corruption validation.
+- Replace complete per-key state copies at every height with a bounded incremental MVCC/delta layout and measured compaction/retention policy.
+- Extend the implemented abrupt-exit/forced-kill recovery across additional filesystem and commit phases.
+- Add deterministic migrations, backup/restore, and rollback protection; preserve the independently verified snapshot/state-sync import path.
 - Define pruned, full, and archive profiles with exact historical query guarantees.
 - Bound indexes and log queries; support an external production indexer without making it consensus-critical.
 

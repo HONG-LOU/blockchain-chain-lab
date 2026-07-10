@@ -273,11 +273,11 @@ func TestQueryVoteAndSnapshotBoundaries(t *testing.T) {
 		t.Fatalf("list snapshots = %+v err=%v", snapshots, err)
 	}
 	offer, err := fixture.app.OfferSnapshot(context.Background(), &abcitypes.RequestOfferSnapshot{})
-	if err != nil || offer.Result != abcitypes.ResponseOfferSnapshot_REJECT_FORMAT {
+	if err != nil || offer.Result != abcitypes.ResponseOfferSnapshot_ABORT {
 		t.Fatalf("offer snapshot = %+v err=%v", offer, err)
 	}
 	apply, err := fixture.app.ApplySnapshotChunk(context.Background(), &abcitypes.RequestApplySnapshotChunk{})
-	if err != nil || apply.Result != abcitypes.ResponseApplySnapshotChunk_REJECT_SNAPSHOT {
+	if err != nil || apply.Result != abcitypes.ResponseApplySnapshotChunk_ABORT {
 		t.Fatalf("apply snapshot = %+v err=%v", apply, err)
 	}
 }

@@ -29,6 +29,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	flags := flag.NewFlagSet("chainlab-abci", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	genesisPath := flags.String("genesis", "", "canonical ChainLab application genesis")
+	dataDir := flags.String("data-dir", "", "transactional ChainLab application data directory")
 	listen := flags.String("listen", "tcp://127.0.0.1:26658", "ABCI socket listen address")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -39,11 +40,17 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	if strings.TrimSpace(*genesisPath) == "" {
 		return errors.New("chainlab-abci requires --genesis")
 	}
+	if strings.TrimSpace(*dataDir) == "" {
+		return errors.New("chainlab-abci requires --data-dir")
+	}
 	genesis, err := chainabci.LoadGenesisDocument(*genesisPath)
 	if err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "chainlab ABCI listening on %s chain_id=%s\n", *listen, genesis.ChainID)
 	logger := cmtlog.NewFilter(cmtlog.NewTMLogger(cmtlog.NewSyncWriter(out)), cmtlog.AllowInfo())
-	return chainabci.Serve(ctx, *listen, genesis, logger)
+	return chainabci.ServeWithConfig(ctx, *listen, chainabci.Config{
+		Genesis: genesis,
+		DataDir: *dataDir,
+	}, logger)
 }

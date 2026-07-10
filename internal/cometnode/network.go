@@ -55,6 +55,7 @@ type NetworkNode struct {
 	Name               string `json:"name"`
 	Home               string `json:"home"`
 	ApplicationGenesis string `json:"application_genesis"`
+	ApplicationData    string `json:"application_data"`
 	ABCIListenAddress  string `json:"abci_listen_address"`
 	RPCListenAddress   string `json:"rpc_listen_address"`
 	P2PListenAddress   string `json:"p2p_listen_address"`
@@ -184,6 +185,7 @@ func InitializeNetwork(config NetworkConfig) (NetworkDocument, error) {
 			Name:               identity.name,
 			Home:               identity.name,
 			ApplicationGenesis: filepath.ToSlash(filepath.Join(identity.name, filepath.FromSlash(AppGenesisPath))),
+			ApplicationData:    filepath.ToSlash(filepath.Join(identity.name, filepath.FromSlash(AppDataPath))),
 			ABCIListenAddress:  nodeDocument.ProxyApp,
 			RPCListenAddress:   nodeDocument.RPCListenAddress,
 			P2PListenAddress:   nodeDocument.P2PListenAddress,

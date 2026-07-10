@@ -40,11 +40,11 @@ It currently implements:
 - EVM-style block/log/pending transaction filter polling with `eth_newBlockFilter`, `eth_newPendingTransactionFilter`, `eth_newFilter`, `eth_getFilterLogs`, `eth_getFilterChanges`, and `eth_uninstallFilter`
 - local multi-node devnet sync over HTTP peers: transaction relay, block import, produced-block broadcast, and finality vote relay
 - CLI commands for keys, genesis, nodes, signed transfers, block production, queries, and demos
-- a pinned CometBFT v0.39.3 `chainlab-v1` ABCI++ application foundation with strict genesis/consensus-parameter binding, bounded app-side mempool methods, deterministic proposal replay, candidate-only finalize, commit publication, empty vote extensions, and explicit unsupported snapshot restore behavior
+- a pinned CometBFT v0.39.3 `chainlab-v1` ABCI++ application with strict genesis/consensus-parameter binding, bounded app-side mempool methods, deterministic proposal replay, candidate-only finalize, commit publication, empty vote extensions, Pebble-backed versioned commits, and verified snapshot restore
 - generated four-validator private networks with independent secp256k1 validator keys, P2P identities, homes, ABCI sockets, RPC endpoints, full-mesh persistent peers, and real CometBFT processes
-- multi-process evidence for CometBFT rounds/P2P, raw-transaction commitment, progress with one of four validators stopped, lagging-node block sync, fresh in-memory application replay from the local Comet block store, and identical common-height block/app hashes plus current state-root/account state after recovery
+- multi-process evidence for CometBFT rounds/P2P, raw-transaction commitment, progress with one of four validators stopped, lagging-node block sync, durable application restart, fresh application replay, destructive-data state sync through two light-client RPC sources, and identical common-height block/app hashes plus current state-root/account state after recovery
 
-The ABCI++ lifecycle is now wired to real CometBFT socket and node processes, but the application state is still in memory. A fresh application can recover by replaying the local Comet block store, and a lagging Comet node has passed a real block-sync test, but this is not a durable application database or a completed production network. Evidence-to-slashing behavior, epoch-based validator transitions, application snapshots/state sync, partitions, Byzantine faults, load/soak evidence, remote signing, and transactional state storage remain open. The local harness's checksummed JSON snapshot is a fail-closed development persistence format, not a transactional production database, WAL, archive store, or crash-tested atomic index layer.
+The ABCI++ lifecycle now writes each committed height to a Pebble atomic batch with a synchronized WAL. Height, application commitment/hash, per-key state, raw transactions, receipts, and block-hash index advance together; restart recomputes roots and rejects missing, extra, non-canonical, or corrupted entries. Verified 1 MiB-chunk snapshots are independently bound to genesis, trusted app hash, state root, content hash, and checksum, and a real CometBFT validator has recovered through state sync after its Comet and application data were removed. The storage currently writes a complete per-key state version at each height and keeps every version; incremental MVCC/delta storage, migrations, pruned/full/archive modes, backups, evidence-to-slashing, validator epochs, partitions, Byzantine/load evidence, and remote signing remain open.
 
 The current implementation is not yet approved for public mainnet launch. [Mainstream Chain Capability And Production Gates](docs/mainstream-chain-capability-and-production-gates-2026-07-10.md) is the authoritative gate set; [the production technology roadmap](docs/current-blockchain-tech-roadmap.md) orders the implementation work. Mainnet requires deterministic execution, CometBFT ABCI++ consensus/networking, transactional storage, protocol upgrades, security testing, economics, and operational evidence.
 
@@ -68,11 +68,11 @@ go run ./cmd/chainlab-comet init --out data/comet-private --chain-id chainlab-pr
 Each `node0` through `node3` home contains its own private-validator key and last-sign state, P2P key, Comet genesis, canonical ChainLab application genesis, and strict `chainlab-node.json`. Start one application and one Comet process per home, using the addresses in `network.json`:
 
 ```powershell
-go run ./cmd/chainlab-abci --genesis data/comet-private/node0/config/chainlab-genesis.json --listen tcp://127.0.0.1:26658
+go run ./cmd/chainlab-abci --genesis data/comet-private/node0/config/chainlab-genesis.json --data-dir data/comet-private/node0/data/chainlab-app --listen tcp://127.0.0.1:26658
 go run ./cmd/chainlab-comet node --home data/comet-private/node0
 ```
 
-Repeat with the generated node-specific addresses for `node1` through `node3`. Generated keys are for isolated private-network testing, not production custody. The runtime locks Comet to the `flood` mempool because v0.39.3's socket server does not dispatch `InsertTx`/`ReapTxs`; the application-side mempool remains covered through direct lifecycle tests but is not claimed as socket-transport evidence. ChainLab's app hash commits block identity and therefore changes on empty blocks, so the generated Comet config deliberately creates blocks continuously with a bounded commit interval. Application state remains in memory, snapshot restore/state sync is explicitly unsupported, and production validators still require the transactional-storage and signer gates.
+Repeat with the generated node-specific addresses for `node1` through `node3`. Generated keys are for isolated private-network testing, not production custody. The runtime locks Comet to the `flood` mempool because v0.39.3's socket server does not dispatch `InsertTx`/`ReapTxs`; the application-side mempool remains covered through direct lifecycle tests but is not claimed as socket-transport evidence. ChainLab's app hash commits block identity and therefore changes on empty blocks, so the generated Comet config deliberately creates blocks continuously with a bounded commit interval. Each application data directory is single-writer Pebble storage; snapshot export/import and real state sync are implemented, while production validators still require retention/migration policy, remote signing, broader fault/load evidence, and the remaining security gates.
 
 ## CLI
 
@@ -364,8 +364,8 @@ All ordinary HTTP routes share 32 execution slots; `/health/live` and valid WebS
 The production sequence is:
 
 - production activation and Linux/amd64 evidence for the implemented deterministic WASM, included-failure, and native-contract metering rules
-- CometBFT ABCI++ consensus, P2P, evidence, validator updates, block/state sync, and multi-process fault tests
-- transactional KV storage, atomic commits, schema migrations, snapshots, and pruned/full/archive profiles
+- CometBFT evidence slashing, validator updates/epochs, partitions, rolling upgrades, and broader multi-process fault tests on the implemented block/state-sync path
+- incremental versioned KV retention, schema migrations, backup/restore, and pruned/full/archive profiles on the implemented atomic Pebble/WAL foundation
 - protocol upgrades, inclusion proofs, protected validator signing, metrics/alerts, backup/recovery, fuzz/property/race/fault/load/soak validation
 - economics, governance security, wallet/SDK/indexer/token/oracle/interoperability ecosystem and staged public testnets
 

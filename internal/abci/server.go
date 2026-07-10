@@ -63,6 +63,10 @@ func ParseGenesisDocument(raw []byte) (GenesisDocument, error) {
 }
 
 func Serve(ctx context.Context, listen string, genesis GenesisDocument, logger cmtlog.Logger) error {
+	return ServeWithConfig(ctx, listen, Config{Genesis: genesis}, logger)
+}
+
+func ServeWithConfig(ctx context.Context, listen string, config Config, logger cmtlog.Logger) (returnErr error) {
 	if ctx == nil {
 		return errors.New("server context is required")
 	}
@@ -72,10 +76,13 @@ func Serve(ctx context.Context, listen string, genesis GenesisDocument, logger c
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	application, err := NewApplication(Config{Genesis: genesis})
+	application, err := NewApplication(config)
 	if err != nil {
 		return err
 	}
+	defer func() {
+		returnErr = errors.Join(returnErr, application.Close())
+	}()
 	server, err := abciserver.NewServer(listen, "socket", application)
 	if err != nil {
 		return fmt.Errorf("create ABCI socket server: %w", err)

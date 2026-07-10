@@ -169,7 +169,8 @@ func (a *Application) FinalizeBlock(_ context.Context, req *abcitypes.RequestFin
 			commitment: commitment,
 			appHash:    applicationHash(commitment),
 		},
-		txs: cloneTransactions(execution.rawTxs),
+		txs:      cloneTransactions(execution.rawTxs),
+		receipts: cloneReceipts(execution.receipts),
 	}
 	a.candidate = candidate
 	return &abcitypes.ResponseFinalizeBlock{

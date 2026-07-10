@@ -77,19 +77,28 @@ func (g GenesisDocument) CanonicalBytes() ([]byte, error) {
 }
 
 type Config struct {
-	Genesis GenesisDocument
+	Genesis     GenesisDocument
+	DataDir     string
+	persistence applicationPersistence
 }
 
 type Application struct {
-	mu          sync.Mutex
-	genesis     GenesisDocument
-	committed   committedState
-	runtime     *contracts.Runtime
-	initialized bool
-	proposers   map[string]string
-	candidate   *blockCandidate
-	mempool     appMempool
-	haltErr     error
+	mu                    sync.Mutex
+	genesis               GenesisDocument
+	committed             committedState
+	runtime               *contracts.Runtime
+	initialized           bool
+	proposers             map[string]string
+	candidate             *blockCandidate
+	mempool               appMempool
+	haltErr               error
+	persistence           applicationPersistence
+	closed                bool
+	committedTxs          [][]byte
+	committedReceipts     []types.Receipt
+	snapshotCache         *applicationSnapshotCache
+	previousSnapshotCache *applicationSnapshotCache
+	incomingSnapshot      *incomingApplicationSnapshot
 }
 
 type committedState struct {
@@ -115,8 +124,9 @@ type applicationCommitment struct {
 }
 
 type blockCandidate struct {
-	state committedState
-	txs   [][]byte
+	state    committedState
+	txs      [][]byte
+	receipts []types.Receipt
 }
 
 func NewApplication(config Config) (*Application, error) {
@@ -144,13 +154,33 @@ func NewApplication(config Config) (*Application, error) {
 		commitment: commitment,
 		appHash:    applicationHash(commitment),
 	}
+	persisted := persistedApplicationState{committed: committed, proposers: make(map[string]string)}
+	persistence := config.persistence
+	if persistence == nil && config.DataDir != "" {
+		persistence, err = openApplicationDB(config.DataDir)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if persistence != nil {
+		persisted, err = persistence.LoadOrCreate(genesis, persisted)
+		if err != nil {
+			_ = persistence.Close()
+			return nil, err
+		}
+		committed = persisted.committed
+	}
 	runtime := contracts.NewRuntimeWithDefaults()
 	return &Application{
-		genesis:   genesis,
-		committed: committed,
-		runtime:   runtime,
-		proposers: make(map[string]string),
-		mempool:   newAppMempool(store),
+		genesis:           genesis,
+		committed:         committed,
+		runtime:           runtime,
+		initialized:       persisted.initialized,
+		proposers:         cloneStringMap(persisted.proposers),
+		mempool:           newAppMempool(committed.store),
+		persistence:       persistence,
+		committedTxs:      cloneTransactions(persisted.txs),
+		committedReceipts: cloneReceipts(persisted.receipts),
 	}, nil
 }
 
@@ -198,6 +228,9 @@ func DecodeGenesisDocument(raw []byte) (GenesisDocument, error) {
 func (a *Application) Info(context.Context, *abcitypes.RequestInfo) (*abcitypes.ResponseInfo, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.closed {
+		return nil, errors.New("application is closed")
+	}
 	data, err := hash.CanonicalBytes(struct {
 		Protocol  string `json:"protocol"`
 		StateRoot string `json:"state_root"`
@@ -222,6 +255,9 @@ func (a *Application) Info(context.Context, *abcitypes.RequestInfo) (*abcitypes.
 func (a *Application) InitChain(_ context.Context, req *abcitypes.RequestInitChain) (*abcitypes.ResponseInitChain, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.closed {
+		return nil, errors.New("application is closed")
+	}
 	if req == nil {
 		return nil, errors.New("init chain request is required")
 	}
@@ -249,6 +285,10 @@ func (a *Application) InitChain(_ context.Context, req *abcitypes.RequestInitCha
 	}
 	proposers, err := bindGenesisValidators(req.Validators, a.committed.store.Validators())
 	if err != nil {
+		return nil, err
+	}
+	if err := a.persistLocked(a.committed, true, proposers, nil, nil); err != nil {
+		a.haltErr = err
 		return nil, err
 	}
 	a.proposers = proposers
@@ -334,6 +374,9 @@ func bindGenesisValidators(updates []abcitypes.ValidatorUpdate, expected []strin
 func (a *Application) Query(_ context.Context, req *abcitypes.RequestQuery) (*abcitypes.ResponseQuery, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.closed {
+		return nil, errors.New("application is closed")
+	}
 	if req == nil {
 		return nil, errors.New("query request is required")
 	}
@@ -411,13 +454,28 @@ func (a *Application) Commit(context.Context, *abcitypes.RequestCommit) (*abcity
 			return nil, err
 		}
 	}
+	if err := a.persistLocked(
+		a.candidate.state,
+		true,
+		a.proposers,
+		a.candidate.txs,
+		a.candidate.receipts,
+	); err != nil {
+		a.haltErr = err
+		return nil, err
+	}
 	a.committed = a.candidate.state
+	a.committedTxs = cloneTransactions(a.candidate.txs)
+	a.committedReceipts = cloneReceipts(a.candidate.receipts)
 	a.candidate = nil
 	a.mempool = nextPool
 	return &abcitypes.ResponseCommit{}, nil
 }
 
 func (a *Application) requireReadyLocked() error {
+	if a.closed {
+		return errors.New("application is closed")
+	}
 	if a.haltErr != nil {
 		return fmt.Errorf("application is halted: %w", a.haltErr)
 	}
@@ -428,6 +486,54 @@ func (a *Application) requireReadyLocked() error {
 		return errors.New("application height domain is exhausted")
 	}
 	return nil
+}
+
+func (a *Application) persistLocked(
+	committed committedState,
+	initialized bool,
+	proposers map[string]string,
+	txs [][]byte,
+	receipts []types.Receipt,
+) error {
+	if a.persistence == nil {
+		return nil
+	}
+	if err := a.persistence.Save(persistedApplicationState{
+		committed: committed, initialized: initialized, proposers: cloneStringMap(proposers),
+		txs: cloneTransactions(txs), receipts: cloneReceipts(receipts),
+	}); err != nil {
+		return fmt.Errorf("persist committed application state: %w", err)
+	}
+	return nil
+}
+
+func cloneReceipts(receipts []types.Receipt) []types.Receipt {
+	cloned := make([]types.Receipt, len(receipts))
+	for index, receipt := range receipts {
+		cloned[index] = receipt
+		cloned[index].Events = make([]types.Event, len(receipt.Events))
+		for eventIndex, event := range receipt.Events {
+			cloned[index].Events[eventIndex] = event
+			cloned[index].Events[eventIndex].Attributes = cloneStringMap(event.Attributes)
+		}
+	}
+	return cloned
+}
+
+func (a *Application) Close() error {
+	if a == nil {
+		return nil
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed {
+		return nil
+	}
+	a.closed = true
+	if a.persistence == nil {
+		return nil
+	}
+	return a.persistence.Close()
 }
 
 func (a *Application) proposerLocked(address []byte) (string, error) {

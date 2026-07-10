@@ -58,6 +58,9 @@ func TestInitializeNetworkBuildsFourStrictIndependentValidatorHomes(t *testing.T
 		if config.ProxyApp != generatedNode.ABCIListenAddress || config.RPC.ListenAddress != generatedNode.RPCListenAddress || config.P2P.ListenAddress != generatedNode.P2PListenAddress {
 			t.Fatalf("node %d addresses do not match manifest", index)
 		}
+		if generatedNode.ApplicationData != filepath.ToSlash(filepath.Join(generatedNode.Home, filepath.FromSlash(AppDataPath))) {
+			t.Fatalf("node %d application data path = %q", index, generatedNode.ApplicationData)
+		}
 		if peers := strings.Split(nodeDocument.PersistentPeers, ","); len(peers) != 3 {
 			t.Fatalf("node %d persistent peers = %q", index, nodeDocument.PersistentPeers)
 		}
