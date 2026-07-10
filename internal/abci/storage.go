@@ -357,17 +357,22 @@ func validatePersistedApplicationState(
 	if value.committed.store == nil {
 		return errors.New("persisted application store is required")
 	}
-	if genesisHash == "" || commitment.Protocol != genesis.Protocol || commitment.ChainID != genesis.ChainID {
+	expectedProtocol := protocolAtHeight(genesis, commitment.Height)
+	if genesisHash == "" || commitment.Protocol != expectedProtocol || commitment.ChainID != genesis.ChainID {
 		return errors.New("persisted application commitment identity is invalid")
 	}
 	if commitment.Height < 0 || commitment.GasLimit != genesis.BlockGasLimit {
 		return errors.New("persisted application commitment height or gas limit is invalid")
 	}
-	if commitment.StateRoot != value.committed.store.Root() {
+	expectedStateRoot, err := stateRootForProtocol(commitment.Protocol, value.committed.store)
+	if err != nil {
+		return err
+	}
+	if commitment.StateRoot != expectedStateRoot {
 		return errors.New("persisted application state root mismatch")
 	}
 	lifecycle, hasLifecycle := value.committed.store.ValidatorLifecycle()
-	if genesis.Protocol == ProtocolVersion {
+	if !protocolUsesValidatorLifecycle(commitment.Protocol) {
 		if hasLifecycle || commitment.ValidatorRoot != "" || commitment.Epoch != 0 {
 			return errors.New("protocol version 1 commitment contains validator lifecycle state")
 		}
@@ -452,10 +457,18 @@ func validatePersistedApplicationState(
 		}
 		decodedTransactions[index] = tx
 	}
-	if types.TransactionRoot(decodedTransactions) != commitment.TxRoot {
+	expectedTxRoot, err := transactionRootForProtocol(commitment.Protocol, decodedTransactions)
+	if err != nil {
+		return err
+	}
+	if expectedTxRoot != commitment.TxRoot {
 		return errors.New("persisted transaction root mismatch")
 	}
-	if types.ReceiptRoot(value.receipts) != commitment.ReceiptRoot {
+	expectedReceiptRoot, err := receiptRootForProtocol(commitment.Protocol, value.receipts)
+	if err != nil {
+		return err
+	}
+	if expectedReceiptRoot != commitment.ReceiptRoot {
 		return errors.New("persisted receipt root mismatch")
 	}
 	validators := value.committed.store.Validators()
@@ -482,7 +495,7 @@ func validatePersistedApplicationState(
 		if _, exists := seenAccounts[account]; exists {
 			return errors.New("persisted proposer account is duplicated")
 		}
-		if genesis.Protocol == ProtocolVersionV2 {
+		if protocolUsesValidatorLifecycle(commitment.Protocol) {
 			identity, exists := lifecycle.Validators[consensusAddress]
 			if !exists || identity.Account != account {
 				return errors.New("persisted proposer binding does not match validator lifecycle identity")

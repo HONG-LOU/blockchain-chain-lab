@@ -2,6 +2,7 @@ package types
 
 import (
 	"chainlab/internal/hash"
+	chainproof "chainlab/pkg/proof"
 )
 
 const (
@@ -359,4 +360,60 @@ func ReceiptRoot(receipts []Receipt) string {
 		hashes[i] = hash.MustHex(receipt)
 	}
 	return hash.MustHex(hashes)
+}
+
+func TransactionMerkleRoot(txs []Transaction) (string, error) {
+	leaves, err := transactionMerkleLeaves(txs)
+	if err != nil {
+		return "", err
+	}
+	return chainproof.Root(chainproof.DomainTx, leaves)
+}
+
+func ReceiptMerkleRoot(receipts []Receipt) (string, error) {
+	leaves, err := receiptMerkleLeaves(receipts)
+	if err != nil {
+		return "", err
+	}
+	return chainproof.Root(chainproof.DomainReceipt, leaves)
+}
+
+func TransactionMerkleProof(txs []Transaction, index uint64) (chainproof.Proof, error) {
+	leaves, err := transactionMerkleLeaves(txs)
+	if err != nil {
+		return chainproof.Proof{}, err
+	}
+	return chainproof.Build(chainproof.DomainTx, leaves, index)
+}
+
+func ReceiptMerkleProof(receipts []Receipt, index uint64) (chainproof.Proof, error) {
+	leaves, err := receiptMerkleLeaves(receipts)
+	if err != nil {
+		return chainproof.Proof{}, err
+	}
+	return chainproof.Build(chainproof.DomainReceipt, leaves, index)
+}
+
+func transactionMerkleLeaves(txs []Transaction) ([][]byte, error) {
+	leaves := make([][]byte, len(txs))
+	for index, tx := range txs {
+		encoded, err := hash.CanonicalBytes(tx)
+		if err != nil {
+			return nil, err
+		}
+		leaves[index] = encoded
+	}
+	return leaves, nil
+}
+
+func receiptMerkleLeaves(receipts []Receipt) ([][]byte, error) {
+	leaves := make([][]byte, len(receipts))
+	for index, receipt := range receipts {
+		encoded, err := hash.CanonicalBytes(receipt)
+		if err != nil {
+			return nil, err
+		}
+		leaves[index] = encoded
+	}
+	return leaves, nil
 }

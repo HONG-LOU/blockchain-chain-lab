@@ -3,6 +3,7 @@ package cometnode
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -22,6 +23,7 @@ import (
 	chaincrypto "chainlab/internal/crypto"
 	"chainlab/internal/state"
 	chaintypes "chainlab/internal/types"
+	chainproof "chainlab/pkg/proof"
 
 	cmtcrypto "github.com/cometbft/cometbft/crypto"
 	cmtjson "github.com/cometbft/cometbft/libs/json"
@@ -317,6 +319,108 @@ func TestFourValidatorV2EvidenceSlashingAndEpochRemoval(t *testing.T) {
 		}
 		return true, ""
 	})
+}
+
+func TestFourValidatorV3ScheduledUpgradeAndProofs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping multi-process CometBFT upgrade network in short mode")
+	}
+	if processRaceEnabled {
+		t.Skip("the process-boundary test is covered by the non-race run; package logic remains race-tested")
+	}
+	basePort := availablePortRange(t, 12)
+	root := filepath.Join(t.TempDir(), "protocol-v3-network")
+	policy := chainabci.DefaultValidatorPolicy()
+	policy.EpochLength = 4
+	network, err := InitializeNetwork(NetworkConfig{
+		OutputRoot: root, ChainID: "chainlab-v3-upgrade", ValidatorCount: 4,
+		GenesisTime:  time.Date(2026, time.July, 10, 12, 0, 0, 0, time.UTC),
+		ABCIBasePort: basePort, RPCBasePort: basePort + 4, P2PBasePort: basePort + 8,
+		ApplicationProtocol: chainabci.ProtocolVersionV2, ValidatorPolicy: &policy,
+		ProtocolUpgrades: []chainabci.ProtocolUpgrade{{Height: 4, Protocol: chainabci.ProtocolVersionV3}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	processes := make([]*helperProcess, 0, len(network.Nodes)*2)
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		for _, process := range processes {
+			t.Logf("%s log:\n%s", process.name, process.tailLog())
+		}
+	})
+	for index, generatedNode := range network.Nodes {
+		home := filepath.Join(root, generatedNode.Home)
+		processes = append(processes, startHelperProcess(t, root, fmt.Sprintf("v3-app-%d", index), map[string]string{
+			processHelperModeEnv: "abci", processHelperGenesisEnv: filepath.Join(home, filepath.FromSlash(AppGenesisPath)),
+			processHelperListenEnv:  generatedNode.ABCIListenAddress,
+			processHelperDataDirEnv: filepath.Join(root, filepath.FromSlash(generatedNode.ApplicationData)),
+		}))
+	}
+	for _, generatedNode := range network.Nodes {
+		waitForTCP(t, generatedNode.ABCIListenAddress, 15*time.Second)
+	}
+	for index, generatedNode := range network.Nodes {
+		processes = append(processes, startHelperProcess(t, root, fmt.Sprintf("v3-comet-%d", index), map[string]string{
+			processHelperModeEnv: "comet", processHelperHomeEnv: filepath.Join(root, generatedNode.Home),
+		}))
+	}
+	clients := make([]*rpchttp.HTTP, len(network.Nodes))
+	for index, generatedNode := range network.Nodes {
+		client, err := rpchttp.New(httpAddress(generatedNode.RPCListenAddress), "/websocket")
+		if err != nil {
+			t.Fatal(err)
+		}
+		clients[index] = client
+	}
+	waitForRPCReady(t, clients, 45*time.Second)
+	waitForPeerMesh(t, clients, 45*time.Second)
+	_ = waitForConsistentNetworkState(t, clients, 5, network.Nodes[0].ChainLabAddress, 0, 45*time.Second)
+
+	for index, client := range clients {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		appResult, err := client.ABCIQuery(ctx, "/app", nil)
+		cancel()
+		if err != nil || appResult.Response.Code != chainabci.CodeOK {
+			t.Fatalf("node %d app query=%+v err=%v", index, appResult, err)
+		}
+		var commitment struct {
+			Protocol  string `json:"protocol"`
+			StateRoot string `json:"state_root"`
+		}
+		if err := json.Unmarshal(appResult.Response.Value, &commitment); err != nil {
+			t.Fatal(err)
+		}
+		if commitment.Protocol != chainabci.ProtocolVersionV3 {
+			t.Fatalf("node %d protocol = %q", index, commitment.Protocol)
+		}
+		ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+		proofResult, err := client.ABCIQuery(ctx, "/proof/account", []byte(network.Nodes[0].ChainLabAddress))
+		cancel()
+		if err != nil || proofResult.Response.Code != chainabci.CodeOK {
+			t.Fatalf("node %d proof query=%+v err=%v", index, proofResult, err)
+		}
+		var envelope chainproof.Envelope
+		if err := json.Unmarshal(proofResult.Response.Value, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		expectedStateKey := "account:" + base64.RawURLEncoding.EncodeToString([]byte(network.Nodes[0].ChainLabAddress))
+		if _, err := chainproof.VerifyEnvelope(
+			commitment.StateRoot, proofResult.Response.Height,
+			chainproof.KindState, expectedStateKey, envelope,
+		); err != nil {
+			t.Fatalf("node %d proof verification: %v", index, err)
+		}
+		proofHeight := proofResult.Response.Height
+		ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+		params, err := client.ConsensusParams(ctx, &proofHeight)
+		cancel()
+		if err != nil || params == nil || params.ConsensusParams.Version.App != chainabci.AppVersionV3 {
+			t.Fatalf("node %d consensus params=%+v err=%v", index, params, err)
+		}
+	}
 }
 
 func stableEvidenceHeight(t *testing.T, client *rpchttp.HTTP) int64 {

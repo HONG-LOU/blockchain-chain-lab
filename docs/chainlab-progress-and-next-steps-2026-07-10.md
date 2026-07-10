@@ -145,6 +145,17 @@ Verification coverage includes smart-account and delegated-EOA end-to-end rotati
 - Direct tests cover deterministic penalty, repeat evidence, policy/age rejection, epoch timing, removed-proposer rejection, restart, and snapshot restore. A real four-validator network broadcasts a correctly signed duplicate-vote proof through Comet RPC and converges from four active validators to three with identical application state.
 - V2 currently supports evidence-driven removal only. Join, voluntary leave, re-entry, stake-derived power, unbonding, rewards, and governance transitions remain disabled. The normative behavior and exclusions are in `docs/chainlab-v2-validator-lifecycle.md`.
 
+### ChainLab V3 Scheduled Proof Roots
+
+- A canonical V2 genesis may commit one V3 activation at height `A >= 2`; the schedule is bound into genesis/database identity and cannot be edited after initialization.
+- `FinalizeBlock(A-1)` still commits V2 roots while returning a Comet consensus-parameter update for app version 3. Height `A` commits protocol V3 and switches transaction, receipt, and full flat-state roots together.
+- V3 uses exact-total/index/domain-separated Keccak Merkle trees with deterministic power-of-two padding. Transaction and receipt leaves are canonical protocol objects; state leaves cover the Store V2 flat-key domains.
+- `/proof/transaction`, `/proof/receipt`, and `/proof/account` serve current or retained V3 heights. V2 heights explicitly reject proofs because their legacy roots cannot authenticate a Merkle path.
+- `cmd/chainlab-proof` parses a bounded canonical envelope and requires a separately supplied trusted root. It rejects unknown/non-canonical/tampered protocol, domain, index, total, leaf, sibling, and state-key data.
+- Direct tests cover activation timing, app-version negotiation, simulated old-binary rejection, schedule immutability, restart, historical proof replay, and V3 snapshot/state sync. Fixed proof and fresh-process vectors prevent silent root drift.
+- A real four-validator Comet network crosses the scheduled height, reports app version 3 in consensus params, converges on V3 commitments, and returns independently verified account proofs from all nodes.
+- This is a genesis-committed single upgrade and inclusion-proof foundation. Runtime governance scheduling, multi-upgrade/rollback policy, sparse/non-inclusion proofs, public routes beyond account state, trusted light-client integration, a second implementation, and production proof load remain open. Exact behavior is in `docs/chainlab-v3-proofs-and-upgrades.md`.
+
 ## Verification Evidence
 
 The implementation has passed full unit, race, vet, dependency-tidiness, build, demo, and fresh-process vector runs during this hardening milestone:
@@ -160,13 +171,17 @@ go test -count=1 ./internal/abci
 go test -count=1 ./internal/cometnode
 go test -count=3 -run 'FourValidatorProcessesRestartReplayBlockAndStateSync' ./internal/cometnode
 go test -count=3 -run 'FourValidatorV2EvidenceSlashingAndEpochRemoval' ./internal/cometnode
+go test -count=3 -run 'FourValidatorV3ScheduledUpgradeAndProofs' ./internal/cometnode
 go test -count=3 -run 'Snapshot' ./internal/abci
 go test -count=3 -run 'ValidatorV2' ./internal/abci
 go test -count=5 -run 'Test(FlatStateDelta|ArchiveStorage|FullStorage|PrunedStorage|LegacyV1Storage|IncrementalVersion)' ./internal/abci
 go test -count=3 -run 'TestPersistentApplication(SurvivesAbruptProcessExitAfterCommit|RecoversWholeVersionWhenKilledDuringSync)' ./internal/abci
 go test -count=2 -run 'ABCIExecutionMatchesAcrossFreshProcesses' ./internal/abci
+go test -count=5 -run 'Test(Protocol|ABCI.*FreshProcesses)' ./internal/abci
+go test -count=10 ./pkg/proof ./cmd/chainlab-proof
 go build -o $env:TEMP\chainlab-abci-production-verify.exe ./cmd/chainlab-abci
 go build -o $env:TEMP\chainlab-comet-production-verify.exe ./cmd/chainlab-comet
+go build -o $env:TEMP\chainlab-proof-production-verify.exe ./cmd/chainlab-proof
 go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 go run ./cmd/chainlab demo
 git diff --check
@@ -183,6 +198,8 @@ The final ABCI++ application tree additionally passed full unit tests, the full 
 The integrated v2 validator-lifecycle tree passed the full unit and race suites, vet, tidy-diff, all three production builds, demo, three repeated direct v2 lifecycle suites, and three repeated real four-validator evidence/removal process runs. The final fixed `govulncheck` v1.6.0 scan again reports zero reachable vulnerabilities, two imported-package advisories, and 20 required-module advisories whose vulnerable symbols are not called. The first scan attempt failed only because `proxy.golang.org` was unreachable over IPv6; the successful rerun used the signed `sum.golang.org` database through the documented `goproxy.cn` sumdb endpoint.
 
 The Store V2 tree passed the full unit and race suites, vet, tidy-diff, all three production builds, demo, five repeated delta/profile/migration/corruption suites, three repeated abrupt-exit/forced-kill suites, three repeated snapshot/state-sync round trips, two fresh-process vector runs, and two real four-validator restart/block-sync/state-sync process runs. Fixed `govulncheck` v1.6.0 again reports zero reachable vulnerabilities, with the same two imported-package and 20 required-module advisories not reaching vulnerable symbols.
+
+The scheduled V3/proof tree passed the full unit and race suites, vet, tidy-diff, all four production builds, demo, ten proof/verifier runs, five protocol/fresh-process runs, and three real four-validator scheduled-upgrade/proof networks. Direct coverage includes pre-activation V2 roots, the `A-1` Comet app-version update, V3 activation, old-binary rejection, modified-schedule rejection, exact-total tampering, historical proof replay, restart, and snapshot/state sync. Fixed `govulncheck` v1.6.0 again reports zero reachable vulnerabilities, with the same two imported-package and 20 required-module advisories not reaching vulnerable symbols.
 
 Adding the complete Comet node initially made three advisories symbol-reachable: QPACK trailer expansion in `quic-go` v0.59.0, gRPC missing-leading-slash authorization bypass in v1.79.2, and an unpatched `pion/dtls/v2` AES-GCM nonce issue pulled through Comet's compiled libp2p/WebRTC path even though ChainLab disables libp2p at runtime. The dependency floor now uses `quic-go` v0.59.1 and gRPC-Go v1.79.3, while `go-libp2p` v0.48.0 migrates the STUN/WebRTC graph to `pion/dtls/v3` and removes `dtls/v2` from the main module. The four-validator process suite, full tests, race, vet, and all builds pass with these overrides. A final fixed `govulncheck` v1.6.0 scan reports zero reachable vulnerabilities; two imported-package and 20 required-module advisories remain without reachable vulnerable symbols.
 
@@ -203,8 +220,8 @@ Ordered by consensus and security dependency rather than feature visibility:
    - Replace sticky-halt handling of post-rename directory-sync uncertainty with an authoritative WAL/transaction recovery decision. Avoid rewriting the complete JSON snapshot for every partial vote.
 
 3. **Protocol lifecycle and proofs**
-   - Version consensus encodings, metering schedules, state schemas, and activation heights.
-   - Add scheduled upgrades, deterministic migrations, incompatible-node rejection, rollback rules, transaction/receipt/state proofs, and an independent verifier.
+   - Preserve the implemented genesis-scheduled V2-to-V3 activation, Comet app-version update, deterministic root migration, incompatible-node rejection, transaction/receipt/account proofs, and standalone trusted-root verifier.
+   - Add runtime-authorized multi-upgrade scheduling, binary compatibility manifests, rollback limits, broader sparse/non-inclusion state proofs, light-client integration, a second independent implementation, and operator rolling-upgrade evidence.
 
 4. **Validator signing and node rollback protection**
    - Add remote signer/HSM support with monotonic last-sign state, single-instance locking, and slashing-safe recovery.

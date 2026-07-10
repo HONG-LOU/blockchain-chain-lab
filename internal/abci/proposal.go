@@ -38,6 +38,9 @@ func (a *Application) CheckTx(_ context.Context, req *abcitypes.RequestCheckTx) 
 	if err := a.requireReadyLocked(); err != nil {
 		return nil, err
 	}
+	if err := a.requireProtocolSupportLocked(a.committed.commitment.Height+1, true); err != nil {
+		return nil, err
+	}
 	if req == nil {
 		return invalidCheckTx(errors.New("check transaction request is required")), nil
 	}
@@ -102,6 +105,9 @@ func (a *Application) ProcessProposal(_ context.Context, req *abcitypes.RequestP
 	if req == nil || req.Height != a.committed.commitment.Height+1 || a.candidate != nil {
 		return reject, nil
 	}
+	if err := a.requireProtocolSupportLocked(req.Height, true); err != nil {
+		return reject, nil
+	}
 	if _, err := canonicalBlockHash(req.Hash); err != nil {
 		return reject, nil
 	}
@@ -138,6 +144,13 @@ func (a *Application) FinalizeBlock(_ context.Context, req *abcitypes.RequestFin
 	if req.Height != a.committed.commitment.Height+1 {
 		return nil, errors.New("finalize block height is out of sequence")
 	}
+	if err := a.requireProtocolSupportLocked(req.Height, true); err != nil {
+		return nil, err
+	}
+	consensusParamUpdates, err := a.consensusParamUpdatesLocked(req.Height)
+	if err != nil {
+		return nil, err
+	}
 	blockHash, err := canonicalBlockHash(req.Hash)
 	if err != nil {
 		return nil, err
@@ -157,8 +170,21 @@ func (a *Application) FinalizeBlock(_ context.Context, req *abcitypes.RequestFin
 		}
 		return nil, proposalError("decided block is invalid", err)
 	}
+	protocol := protocolAtHeight(a.genesis, req.Height)
+	txRoot, err := transactionRootForProtocol(protocol, execution.txs)
+	if err != nil {
+		return nil, err
+	}
+	receiptRoot, err := receiptRootForProtocol(protocol, execution.receipts)
+	if err != nil {
+		return nil, err
+	}
+	stateRoot, err := stateRootForProtocol(protocol, execution.store)
+	if err != nil {
+		return nil, err
+	}
 	commitment := applicationCommitment{
-		Protocol:          a.genesis.Protocol,
+		Protocol:          protocol,
 		ChainID:           a.genesis.ChainID,
 		Height:            req.Height,
 		BlockHash:         blockHash,
@@ -167,10 +193,10 @@ func (a *Application) FinalizeBlock(_ context.Context, req *abcitypes.RequestFin
 		GasUsed:           execution.gasUsed,
 		BaseFeePerGas:     a.committed.commitment.NextBaseFeePerGas,
 		NextBaseFeePerGas: core.NextBaseFee(a.committed.commitment.NextBaseFeePerGas, execution.gasUsed, a.genesis.BlockGasLimit),
-		TxRoot:            types.TransactionRoot(execution.txs),
-		ReceiptRoot:       types.ReceiptRoot(execution.receipts),
+		TxRoot:            txRoot,
+		ReceiptRoot:       receiptRoot,
 		EvidenceRoot:      evidenceRoot(evidenceState.records),
-		StateRoot:         execution.store.Root(),
+		StateRoot:         stateRoot,
 	}
 	if a.genesis.Protocol == ProtocolVersionV2 {
 		commitment.Epoch = validatorEpoch(req.Height, a.genesis.ValidatorPolicy.EpochLength)
@@ -190,10 +216,11 @@ func (a *Application) FinalizeBlock(_ context.Context, req *abcitypes.RequestFin
 	}
 	a.candidate = candidate
 	return &abcitypes.ResponseFinalizeBlock{
-		Events:           cloneABCIEvents(blockEvents),
-		TxResults:        cloneExecTxResults(execution.txResults),
-		ValidatorUpdates: cloneValidatorUpdates(evidenceState.updates),
-		AppHash:          cloneBytes(candidate.state.appHash),
+		Events:                cloneABCIEvents(blockEvents),
+		TxResults:             cloneExecTxResults(execution.txResults),
+		ValidatorUpdates:      cloneValidatorUpdates(evidenceState.updates),
+		ConsensusParamUpdates: consensusParamUpdates,
+		AppHash:               cloneBytes(candidate.state.appHash),
 	}, nil
 }
 
@@ -209,6 +236,9 @@ func (a *Application) requireProposalRequestLocked(req *abcitypes.RequestPrepare
 	}
 	if req.Height != a.committed.commitment.Height+1 {
 		return errors.New("prepare proposal height is out of sequence")
+	}
+	if err := a.requireProtocolSupportLocked(req.Height, true); err != nil {
+		return err
 	}
 	return nil
 }

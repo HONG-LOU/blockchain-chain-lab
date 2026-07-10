@@ -17,6 +17,9 @@ func (a *Application) ExtendVote(_ context.Context, req *abcitypes.RequestExtend
 	if req == nil || req.Height != a.committed.commitment.Height+1 || len(req.Hash) != 32 {
 		return nil, errors.New("vote extension height is out of sequence")
 	}
+	if err := a.requireProtocolSupportLocked(req.Height, true); err != nil {
+		return nil, err
+	}
 	if _, err := a.proposerLocked(req.ProposerAddress, req.Height); err != nil {
 		return nil, err
 	}
@@ -30,6 +33,9 @@ func (a *Application) VerifyVoteExtension(_ context.Context, req *abcitypes.Requ
 		return nil, err
 	}
 	if req == nil || req.Height != a.committed.commitment.Height+1 || len(req.Hash) != 32 || len(req.VoteExtension) != 0 {
+		return &abcitypes.ResponseVerifyVoteExtension{Status: abcitypes.ResponseVerifyVoteExtension_REJECT}, nil
+	}
+	if err := a.requireProtocolSupportLocked(req.Height, true); err != nil {
 		return &abcitypes.ResponseVerifyVoteExtension{Status: abcitypes.ResponseVerifyVoteExtension_REJECT}, nil
 	}
 	if _, exists := a.proposers[hex.EncodeToString(req.ValidatorAddress)]; !exists {

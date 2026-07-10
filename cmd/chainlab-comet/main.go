@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 
+	chainabci "chainlab/internal/abci"
 	"chainlab/internal/cometnode"
 )
 
@@ -47,6 +48,8 @@ func runInit(args []string, out io.Writer) error {
 	abciBasePort := flags.Int("abci-base-port", 26658, "first ABCI port")
 	rpcBasePort := flags.Int("rpc-base-port", 26670, "first RPC port")
 	p2pBasePort := flags.Int("p2p-base-port", 26680, "first P2P port")
+	applicationProtocol := flags.String("application-protocol", chainabci.ProtocolVersion, "application genesis protocol: chainlab-v1 or chainlab-v2")
+	upgradeV3Height := flags.Int64("upgrade-v3-height", 0, "activate chainlab-v3 proof roots at this height")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -56,13 +59,25 @@ func runInit(args []string, out io.Writer) error {
 	if strings.TrimSpace(*output) == "" {
 		return errors.New("chainlab-comet init requires --out")
 	}
+	var validatorPolicy *chainabci.ValidatorPolicy
+	if *applicationProtocol == chainabci.ProtocolVersionV2 {
+		policy := chainabci.DefaultValidatorPolicy()
+		validatorPolicy = &policy
+	}
+	var upgrades []chainabci.ProtocolUpgrade
+	if *upgradeV3Height != 0 {
+		upgrades = []chainabci.ProtocolUpgrade{{Height: *upgradeV3Height, Protocol: chainabci.ProtocolVersionV3}}
+	}
 	document, err := cometnode.InitializeNetwork(cometnode.NetworkConfig{
-		OutputRoot:     *output,
-		ChainID:        *chainID,
-		ValidatorCount: *validators,
-		ABCIBasePort:   *abciBasePort,
-		RPCBasePort:    *rpcBasePort,
-		P2PBasePort:    *p2pBasePort,
+		OutputRoot:          *output,
+		ChainID:             *chainID,
+		ValidatorCount:      *validators,
+		ABCIBasePort:        *abciBasePort,
+		RPCBasePort:         *rpcBasePort,
+		P2PBasePort:         *p2pBasePort,
+		ApplicationProtocol: *applicationProtocol,
+		ValidatorPolicy:     validatorPolicy,
+		ProtocolUpgrades:    upgrades,
 	})
 	if err != nil {
 		return err

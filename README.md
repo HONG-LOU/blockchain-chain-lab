@@ -41,6 +41,7 @@ It currently implements:
 - local multi-node devnet sync over HTTP peers: transaction relay, block import, produced-block broadcast, and finality vote relay
 - CLI commands for keys, genesis, nodes, signed transfers, block production, queries, and demos
 - a pinned CometBFT v0.39.3 ABCI++ application with strict genesis/consensus-parameter binding, deterministic proposal replay, candidate-only finalize, evidence-driven `chainlab-v2` validator removal, Pebble-backed incremental history profiles, and verified snapshot restore
+- a genesis-committed `chainlab-v2 -> chainlab-v3` activation path that updates Comet application version one height before switching to domain-separated transaction/receipt/state Merkle roots, with retained-height inclusion proofs and a standalone trusted-root verifier
 - generated four-validator private networks with independent secp256k1 validator keys, P2P identities, homes, ABCI sockets, RPC endpoints, full-mesh persistent peers, and real CometBFT processes
 - multi-process evidence for CometBFT rounds/P2P, raw-transaction commitment, progress with one of four validators stopped, lagging-node block sync, durable application restart, fresh application replay, destructive-data state sync through two light-client RPC sources, and identical common-height block/app hashes plus current state-root/account state after recovery
 
@@ -97,6 +98,22 @@ go run ./cmd/chainlab-abci --genesis genesis.json --data-dir app-data --compact
 ```
 
 See [Application Store V2](docs/chainlab-application-storage-v2.md) for exact retention, migration, historical-query, state-sync, backup, and remaining-performance guarantees.
+
+### Scheduled V3 Proof Roots
+
+Generate a V2 private network that is committed to activate V3 at height 100:
+
+```powershell
+go run ./cmd/chainlab-comet init --out data/comet-v3 --chain-id chainlab-v3 --application-protocol chainlab-v2 --upgrade-v3-height 100
+```
+
+After activation, `/proof/transaction`, `/proof/receipt`, and `/proof/account` return canonical inclusion-proof envelopes. Decode the ABCI response value into `proof.json`, obtain the corresponding trusted root from an independently verified application commitment/header, and verify it without application/state code:
+
+```powershell
+go run ./cmd/chainlab-proof --proof proof.json --root 0x<trusted-tx-root> --height 100 --kind transaction --key 0
+```
+
+The root, height, kind, and key arguments are the requested trusted item; do not copy them blindly from the proof response. See [V3 Scheduled Upgrade And Inclusion Proofs](docs/chainlab-v3-proofs-and-upgrades.md) for the exact activation timeline, hash format, query contract, recovery evidence, and limitations.
 
 ## CLI
 
@@ -389,8 +406,8 @@ The production sequence is:
 
 - production activation and Linux/amd64 evidence for the implemented deterministic WASM, included-failure, and native-contract metering rules
 - CometBFT evidence slashing, validator updates/epochs, partitions, rolling upgrades, and broader multi-process fault tests on the implemented block/state-sync path
-- incremental versioned KV retention, schema migrations, backup/restore, and pruned/full/archive profiles on the implemented atomic Pebble/WAL foundation
-- protocol upgrades, inclusion proofs, protected validator signing, metrics/alerts, backup/recovery, fuzz/property/race/fault/load/soak validation
+- mutation-aware Store V2 deltas, isolated historical proof reads, Linux retention/migration/compaction/load evidence, restore drills, and rollback protection
+- runtime-authorized multi-upgrades, sparse/non-inclusion proofs and trusted light-client integration, protected validator signing, metrics/alerts, fuzz/property/race/fault/load/soak validation
 - economics, governance security, wallet/SDK/indexer/token/oracle/interoperability ecosystem and staged public testnets
 
 See [Mainstream Chain Capability And Production Gates](docs/mainstream-chain-capability-and-production-gates-2026-07-10.md) for the authoritative gates and upstream references. [ChainLab Production Technology Roadmap](docs/current-blockchain-tech-roadmap.md) is the navigational implementation order.

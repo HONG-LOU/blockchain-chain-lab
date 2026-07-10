@@ -28,8 +28,10 @@ import (
 const (
 	ProtocolVersion   = "chainlab-v1"
 	ProtocolVersionV2 = "chainlab-v2"
+	ProtocolVersionV3 = "chainlab-v3"
 	AppVersion        = 1
 	AppVersionV2      = 2
+	AppVersionV3      = 3
 	Codespace         = "chainlab"
 
 	CodeOK              uint32 = 0
@@ -42,6 +44,8 @@ const (
 	maxMempoolBytes               = 128 * 1024 * 1024
 	maxEvidenceBytes        int64 = 1024 * 1024
 	maxValidatorEpochLength int64 = 1_000_000
+	maxQueryPathBytes             = 128
+	maxQueryDataBytes             = 1024
 )
 
 type ValidatorPolicy struct {
@@ -53,11 +57,12 @@ type ValidatorPolicy struct {
 }
 
 type GenesisDocument struct {
-	Protocol        string           `json:"protocol"`
-	ChainID         string           `json:"chain_id"`
-	BlockGasLimit   uint64           `json:"block_gas_limit"`
-	State           state.Snapshot   `json:"state"`
-	ValidatorPolicy *ValidatorPolicy `json:"validator_policy,omitempty"`
+	Protocol        string            `json:"protocol"`
+	ChainID         string            `json:"chain_id"`
+	BlockGasLimit   uint64            `json:"block_gas_limit"`
+	State           state.Snapshot    `json:"state"`
+	ValidatorPolicy *ValidatorPolicy  `json:"validator_policy,omitempty"`
+	Upgrades        []ProtocolUpgrade `json:"upgrades,omitempty"`
 }
 
 func NewGenesisDocument(chainID string, blockGasLimit uint64, store *state.Store) (GenesisDocument, error) {
@@ -109,15 +114,17 @@ func (g GenesisDocument) CanonicalBytes() ([]byte, error) {
 }
 
 type Config struct {
-	Genesis     GenesisDocument
-	DataDir     string
-	Storage     StorageProfile
-	persistence applicationPersistence
+	Genesis       GenesisDocument
+	DataDir       string
+	Storage       StorageProfile
+	MaxAppVersion uint64
+	persistence   applicationPersistence
 }
 
 type Application struct {
 	mu                    sync.Mutex
 	genesis               GenesisDocument
+	maxAppVersion         uint64
 	committed             committedState
 	runtime               *contracts.Runtime
 	initialized           bool
@@ -165,12 +172,21 @@ type blockCandidate struct {
 }
 
 func NewApplication(config Config) (*Application, error) {
+	maxAppVersion, err := normalizeMaxAppVersion(config.MaxAppVersion)
+	if err != nil {
+		return nil, err
+	}
 	store, err := validateGenesisDocument(config.Genesis)
 	if err != nil {
 		return nil, err
 	}
 	genesis := config.Genesis
 	genesis.State = store.Snapshot()
+	genesis.Upgrades = append([]ProtocolUpgrade(nil), config.Genesis.Upgrades...)
+	if config.Genesis.ValidatorPolicy != nil {
+		policy := *config.Genesis.ValidatorPolicy
+		genesis.ValidatorPolicy = &policy
+	}
 	commitment := applicationCommitment{
 		Protocol:          genesis.Protocol,
 		ChainID:           genesis.ChainID,
@@ -209,9 +225,19 @@ func NewApplication(config Config) (*Application, error) {
 		}
 		committed = persisted.committed
 	}
+	if required := appVersionAtHeight(genesis, nextApplicationHeight(committed.commitment.Height)); required > maxAppVersion {
+		if persistence != nil {
+			_ = persistence.Close()
+		}
+		return nil, fmt.Errorf(
+			"application binary supports app version %d but the next height requires version %d",
+			maxAppVersion, required,
+		)
+	}
 	runtime := contracts.NewRuntimeWithDefaults()
 	return &Application{
 		genesis:           genesis,
+		maxAppVersion:     maxAppVersion,
 		committed:         committed,
 		runtime:           runtime,
 		initialized:       persisted.initialized,
@@ -238,6 +264,9 @@ func validateGenesisDocument(document GenesisDocument) (*state.Store, error) {
 		}
 	default:
 		return nil, fmt.Errorf("genesis protocol must be %q or %q", ProtocolVersion, ProtocolVersionV2)
+	}
+	if err := validateProtocolUpgrades(document); err != nil {
+		return nil, err
 	}
 	if err := types.ValidateChainID(document.ChainID); err != nil {
 		return nil, fmt.Errorf("invalid genesis chain id: %w", err)
@@ -306,7 +335,7 @@ func (a *Application) Info(context.Context, *abcitypes.RequestInfo) (*abcitypes.
 		StateRoot string `json:"state_root"`
 		Halted    bool   `json:"halted"`
 	}{
-		Protocol:  a.genesis.Protocol,
+		Protocol:  a.committed.commitment.Protocol,
 		StateRoot: a.committed.commitment.StateRoot,
 		Halted:    a.haltErr != nil,
 	})
@@ -316,7 +345,7 @@ func (a *Application) Info(context.Context, *abcitypes.RequestInfo) (*abcitypes.
 	return &abcitypes.ResponseInfo{
 		Data:             string(data),
 		Version:          version.ABCIVersion,
-		AppVersion:       appVersion(a.genesis.Protocol),
+		AppVersion:       appVersionAtHeight(a.genesis, nextApplicationHeight(a.committed.commitment.Height)),
 		LastBlockHeight:  a.committed.commitment.Height,
 		LastBlockAppHash: cloneBytes(a.committed.appHash),
 	}, nil
@@ -496,11 +525,18 @@ func (a *Application) Query(_ context.Context, req *abcitypes.RequestQuery) (*ab
 		return nil, errors.New("query request is required")
 	}
 	queryState := a.committed
+	queryTxs := a.committedTxs
+	queryReceipts := a.committedReceipts
 	height := queryState.commitment.Height
 	response := &abcitypes.ResponseQuery{Height: height, Codespace: Codespace}
+	if len(req.Path) > maxQueryPathBytes || len(req.Data) > maxQueryDataBytes {
+		response.Code = CodeInvalidRequest
+		response.Log = "query path or data exceeds the protocol limit"
+		return response, nil
+	}
 	if req.Prove {
 		response.Code = CodeUnsupported
-		response.Log = "state proofs are not implemented"
+		response.Log = "ABCI proof ops are unavailable; use chainlab-v3 proof query paths"
 		return response, nil
 	}
 	if req.Path == "/storage" && req.Height != 0 && req.Height != height {
@@ -529,6 +565,8 @@ func (a *Application) Query(_ context.Context, req *abcitypes.RequestQuery) (*ab
 			return response, nil
 		}
 		queryState = historical.committed
+		queryTxs = historical.txs
+		queryReceipts = historical.receipts
 		height = queryState.commitment.Height
 		response.Height = height
 	}
@@ -595,6 +633,29 @@ func (a *Application) Query(_ context.Context, req *abcitypes.RequestQuery) (*ab
 			return nil, err
 		}
 		response.Key = []byte("storage")
+		response.Value = value
+	case "/proof/transaction", "/proof/receipt", "/proof/account":
+		if !protocolUsesMerkleProofs(queryState.commitment.Protocol) {
+			response.Code = CodeUnsupported
+			response.Log = "inclusion proofs require chainlab-v3"
+			return response, nil
+		}
+		envelope, key, err := a.buildProofEnvelope(
+			req.Path, req.Data, height, queryState, queryTxs, queryReceipts,
+		)
+		if err != nil {
+			if errors.Is(err, ErrInvalidProofQuery) {
+				response.Code = CodeInvalidRequest
+				response.Log = err.Error()
+				return response, nil
+			}
+			return nil, err
+		}
+		value, err := hash.CanonicalBytes(envelope)
+		if err != nil {
+			return nil, err
+		}
+		response.Key = key
 		response.Value = value
 	default:
 		response.Code = CodeUnsupported
@@ -766,10 +827,14 @@ func (a *Application) proposerLocked(address []byte, height int64) (string, erro
 }
 
 func appVersion(protocol string) uint64 {
-	if protocol == ProtocolVersionV2 {
+	switch protocol {
+	case ProtocolVersionV3:
+		return AppVersionV3
+	case ProtocolVersionV2:
 		return AppVersionV2
+	default:
+		return AppVersion
 	}
-	return AppVersion
 }
 
 func applicationHash(commitment applicationCommitment) []byte {

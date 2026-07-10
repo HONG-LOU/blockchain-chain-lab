@@ -44,6 +44,7 @@ type NetworkConfig struct {
 	P2PBasePort         int
 	ApplicationProtocol string
 	ValidatorPolicy     *chainabci.ValidatorPolicy
+	ProtocolUpgrades    []chainabci.ProtocolUpgrade
 }
 
 type NetworkDocument struct {
@@ -141,6 +142,7 @@ func InitializeNetwork(config NetworkConfig) (NetworkDocument, error) {
 	if err != nil {
 		return NetworkDocument{}, err
 	}
+	appGenesis.Upgrades = append([]chainabci.ProtocolUpgrade(nil), config.ProtocolUpgrades...)
 	appGenesisBytes, err := appGenesis.CanonicalBytes()
 	if err != nil {
 		return NetworkDocument{}, err
@@ -290,6 +292,9 @@ func validateNetworkConfig(config NetworkConfig) (string, error) {
 	case chainabci.ProtocolVersion:
 		if config.ValidatorPolicy != nil {
 			return "", errors.New("protocol version 1 must not define a validator policy")
+		}
+		if len(config.ProtocolUpgrades) != 0 {
+			return "", errors.New("protocol version 1 must not define protocol upgrades")
 		}
 	case chainabci.ProtocolVersionV2:
 		if config.ValidatorPolicy == nil {
