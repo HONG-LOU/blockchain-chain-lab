@@ -2,9 +2,9 @@
 
 ## Goal
 
-Build a local-first blockchain implementation that can evolve toward a production appchain. The first release must run on one machine, produce verifiable blocks, process signed account transactions, maintain deterministic state roots, expose an HTTP RPC, and support a smart-contract-like execution interface.
+Build ChainLab as a production-grade sovereign blockchain. The first local release establishes and verifies the application state transition, but it is a bootstrap stage of the production protocol rather than the final architecture.
 
-This project is not a mainnet-ready L1 in its first release. It is a serious development chain with clear seams for replacing the local proof-of-authority consensus, native contract runtime, and storage backend with production components later.
+The production path retains ChainLab's protocol and Go application logic while replacing the local PoA/network/snapshot harness with CometBFT ABCI++, transactional versioned storage, deterministic WASM resource metering, protected validator signing, state sync, protocol upgrades, and production operations. The authoritative gates are in `docs/current-blockchain-tech-roadmap.md`.
 
 ## Recommended Architecture
 
@@ -22,14 +22,14 @@ Go is selected because this workstation has Go 1.25 available, Go is common in p
 2. Cosmos SDK appchain.
    - Production-grade modular chain framework.
    - Good fit for appchain governance, staking, and IBC.
-   - Too much framework surface before Eric understands the chain internals.
+   - Too much framework surface before ChainLab's application protocol and invariants were defined.
 
 3. Custom Go development chain.
-   - Best learning and control for this phase.
+   - Best protocol ownership and control for the bootstrap phase.
    - Lets us build and verify the core state machine directly.
    - Requires honesty that this is a dev chain, not production consensus.
 
-The selected path is option 3 for phase 1, with phase 2 preparing EVM/WASM compatibility and phase 3 selecting a production appchain or rollup framework.
+Option 3 remains the phase-1 implementation path. The production consensus/network foundation is now selected as CometBFT ABCI++; ChainLab stays the sovereign application protocol instead of becoming a generic Cosmos SDK application. Alternative OP Stack, Avalanche, Polkadot, and Solana paths remain architecture references for product-specific execution or ecosystem requirements.
 
 ## Phase 1 Scope
 
@@ -38,7 +38,7 @@ Phase 1 creates a runnable local blockchain with these capabilities:
 - Account model with balances, nonces, optional contract code id, optional delegated code id, and key-value storage.
 - Secp256k1 transaction signatures and Ethereum-style 20-byte addresses.
 - ChainLab-native raw transaction encoding for offline signing and later broadcast, plus a limited Ethereum EIP-1559 type-2 raw transfer decoder for wallet/SDK compatibility experiments.
-- Transaction types for transfer, batched transfer/call user operations, EIP-7702-style `set_code` delegation, account session-key management, contract deployment, contract calls, staking, unstaking, proposal submission, proposal execution, and governance voting. Transactions can optionally carry a `signer` for single-owner contract-account, delegated-EOA, or session-key authorization, or `authorizations` for multisig threshold accounts.
+- Transaction types for transfer, batched transfer/call user operations, EIP-7702-style `set_code` delegation, account session-key management, guardian recovery, contract deployment, contract calls, staking, unstaking, proposal submission, proposal execution, and governance voting. Transactions can optionally carry a `signer` for single-owner contract-account, delegated-EOA, session-key, or guardian authorization, or `authorizations` for multisig threshold accounts.
 - Validator lifecycle starts with staked validator join transactions, explicit validator leave transactions, and validator slashing transactions. The active validator set is committed into state roots.
 - Gas accounting with gas limit, legacy gas price, EIP-1559-style max fee / priority fee caps, deterministic fee charging, base fee burn, priority fee rewards, and native paymaster-sponsored fee payment.
 - Block production with deterministic transaction, receipt, and state roots.
@@ -219,14 +219,15 @@ Phase 2 progress:
 - The explorer supports drill-down pages for `GET /explorer/block/{height}`, `GET /explorer/tx/{hash}`, `GET /explorer/account/{address}`, and `GET /explorer/events`, with overview links for block, transaction, sender, recipient, proposer, validator, and recent contract-event navigation.
 - The default contract runtime includes a constrained wazero-backed `wasm.echo.v1` contract. The module can copy transaction args from the host, write contract storage, emit events, and set read return data through ChainLab-specific host functions. This proves the WASM VM boundary.
 - Chain state supports uploaded WASM modules through `wasm.upload`; uploaded bytecode is validated, stored in snapshots, included in state roots, and deployable by the returned deterministic code id. CLI `tx wasm-upload` can submit a `.wasm` file, `0x` bytecode, or the built-in `--example echo` module for local E2E testing.
-- WASM upload gas now scales with bytecode size. WASM deploy and write-call execution meters deterministic ChainLab host ABI usage for instantiation, argument copies, storage reads/writes, return data, emitted event bytes, and static exported function-body fuel. Runtime calls also use wazero context cancellation to interrupt runaway guest execution; this is a host sandbox safety valve, while deterministic runtime step gas remains a future VM-level improvement.
+- WASM upload gas scales with bytecode size. WASM deploy and write-call execution currently meters ChainLab host ABI usage and static exported function-body fuel. Wall-clock context cancellation is only a host safety valve and is not consensus-safe for deciding success/failure; deterministic instruction, memory, table, stack, host-I/O, and storage-growth limits are a production blocker tracked in the production roadmap.
 - Blocks now carry `base_fee_per_gas`, `gas_limit`, and `gas_used`; transactions can use legacy `gas_price` or EIP-1559-style `max_fee_per_gas` / `max_priority_fee_per_gas`; receipts record effective gas price, burned base fee, and proposer priority fee. RPC exposes `eth_gasPrice`, `eth_maxPriorityFeePerGas`, `eth_feeHistory`, `chain_feeMarket`, and EVM block fee fields, while CLI exposes `query fees` and capped transfer flags. `eth_feeHistory` derives base fee history, gas-used ratios, next base fee, and optional gas-weighted priority-fee reward percentiles from canonical blocks and receipts. This models the fee market and accepts a limited Ethereum type-2 raw transfer subset without claiming full Ethereum typed transaction compatibility.
 - Transactions can include a native paymaster authorization. The user signs the operation and consumes their own nonce, the paymaster signs the exact user-signed transaction, and execution charges gas to the paymaster while preserving replay-deterministic receipts through `fee_payer` and a `paymaster.sponsored` event. RPC exposes `chain_sendUserOperation`, and CLI transfers support `--paymaster-private-key`. This models sponsored gas/account-abstraction UX without claiming full ERC-4337 EntryPoint compatibility.
 - Transactions can use native `batch` user operations. A batch consumes one sender nonce, executes transfer/call operations atomically on one cloned state, charges one transaction-level fee, supports paymaster sponsorship, and exposes operation count in RPC/explorer views. CLI `tx batch-transfer` builds a repeated `--to address:amount` batch. This models one-click account-abstraction UX without claiming full ERC-4337 EntryPoint compatibility.
 - The default native runtime includes `account.v1`, a single-owner smart contract account. A transaction with `from=<account contract>` and `signer=<owner>` is authorized by the stored owner; nonce, value transfers, and default fee payment belong to the contract account, while the owner EOA is only the authorization key. CLI transfer and batch-transfer commands expose this through `--from`, and RPC/explorer projections include `signer`.
 - The default native runtime includes `multisig.v1`, a threshold smart contract account. It stores comma-separated owners and a threshold, verifies distinct owner signatures from transaction `authorizations`, consumes the multisig account nonce, spends the multisig account balance, supports paymaster sponsorship, and exposes authorization count through RPC/explorer projections. CLI transfer and batch-transfer commands add repeated `--auth-private-key` flags for owner signatures.
-- EOAs can submit a native `set_code` transaction to set `DelegatedCodeID=account.v1` and store an `owner`. The delegated EOA keeps its original address, balance, and nonce, but future transfers can be signed by the owner through the transaction `signer`. `set_code` can also clear the delegation. REST account responses, explorer account pages, and `eth_getCode` expose delegated code state. This is a ChainLab-native EIP-7702-style experiment, not Ethereum type-4 raw transaction decoding, authorization tuple RLP compatibility, arbitrary uploaded delegation code, ERC-4337 EntryPoint support, social recovery, or a general policy engine.
-- `account.v1` accounts and delegated EOAs support ChainLab-native session keys through `account.session_key`. The owner installs or revokes a session key, and the session key can sign value transfers within a stored value limit, optional recipient allowlist, and optional block-height expiry, or call one configured contract address plus method. The account still owns nonce, balance, and fee liability, transfer spent value is tracked in account storage, and call policies are stored under `session:<key>:call_to` / `session:<key>:call_method`. This is not ERC-4337 `UserOperation`, ERC-7579 modular account compatibility, social recovery, batch session-key policy, parameter-level call policy, or a programmable policy engine.
+- EOAs can submit a native `set_code` transaction to set `DelegatedCodeID=account.v1` and store an `owner`. The delegated EOA keeps its original address, balance, and nonce, but future transfers can be signed by the owner through the transaction `signer`. `set_code` can also clear the delegation, and replacing/clearing delegation removes stale owner/session/recovery authority. REST account responses, explorer account pages, and `eth_getCode` expose delegated code state. This is a ChainLab-native EIP-7702-style mechanism, not Ethereum type-4 raw transaction decoding, authorization tuple RLP compatibility, arbitrary uploaded delegation code, or ERC-4337 EntryPoint support.
+- `account.v1` accounts and delegated EOAs support ChainLab-native session keys through `account.session_key`. The owner installs or revokes a session key, and the session key can sign value transfers within a stored value limit, optional recipient allowlist, and optional block-height expiry, or call one configured contract address plus method. Recovery advances a session epoch so pre-rotation policies cannot authorize future actions. This is not ERC-4337 `UserOperation`, ERC-7579 modular account compatibility, batch session-key policy, parameter-level call policy, or a programmable policy engine.
+- `account.v1` accounts and delegated EOAs support `account.recovery`: up to 16 EOA guardians vote in bounded rounds, threshold agreement freezes a target and starts a block delay, guardian-funded execution rotates owner, and owner/session/delegation bypasses clear stale active authority. Recovery events are account-addressed in the canonical event index. This native protocol does not claim Safe/ERC-7579/ERC-1271/passkey compatibility and does not recover the delegated EOA root key.
 - Genesis files include a `validators` array, and `chainlab node --private-key` can start a different local validator from the same genesis file.
 - PoA now enforces deterministic proposer rotation and treats repeated imports of already-known canonical blocks as idempotent peer sync events.
 - Staked accounts can submit `validator.join`; accepted joins update the active validator set for subsequent block scheduling, are included in state roots, persist in snapshots, and can be queried over REST, JSON-RPC, and CLI.
@@ -234,8 +235,9 @@ Phase 2 progress:
 - Active validators can submit `validator.slash` with target, amount, and evidence; accepted slashes burn target stake, remove a depleted target from the active validator set while preserving at least one validator, update scheduling, and are available through CLI transaction submission.
 - Governance now has an explicit proposal lifecycle: staked accounts can submit `proposal.submit` parameter-change proposals, staked voters can cast `vote` transactions while the voting period is open, and `proposal.execute` applies passing `param.change` proposals after the period closes. Proposal metadata, votes, voters, status, and executed params are committed into state roots, persisted in snapshots, exposed over REST/JSON-RPC, and available through CLI commands.
 
-Phase 3:
+Phase 3 production path:
 
-- choose OP Stack, Cosmos SDK, Avalanche L1, or another production base
-- bridge from phase 1 concepts into that framework
-- validator operations, monitoring, snapshots, and upgrade governance
+- make CometBFT ABCI++ the authoritative consensus, P2P, evidence, proposal, block-sync, and state-sync lifecycle
+- replace JSON snapshots with atomic versioned KV storage and verified pruned/full/archive snapshots
+- add deterministic WASM limits, protocol upgrades/migrations, inclusion proofs, protected validator signing, monitoring, backups, and incident operations
+- execute multi-process fault, partition, Byzantine, race, fuzz, property, load, soak, upgrade, and disaster-recovery validation before staged public networks

@@ -1,5 +1,7 @@
 # Session Key Contract Calls Design
 
+> Historical scope note: social recovery was a non-goal of this session-key milestone and was implemented later through `account.recovery`; see `2026-07-10-account-social-recovery-design.md`.
+
 ## Context
 
 ChainLab already supports `account.v1` smart accounts, delegated EOAs, native paymasters, batches, multisig accounts, and transfer-scoped session keys. A session key can currently spend value from an `account.v1` account or delegated EOA within a value limit, optional recipient allowlist, and optional block-height expiry.

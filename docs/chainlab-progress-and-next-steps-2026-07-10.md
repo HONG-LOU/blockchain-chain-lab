@@ -1,260 +1,136 @@
 # ChainLab Progress And Next Steps
 
-Date: 2026-07-10
+Status date: 2026-07-10
 Branch: `feature/own-chain-mvp`
-Project path: `D:\blockchain-chain-lab`
+Project: `D:\blockchain-chain-lab`
 
-## Current Status
+## Product Target
 
-ChainLab is currently about 70-75% complete as a local, fully verifiable blockchain lab that demonstrates most common mainstream-chain capabilities in small, honest slices.
+ChainLab is intended to become a real production-grade sovereign blockchain. It is not scoped as a learning chain, toy, or permanently local prototype.
 
-As a production mainnet candidate, it is only about 25-35% complete. The missing production work is still large: real P2P gossip, production BFT consensus, durable KV storage with pruning/archive modes, stronger security testing, monitoring, audits, bridge strategy, economic design, and ecosystem tooling.
+The current local PoA implementation is the deterministic development and differential-test harness. The selected production path preserves ChainLab's protocol/application state machine and integrates CometBFT ABCI++ for Byzantine consensus, P2P, evidence, proposal flow, block sync, and state sync. Production also requires transactional versioned storage, deterministic WASM limits, protected validator signing, protocol upgrades, security evidence, economics, and staged network operations.
 
-The repository is clean at the time this document was written. The latest ChainLab commit before this document is:
+Production readiness is tracked by explicit gates rather than a completion percentage. See:
+
+- `docs/current-blockchain-tech-roadmap.md`
+- `docs/mainstream-chain-capability-and-production-gates-2026-07-10.md`
+
+## Completed In This Milestone
+
+### Account Social Recovery
+
+Commits:
 
 ```text
-82bf4e8 docs: design account social recovery
+b870ab2 docs: plan account social recovery
+51f74d2 feat: add hardened account social recovery
+c311d89 feat: add account recovery cli
 ```
 
-The ChainLab repository currently has no configured remote, so code commits have not been pushed from this repository.
+Implemented behavior:
 
-## Completed Capabilities
+- `account.recovery` for `account.v1` contract accounts and delegated EOAs.
+- Owner actions: `configure`, `cancel`, and `clear`.
+- Guardian actions: `approve` and `execute`.
+- Up to 16 normalized, non-zero EOA guardians; owner/account/contract addresses are rejected as guardians.
+- Per-guardian voting before threshold so a minority cannot occupy the only pending target.
+- Vote changes only when the change immediately reaches threshold, with a 256-block voting-round expiry for deadlock recovery.
+- Delay starts when one target reaches threshold; execution has an inclusive 256-block window.
+- Mandatory `execute.new_owner` binds the final target into the guardian signature.
+- Owner actions are account-funded. Guardian approval/execution is guardian-funded, consumes the recovered account nonce, and leaves guardian nonce unchanged.
+- Successful rotation advances `session:epoch`, invalidating old transfer and call session policies.
+- Direct `setOwner` and delegated-code replacement/clear remove stale active recovery/session authority.
+- Strict recovery envelopes reject multisig fields, signature kinds, paymasters, value/to/batch, and action-irrelevant payloads.
+- Nonce and height additions reject overflow.
+- Txpool replacement requires the same authorization principal, preventing one guardian from replacing another guardian's transaction.
+- Recovery events are indexed at the recovered account and exposed through receipts and `eth_getLogs`.
+- CLI `tx recovery` has strict action-specific flags and always writes `signer`.
 
-### Core Chain
+Verification coverage includes smart-account and delegated-EOA end-to-end rotation, exact threshold/delay/expiry boundaries, split votes, round rollover, role isolation, fee ownership, insufficient guardian funds, session invalidation, malformed/corrupted stored state, nonce/height overflow, maximum guardian set, owner/delegation bypass cleanup, cross-guardian mempool replacement, account-addressed RPC logs, node persistence/restart, and new-owner transfer.
 
-- Go monorepo with deterministic state transition logic.
-- Account state with balance, nonce, code id, delegated code id, and storage.
-- Blocks with transaction root, receipt root, state root, gas limit, gas used, base fee, proposer signature, and optional finality certificate.
-- Receipts with success/error, gas, fee fields, events, contract address, proposal id, and code id.
-- Genesis generation and local node startup.
-- Persistent chain snapshot and transaction index rebuild.
+### Adjacent Security Fixes
 
-### Consensus And Validator Lifecycle
+- Shared strict 20-byte non-zero EOA normalization.
+- Account/delegated owner validation prevents malformed, zero, and self ownership.
+- Account nonce increment rejects `uint64` wraparound.
+- Delegation clear removes `owner`, `session:*`, and `recovery:*` authorization state while preserving unrelated storage.
+- Event source mapping is centralized so account-policy events cannot silently disappear from EVM-shaped logs.
 
-- PoA block production.
-- Multi-validator round-robin proposer schedule.
-- Dynamic validator join, leave, and slash transactions.
-- Fork-choice/reorg support for longer imported branches.
-- BFT-style finality certificates over PoA blocks.
-- HTTP peer relay for finality votes.
-- Double-vote evidence capture and automatic local evidence-to-slashing transactions.
+## Verification Evidence
 
-### Transactions, Fees, And Txpool
-
-- Signed native ChainLab transactions.
-- Native raw transaction encoding and submission.
-- Limited Ethereum EIP-1559 type-2 raw value transfers.
-- EIP-1559-style local fee market with base fee, priority fee, and `eth_feeHistory`.
-- Pending and queued txpool.
-- Future-nonce queued transactions with automatic promotion.
-- Geth-style 10% same-sender/same-nonce replacement for pending or queued transactions.
-- Pending nonce support through `eth_getTransactionCount(..., "pending")`.
-
-### Contracts And Execution
-
-- Native contract runtime.
-- Built-in `counter.v1`, `token.v1`, `account.v1`, and `multisig.v1`.
-- Contract deploy and call transactions.
-- Read-only contract calls through `eth_call`.
-- Minimal ABI-shaped return values for `uint256`, `address`, and dynamic `string`.
-- Limited Solidity-style calldata selector parsing for `get()`, `symbol()`, `owner()`, and `balanceOf(address)`.
-- WASM contract runtime using wazero.
-- On-chain WASM code upload.
-- Deterministic WASM upload/resource gas slices.
-- Host-side WASM runtime timeout protection.
-
-### Account Abstraction
-
-- Native paymaster-sponsored gas.
-- Atomic batch transactions with transfer and contract-call operations.
-- `account.v1` single-owner smart accounts.
-- `multisig.v1` threshold accounts.
-- Native EIP-7702-style delegated EOAs using `set_code` and `DelegatedCodeID=account.v1`.
-- Transfer-scoped session keys for `account.v1` and delegated EOAs.
-- Contract-call session keys limited to one contract address and one method.
-
-### RPC, Explorer, And Indexing
-
-- REST APIs for tx submission, chain head, txpool, validators, finality, and explorer pages.
-- EVM-style JSON-RPC subset including account, block, transaction, receipt, logs, fee, txpool, debug, and probe methods.
-- JSON-RPC batch request support.
-- `eth_getCode` and `eth_getStorageAt` projections over ChainLab code/storage.
-- `eth_getBlockByHash`, transaction count, and block-indexed transaction reads.
-- `eth_getBlockReceipts`.
-- `debug_traceTransaction` receipt-backed trace summaries.
-- Node-local canonical event index used by logs, filters, and explorer events.
-- Polling filters for logs, new blocks, and pending transactions.
-- WebSocket `eth_subscribe("newHeads")`.
-- WebSocket `eth_subscribe("logs")`.
-- WebSocket `eth_subscribe("newPendingTransactions")`.
-- Local block explorer overview and detail pages.
-
-### Governance
-
-- Proposal submit, vote, and execute transactions.
-- Parameter-change proposal lifecycle.
-- Stake-weighted voting.
-
-## Most Recent Completed Feature
-
-The latest implemented feature is contract-call session keys:
-
-- Design commit: `9fa7aba`
-- Plan commit: `d7a9d83`
-- Core implementation commit: `b240d75`
-- CLI implementation commit: `de3eb7b`
-- Documentation commit: `7ade620`
-
-What it added:
-
-- `account.session_key` can now install `call_to` and `call_method` policy fields.
-- `account.v1` and delegated EOAs can authorize a session key to call exactly one contract method.
-- Session-key call authorization validates target contract, method, expiry, and signature.
-- Successful calls emit `account.session_key_used` with `type=call`.
-- `tx session-key` supports `--call-to` and `--call-method`.
-- `tx call` supports `--from`, so a session key can sign for an account/delegated EOA.
-
-Final verification for that feature exited 0:
+The following commands all exited 0 after the implementation:
 
 ```powershell
-go test -count=1 ./internal/core
-go test -count=1 ./cmd/chainlab
 go test -count=1 ./...
+go test -race -count=1 ./...
+go vet ./...
 go run ./cmd/chainlab demo
-go build -o $env:TEMP\chainlab-session-key-call-final.exe ./cmd/chainlab
+go build -o $env:TEMP\chainlab-account-recovery-production.exe ./cmd/chainlab
 git diff --check
-git diff --cached --check
 ```
 
-## Current In-Progress Design
+The race run covered every package. The demo completed at height 21 with transfer, sponsored transfer, batch, smart account, multisig, native contracts, WASM, staking, and governance results intact.
 
-Social recovery has been designed but not implemented.
+## Current Production Blockers
 
-Committed design:
+Ordered by consensus/security dependency, not feature visibility:
 
-```text
-82bf4e8 docs: design account social recovery
-```
+1. **WASM determinism**
+   - Current static function-body and host-resource charging is incomplete.
+   - Wall-clock timeout can still influence guest success/failure under host load, which is unacceptable for consensus.
+   - Add deterministic instruction/epoch fuel and hard limits for memory, tables, stack, host I/O, logs, reads/writes, and storage growth; verify cross-process/root equality.
 
-Design file:
+2. **CometBFT ABCI++ production lifecycle**
+   - Implement and test proposal, finalize/commit, validator update, evidence, query, snapshot, and state-sync methods.
+   - Move authoritative production consensus/P2P away from the custom PoA/HTTP relay while preserving the local harness for differential tests.
 
-```text
-docs/superpowers/specs/2026-07-10-account-social-recovery-design.md
-```
+3. **Transactional storage**
+   - Replace whole-chain JSON snapshots with atomic versioned KV state/index commits.
+   - Add WAL/reopen, kill/fault injection, corruption handling, migrations, verified snapshots, and pruned/full/archive semantics.
 
-Scope of the design:
+4. **Protocol lifecycle and proofs**
+   - Version consensus encodings and state schema.
+   - Add scheduled upgrades, deterministic migrations, incompatible-node rejection, rollback limits, transaction/receipt/state inclusion proofs, and an independent verifier.
 
-- `account.v1` and delegated EOA owner recovery.
-- Owner configures guardians, threshold, and delay.
-- Guardians approve a new owner.
-- A guardian executes recovery after threshold and delay.
-- Current owner can cancel pending recovery or clear recovery config.
+5. **Resource governance**
+   - Txpool capacity/per-account quotas/eviction/journal.
+   - RPC body/batch/log-range/rate/time limits and WebSocket backpressure.
+   - Code, payload, event, storage, peer, and queue bounds with load/DoS evidence.
 
-Explicit non-goals:
+6. **Security and operations**
+   - Fuzz/property/race/fault/load/soak/cross-architecture test programs and dependency scans.
+   - Validator keystore/remote signer, sentries, metrics, readiness/liveness, alerts, backups, restore drills, reproducible releases, SBOM/provenance, and incident runbooks.
 
-- No ERC-4337 EntryPoint.
-- No ERC-7579 module format.
-- No Safe module compatibility.
-- No passkey/email/WebAuthn recovery.
-- No guardian weights.
-- No recovery for `multisig.v1` in this milestone.
+7. **Economics and ecosystem**
+   - Specify and simulate supply, rewards, staking/unbonding/slashing, governance/deposits/timelocks, treasury, and upgrade authority.
+   - Production wallet/SDK/indexer/explorer/token/oracle/interoperability support and staged public/incentivized testnets.
 
-No implementation plan or production code for social recovery has been written yet.
+## Next Immediate Work
 
-## Next Immediate Steps
+Start with deterministic WASM execution because every later consensus and multi-node test is invalid if nodes can disagree on a guest result.
 
-When the goal restarts, continue from social recovery.
+Required sequence:
 
-1. Write the implementation plan:
-   - Path: `docs/superpowers/plans/2026-07-10-account-social-recovery.md`
-   - Cover core tests, transaction type, executor logic, CLI command, docs, and verification.
-   - Commit as `docs: plan account social recovery`.
+1. Audit wazero's current deterministic fuel/epoch interruption and resource-limit APIs against the pinned version.
+2. Define a consensus resource schedule and module admission limits.
+3. Add RED tests for instruction loops, memory/table growth, stack/recursion, host I/O, emitted bytes, storage growth, and cross-process replay.
+4. Remove wall-clock outcome dependence; timeout may remain only as a local process safety backstop whose firing cannot commit a receipt/state.
+5. Run full/race/fuzz/replay verification and update the production gate evidence.
 
-2. Implement with TDD:
-   - Add RED core tests for configure, approve, execute, cancel, unauthorized owner, unauthorized guardian, threshold, delay, and owner rotation.
-   - Add `TxAccountRecovery` to `internal/types/types.go`.
-   - Add recovery gas estimate in `internal/core/executor.go`.
-   - Add owner/guardian authorization and recovery state transitions in `internal/core/executor.go`.
-   - Add CLI command `tx recovery` in `cmd/chainlab/main.go`.
-   - Add CLI E2E test in `cmd/chainlab/main_test.go`.
-   - Update README and roadmap.
+After deterministic execution is proven, implement the CometBFT ABCI++ adapter before expanding lower-priority account or EVM-shaped features.
 
-3. Verify social recovery:
+## Completion Audit
 
-```powershell
-go test -count=1 ./internal/core
-go test -count=1 ./cmd/chainlab
-go test -count=1 ./...
-go run ./cmd/chainlab demo
-go build -o $env:TEMP\chainlab-account-recovery-verify.exe ./cmd/chainlab
-git diff --check
-git diff --cached --check
-```
+Do not call the long-running goal complete until every production gate has authoritative evidence:
 
-4. Commit in small commits:
-   - `docs: plan account social recovery`
-   - `feat: add account social recovery`
-   - `feat: add account recovery cli`
-   - `docs: document account social recovery`
+- deterministic execution and cross-node replay;
+- Byzantine consensus/P2P/state sync through the selected production stack;
+- crash-consistent versioned storage and historical modes;
+- protocol upgrades and inclusion proofs;
+- bounded resources and abuse resistance;
+- fuzz/property/race/fault/load/soak/security review;
+- validator/operator security and disaster recovery;
+- specified economics, governance, ecosystem, and staged network evidence;
+- documentation and release artifacts matching deployed behavior.
 
-5. After implementation, write Obsidian diary/project record and push `D:\code\obsidian-note`.
-
-## Remaining Larger Roadmap
-
-### Account Abstraction
-
-- Social recovery implementation.
-- Batch session-key policies.
-- Parameter-level call policies.
-- Policy-based paymasters.
-- ERC-4337-like `UserOperation` and EntryPoint simulation.
-- ERC-7579-style modular account compatibility slice.
-
-### Execution Compatibility
-
-- General ABI registry and calldata decoder.
-- Contract creation for Ethereum raw transactions.
-- Legacy and type-1 Ethereum raw transaction decoding.
-- More complete EVM compatibility decision: either embed an EVM engine or keep ChainLab-native execution honest.
-
-### Storage And Node Operations
-
-- Replace JSON snapshot persistence with a durable KV store such as Pebble/RocksDB/LevelDB.
-- Add pruning and archive modes.
-- Add crash-recovery tests.
-- Add node metrics and health probes beyond current dev endpoints.
-- Add txpool capacity, eviction, journaling, and local transaction policy.
-
-### Networking And Consensus
-
-- Real peer discovery and gossip instead of configured HTTP peers.
-- Peer scoring, bans, reconnect logic, and propagation tests.
-- Production-grade BFT rounds/timeouts/locking, or explicitly migrate to a proven consensus stack.
-- Stronger validator key management and slashing economics.
-
-### Security And Quality
-
-- Fuzz tests for transaction decoding, state transition, RPC input parsing, and reorg replay.
-- Property tests for roots, replay determinism, txpool invariants, and fee accounting.
-- More adversarial tests around malformed WASM, gas metering, and storage growth.
-- Threat model for owner keys, paymasters, governance, upgrades, and bridges.
-
-### Product Ecosystem
-
-- Wallet connection story.
-- Token standards beyond the current native token demo.
-- NFT/RWA/oracle primitives if product direction requires them.
-- Bridge strategy only after security model is clear.
-- Deployment/ops runbooks.
-
-## Completion Audit Needed Before Calling The Goal Done
-
-Do not mark the long-running goal complete until a completion audit proves:
-
-- `go test -count=1 ./...` passes.
-- Demo passes.
-- Build passes.
-- Docs match implemented behavior.
-- The roadmap clearly separates implemented features from non-goals.
-- Mainstream-chain capability checklist is reviewed item by item.
-- Any missing production-grade items are either implemented or explicitly accepted as out of scope for ChainLab as a learning/prototype chain.
+A green local unit suite is necessary but not sufficient for production completion.

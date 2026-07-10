@@ -1,5 +1,7 @@
 # Session Key Accounts Implementation Plan
 
+> Historical scope note: social recovery was implemented in the later `account.recovery` milestone; references below describe this plan's original scope.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add ChainLab-native session keys for `account.v1` smart accounts and delegated EOAs.

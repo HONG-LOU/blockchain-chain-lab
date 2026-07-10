@@ -1,6 +1,6 @@
 # ChainLab
 
-ChainLab is a local-first blockchain implementation for learning and prototyping an appchain.
+ChainLab is a production-target sovereign blockchain implemented in Go. The repository contains the evolving protocol implementation and a local deterministic network used to verify it before the CometBFT-based production network is activated.
 
 It currently implements:
 
@@ -9,7 +9,7 @@ It currently implements:
 - transfers, staking, unstaking, and a governance proposal lifecycle for parameter changes
 - local proof-of-authority block production with deterministic multi-validator proposer rotation
 - dynamic validator joins, leaves, and slashing through `validator.join` / `validator.leave` / `validator.slash` transactions, with validator set committed into state roots and snapshots
-- BFT-style finality certificates from validator commit signatures, with conservative block-depth fallback when no certificate exists
+- PoA finality-attestation certificates from validator commit signatures, with conservative block-depth fallback when no certificate exists; production Byzantine consensus is being integrated through CometBFT ABCI++
 - finality double-vote evidence detection for validators that sign conflicting block hashes at the same height, with automatic local `validator.slash` transaction creation when the reporter can pay and the target has stake
 - transaction, receipt, and state roots
 - native smart-contract runtime with `counter.v1` and `token.v1`
@@ -22,10 +22,11 @@ It currently implements:
 - ChainLab-native multisig smart accounts through `multisig.v1`: a contract account enforces an owner threshold with multiple transaction authorizations
 - ChainLab-native EIP-7702-style delegated EOAs through `set_code`: an EOA keeps its address, balance, and nonce while delegating authorization to `account.v1`
 - ChainLab-native session keys for `account.v1` and delegated EOAs: an owner installs a limited key for capped transfers or one allowed contract method, with optional block-height expiry
+- ChainLab-native social recovery for `account.v1` and delegated EOAs: bounded guardian voting rounds, threshold-triggered delay, guardian-funded approval/execution, owner rotation, and session-authority invalidation
 - HTTP REST endpoints and a small JSON-RPC-style endpoint with single-request and batch-request bodies
 - persistent node snapshots with committed blocks, state, transaction index, and a canonical event index rebuilt on restart or reorg
 - local fork-choice that stores known branches and reorgs to a longer validated branch
-- EVM-compatible JSON-RPC read subset: `web3_clientVersion`, `net_version`, `net_listening`, `eth_chainId`, `eth_accounts`, `eth_coinbase`, `eth_mining`, `eth_hashrate`, `eth_syncing`, `eth_blockNumber`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getCode`, `eth_getStorageAt`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockReceipts`, `eth_getBlockByNumber`, `eth_getBlockByHash`, block transaction-count/index lookups, `eth_feeHistory`, `eth_getLogs`, `eth_call`, `eth_estimateGas`
+- EVM-shaped JSON-RPC read subset: `web3_clientVersion`, `net_version`, `net_listening`, `eth_chainId`, `eth_accounts`, `eth_coinbase`, `eth_mining`, `eth_hashrate`, `eth_syncing`, `eth_blockNumber`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getCode`, `eth_getStorageAt`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockReceipts`, `eth_getBlockByNumber`, `eth_getBlockByHash`, block transaction-count/index lookups, `eth_feeHistory`, `eth_getLogs`, `eth_call`, `eth_estimateGas`
 - minimal ABI-compatible `eth_call` support for native read methods, including Solidity-style calldata selectors for `get()`, `symbol()`, `owner()`, and `balanceOf(address)`, plus ABI-shaped `uint256`, `address`, and dynamic `string` return data
 - EVM-style `safe` and `finalized` block tags for block and log reads
 - pending nonce calculation, pending/queued txpool inspection, nonce-gap queued transaction promotion, 10 percent same-sender/same-nonce transaction replacement in pending or queued pools, pending/queued transaction lookup, pending transaction filter polling, and WebSocket pending transaction hash subscriptions for uncommitted transactions
@@ -37,7 +38,7 @@ It currently implements:
 - local multi-node devnet sync over HTTP peers: transaction relay, block import, produced-block broadcast, and finality vote relay
 - CLI commands for keys, genesis, nodes, signed transfers, block production, queries, and demos
 
-This is not a production mainnet. It is a verified development chain designed so the consensus, storage, runtime, and RPC layers can be replaced or expanded.
+The current implementation is not yet approved for public mainnet launch. Mainnet requires the production gates in [the production technology roadmap](docs/current-blockchain-tech-roadmap.md): deterministic execution, CometBFT ABCI++ consensus/networking, transactional storage, protocol upgrades, security testing, economics, and operational evidence.
 
 ## Verify
 
@@ -147,7 +148,7 @@ go run ./cmd/chainlab tx deploy --rpc http://127.0.0.1:8547 --private-key <owner
 go run ./cmd/chainlab tx transfer --rpc http://127.0.0.1:8547 --from <multisig-contract-address> --private-key <owner-a-private-key> --auth-private-key <owner-b-private-key> --to <recipient> --value 100
 ```
 
-Multisig transactions use `authorizations`, one per owner signature. The transaction still consumes the multisig account nonce, spends the multisig account balance, and can use `--paymaster-private-key` for sponsored gas. This is a native threshold-account model, not Gnosis Safe compatibility, social recovery, or full ERC-4337 validation. Session keys are a separate `account.v1` / delegated EOA slice.
+Multisig transactions use `authorizations`, one per owner signature. The transaction still consumes the multisig account nonce, spends the multisig account balance, and can use `--paymaster-private-key` for sponsored gas. This is a native threshold-account model, not Gnosis Safe or full ERC-4337 compatibility. Guardian recovery and session keys are separate `account.v1` / delegated EOA authorization paths.
 
 Delegate an EOA to `account.v1` and then transfer from that same EOA address with the owner key:
 
@@ -176,7 +177,29 @@ go run ./cmd/chainlab chain produce --rpc http://127.0.0.1:8547
 go run ./cmd/chainlab tx call --rpc http://127.0.0.1:8547 --from <account-or-delegated-eoa> --private-key <session-private-key> --to <contract-address> --method increment --arg amount=1
 ```
 
-Session key policy is stored in account storage under `session:<key>:...` keys and is committed into state roots and snapshots. Transfer policies track transferred value against `limit`, optionally restrict the recipient with `--to`, and optionally expire after a block height. Contract-call policies restrict the key to one `--call-to` contract address and one `--call-method`; the session key cannot call other contracts or methods. ChainLab still does not implement ERC-4337 `UserOperation`, ERC-7579 modules, social recovery, batch session-key policies, parameter-level call policies, or a general policy engine.
+Session key policy is stored in account storage under `session:<key>:...` keys and is committed into state roots and snapshots. Transfer policies track transferred value against `limit`, optionally restrict the recipient with `--to`, and optionally expire after a block height. Contract-call policies restrict the key to one `--call-to` contract address and one `--call-method`; the session key cannot call other contracts or methods. Owner recovery advances `session:epoch`, so every session policy installed before the rotation becomes unauthorized. ChainLab does not yet implement ERC-4337 `UserOperation`, ERC-7579 modules, batch session-key policies, parameter-level call policies, or a general policy engine.
+
+Configure two recovery guardians, approve a replacement owner, wait for the threshold delay, and execute:
+
+```powershell
+go run ./cmd/chainlab tx recovery --rpc http://127.0.0.1:8547 --from <account-or-delegated-eoa> --private-key <owner-key> --action configure --guardian <guardian-a> --guardian <guardian-b> --threshold 2 --delay 3
+go run ./cmd/chainlab tx recovery --rpc http://127.0.0.1:8547 --from <account-or-delegated-eoa> --private-key <guardian-a-key> --action approve --new-owner <new-owner>
+go run ./cmd/chainlab tx recovery --rpc http://127.0.0.1:8547 --from <account-or-delegated-eoa> --private-key <guardian-b-key> --action approve --new-owner <new-owner>
+go run ./cmd/chainlab tx recovery --rpc http://127.0.0.1:8547 --from <account-or-delegated-eoa> --private-key <guardian-a-key> --action execute --new-owner <new-owner>
+```
+
+Before threshold, each guardian votes for one target. A vote can change only when the change immediately reaches threshold, preventing unilateral vote churn. The voting round expires after 256 blocks. Threshold freezes one pending target, starts `delay`, and opens an inclusive 256-block execution window. `execute --new-owner` is mandatory so the signature binds the final owner.
+
+All actions consume the recovered account nonce. The recovered account pays `configure`, `cancel`, and `clear`; the signing guardian pays `approve` and `execute`, while guardian nonce remains unchanged. Guardians therefore need native gas balance. Recovery events are indexed at the recovered account address and can be monitored with `eth_getLogs`; because WebSocket logs do not yet emit `removed: true` on reorg, automation must re-query canonical state and honor the network safe/finalized boundary.
+
+The current owner can cancel an active round without removing guardian configuration, or clear it completely:
+
+```powershell
+go run ./cmd/chainlab tx recovery --rpc http://127.0.0.1:8547 --from <account-or-delegated-eoa> --private-key <owner-key> --action cancel
+go run ./cmd/chainlab tx recovery --rpc http://127.0.0.1:8547 --from <account-or-delegated-eoa> --private-key <owner-key> --action clear
+```
+
+This is a ChainLab-native recovery protocol for EOA guardians. It does not claim ERC-4337, ERC-7579, Safe module, ERC-1271 contract guardian, passkey, email, or EIP-7702 type-4 compatibility. For delegated EOAs it rotates the delegated `account.v1` owner; the root EOA key can still replace or clear delegation.
 
 Build a signed raw ChainLab transaction without broadcasting, then submit it later:
 
@@ -299,7 +322,7 @@ go run ./cmd/chainlab query estimate-gas --rpc http://127.0.0.1:8547 --type call
 - `GET /param/{key}`
 - `GET /tx/{hash}`
 - `GET /txpool`
-- `POST /tx` for signed transactions, including `transfer`, `batch`, `set_code`, `account.session_key`, `deploy`, `call`, `wasm.upload`, staking, validator, and governance transaction types. Future-nonce transactions are accepted into a node-local queued pool and promoted when earlier nonces arrive. If a pending or queued transaction already has the same sender and nonce, ChainLab accepts a replacement only when the new legacy gas price or both EIP-1559 fee caps are bumped by at least 10 percent.
+- `POST /tx` for signed transactions, including `transfer`, `batch`, `set_code`, `account.session_key`, `account.recovery`, `deploy`, `call`, `wasm.upload`, staking, validator, and governance transaction types. Future-nonce transactions are accepted into a node-local queued pool and promoted when earlier nonces arrive. If a pending or queued transaction already has the same sender and nonce, ChainLab accepts a replacement only when the authorization principal matches and the new legacy gas price or both EIP-1559 fee caps are bumped by at least 10 percent.
 - `POST /tx/raw`
 - `POST /faucet`
 - `POST /chain/produce`
@@ -314,11 +337,12 @@ go run ./cmd/chainlab query estimate-gas --rpc http://127.0.0.1:8547 --type call
 
 ## Roadmap
 
-Next useful milestones:
+The production sequence is:
 
-- BFT timeout/round handling, richer fork-choice safety rules, and production-grade slashing economics
-- broader WASM ABI with deterministic runtime step limits, full calldata ABI parsing, and richer host functions
-- richer account abstraction, including policy-based paymasters, social recovery, batch/parameter session-key policies, ERC-4337 compatibility, and fuller Ethereum EIP-7702 type-4 raw transaction compatibility
-- richer contract explorer views with decoded native contract state and longer-lived external indexer support
-- richer governance thresholds, quorum rules, deposits, and upgrade proposal handlers
-- production-framework migration decision: OP Stack, Cosmos SDK, Avalanche L1, or another appchain stack
+- consensus-safe deterministic WASM instruction and resource metering
+- CometBFT ABCI++ consensus, P2P, evidence, validator updates, block/state sync, and multi-process fault tests
+- transactional KV storage, atomic commits, schema migrations, snapshots, and pruned/full/archive profiles
+- protocol upgrades, inclusion proofs, protected validator signing, metrics/alerts, backup/recovery, fuzz/property/race/fault/load/soak validation
+- economics, governance security, wallet/SDK/indexer/token/oracle/interoperability ecosystem and staged public testnets
+
+See [ChainLab Production Technology Roadmap](docs/current-blockchain-tech-roadmap.md) and [Mainstream Chain Capability And Production Gates](docs/mainstream-chain-capability-and-production-gates-2026-07-10.md) for the authoritative gates and upstream references.

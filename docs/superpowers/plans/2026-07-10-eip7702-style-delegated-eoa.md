@@ -1,5 +1,7 @@
 # EIP-7702-Style Delegated EOA Implementation Plan
 
+> Historical scope note: session keys and social recovery were added in later milestones; the non-goals below describe only this plan's original implementation boundary.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a ChainLab-native EIP-7702-style delegated EOA flow where an EOA can set `account.v1` delegation, keep its own balance/nonce, and authorize transfers or batches through the delegated owner.

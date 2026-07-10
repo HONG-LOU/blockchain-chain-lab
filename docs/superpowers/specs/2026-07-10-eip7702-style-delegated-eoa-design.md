@@ -1,5 +1,7 @@
 # ChainLab EIP-7702-Style Delegated EOA Design
 
+> Historical scope note: session keys and social recovery were non-goals of this delegation milestone and were implemented later as separate native authorization paths.
+
 ## Purpose
 
 ChainLab already supports native paymasters, batched user operations, single-owner contract accounts, and multisig contract accounts. Those features model important account-abstraction UX, but they require funds and nonce ownership to move into a contract account.

@@ -1,59 +1,81 @@
 # Account Social Recovery Design
 
-## Context
+## Status
 
-ChainLab already supports `account.v1` smart accounts, delegated EOAs that use `DelegatedCodeID=account.v1`, multisig accounts, paymasters, batches, and transfer or single-contract-method session keys. The remaining account-abstraction gap is owner recovery: if the owner key is lost, the account currently has no on-chain path to rotate to a new owner.
+Implemented design, revised after adversarial review.
 
-This design adds a ChainLab-native social recovery slice for `account.v1` accounts and delegated EOAs. It is intentionally smaller than ERC-4337, ERC-7579 modules, Safe modules, passkeys, email recovery, or a general programmable policy engine.
+This is ChainLab-native guardian recovery for `account.v1` smart accounts and delegated EOAs. It is not ERC-4337 EntryPoint validation, an ERC-7579 module, a Safe recovery module, EIP-7702 type-4 compatibility, or passkey/email recovery.
+
+## Threat Model
+
+The feature addresses a lost or unavailable current owner key when a configured guardian threshold remains honest and available.
+
+It does not protect against an active compromised owner: the current owner can immediately cancel a pending recovery, clear or replace guardian configuration, call `setOwner`, or, for a delegated EOA, use the root EOA key to replace/clear delegation. Monitoring and delay give the owner a reaction window only when the owner remains able and willing to act.
+
+Guardians and replacement owners are signature-verifying EOAs. Contract guardians, ERC-1271, passkeys, email identity, weighted guardians, and multisig recovery are non-goals for this slice.
 
 ## Goals
 
-- Let the account owner configure guardian addresses, a threshold, and a block-height delay.
-- Let configured guardians approve one pending `new_owner`.
-- Let a guardian execute the recovery after threshold approvals and the delay have passed.
-- Let the current owner cancel a pending recovery or clear recovery configuration.
-- Keep nonce, fee payment, storage, and receipts on the account being recovered.
-- Expose the workflow through CLI and docs.
-
-## Non-Goals
-
-- No ERC-4337 EntryPoint or `UserOperation` compatibility.
-- No ERC-7579 module format.
-- No Safe module compatibility.
-- No off-chain identity recovery, passkeys, email recovery, or WebAuthn.
-- No guardian weights, rotating guardian sets by guardian vote, or multi-pending recovery queue.
-- No recovery for `multisig.v1` accounts in this milestone.
+- Let the owner configure up to 16 guardian EOAs, a threshold, and a block-height delay.
+- Record one vote per guardian without letting a minority guardian occupy or repeatedly reset a pending target.
+- Create a unique pending recovery only when one target reaches threshold.
+- Start the delay when threshold is reached, then give guardians a bounded execution window.
+- Rotate the owner atomically while invalidating pre-recovery session authority.
+- Keep every failed action atomic and expose canonical events through receipts, the event index, and EVM-shaped logs.
 
 ## Storage
-
-Recovery state is stored under deterministic account storage keys:
 
 ```text
 recovery:guardians
 recovery:threshold
 recovery:delay
+recovery:votes
 recovery:pending_owner
 recovery:execute_after
+recovery:expires_at
 recovery:approvals
+session:epoch
 ```
 
-`recovery:guardians` is a comma-separated list of lower-cased guardian addresses. `recovery:threshold` is a positive integer that cannot exceed guardian count. `recovery:delay` is a block count. `recovery:pending_owner` stores the only active recovery target. `recovery:execute_after` stores the first block height at which execution is allowed. `recovery:approvals` is a comma-separated unique list of guardians that approved the pending owner.
+`recovery:guardians` is a canonical comma-separated list. Guardians are unique, non-zero 20-byte hex EOAs and cannot equal the recovered account or current owner.
 
-Starting a new approval for a different `new_owner` replaces the pending owner and resets approvals to the current approving guardian.
+`recovery:votes` stores canonical `guardian=new_owner` entries before threshold. A guardian may cast one initial vote in a voting round. A change to another target is accepted only when that change immediately reaches threshold; this permits split votes to converge without allowing unilateral vote churn.
 
-## Transaction
+The first vote opens a 256-block voting round. If no target reaches threshold, a later `approve` after `expires_at` clears the old votes and begins a new round.
 
-Add transaction type:
+When a target reaches threshold, its matching guardian set is copied to `recovery:approvals`, `pending_owner` is frozen, and:
+
+```text
+execute_after = threshold_reached_height + delay
+expires_at = execute_after + 256
+```
+
+The equality boundaries are inclusive: execution is allowed when height equals `execute_after` or `expires_at`, and rejected after `expires_at`. Height additions are overflow checked.
+
+## Transaction Envelope
+
+Transaction type:
 
 ```text
 account.recovery
 ```
 
-Payload actions:
+Every recovery transaction requires an explicit `signer` and a signature from that signer. The recovered account supplies the transaction nonce. Guardian nonce is unchanged.
 
-### configure
+Recovery rejects multisig `authorizations`, every non-empty `signature_kind`, paymaster fields (including an orphan signature), `to`, non-zero `value`, `batch`, and action-irrelevant payload fields.
 
-Owner-only. Required payload:
+Fee policy:
+
+- `configure`, `cancel`, and `clear`: recovered account pays gas.
+- `approve` and `execute`: guardian signer pays gas; `receipt.fee_payer` records that guardian.
+
+Guardian-funded actions prevent a malicious guardian from repeatedly draining the recovered account. Insufficient guardian balance fails atomically before committed state changes.
+
+## Actions
+
+### `configure`
+
+Owner-only payload:
 
 ```json
 {
@@ -64,19 +86,11 @@ Owner-only. Required payload:
 }
 ```
 
-Validation:
+`delay` is required and may explicitly be zero. Threshold is positive and no larger than guardian count. Configuration clears votes and pending recovery state but does not revoke active session keys. Event: `account.recovery_configured`.
 
-- `from` must be an `account.v1` account or delegated EOA.
-- `signer` must be the current owner.
-- guardians must be unique, non-empty addresses.
-- threshold must be positive and `<= len(guardians)`.
-- delay can be zero but should be explicit.
+### `approve`
 
-Execution writes config and clears any pending recovery. Event: `account.recovery_configured`.
-
-### approve
-
-Guardian-only. Required payload:
+Guardian-only payload:
 
 ```json
 {
@@ -85,48 +99,46 @@ Guardian-only. Required payload:
 }
 ```
 
-Validation:
+`new_owner` is a non-zero 20-byte EOA, cannot equal the recovered account or current owner, and must not currently have contract code. Before threshold, the vote is stored or a converging vote change is applied. At threshold, pending target, approvals, delay, and execution expiry are frozen. Event: `account.recovery_approved`.
 
-- `signer` must be a configured guardian.
-- `new_owner` must be non-empty.
+### `execute`
 
-Execution starts or updates the pending recovery. If `new_owner` differs from the current pending owner, approvals reset to only the current guardian and `execute_after = block_height + delay`. If it matches, the signer is appended to approvals. Duplicate approvals fail. Event: `account.recovery_approved`.
+Guardian-only payload:
 
-### execute
+```json
+{
+  "action": "execute",
+  "new_owner": "0x..."
+}
+```
 
-Guardian-only. Payload may include `new_owner`; if present it must match the pending owner.
+`new_owner` is mandatory so the guardian signature binds the final target. It must equal `pending_owner`. Execution requires threshold approvals, `height >= execute_after`, and `height <= expires_at`.
 
-Execution checks:
+Successful execution sets `owner`, clears voting/pending state, and increments `session:epoch`. Existing session-policy keys may remain in storage, but their earlier epoch can no longer authorize transfers or calls. Event: `account.recovery_executed`.
 
-- pending owner exists;
-- approvals count is at least threshold;
-- current block height is `>= execute_after`.
+### `cancel`
 
-If valid, it sets `owner = pending_owner`, clears pending recovery state, and emits `account.recovery_executed`.
+Owner-only. Clears current votes and pending state, preserving guardian configuration. Event: `account.recovery_cancelled`.
 
-### cancel
+### `clear`
 
-Owner-only. Clears pending recovery state without changing configured guardians. Event: `account.recovery_cancelled`.
+Owner-only. Clears all `recovery:` configuration, votes, and pending state. Event: `account.recovery_cleared`.
 
-### clear
+## Owner-Rotation And Delegation Invariants
 
-Owner-only. Clears recovery config and pending recovery state. Event: `account.recovery_cleared`.
+- Direct `account.v1 setOwner` clears votes/pending recovery and all `session:` authority before setting the new owner. Guardian configuration remains available to the new owner.
+- Replacing or clearing delegated `account.v1` code removes prior owner, session, and recovery authorization storage so a later delegation cannot reactivate stale policy.
+- Owner and guardian addresses are strictly normalized 20-byte non-zero addresses. An account cannot own itself.
+- Account nonce overflow is rejected rather than wrapping to zero.
+- Pending transaction replacement requires the same authorization principal; one guardian cannot fee-bump-replace another guardian's same-account/same-nonce recovery transaction.
 
-## Authorization
+## Events And Reorgs
 
-`account.recovery` does not use multisig `authorizations`, session keys, paymasters for authorization, or Ethereum type-2 signatures.
+Recovery events use the recovered account (`tx.from`) as the event/log address. They are available through canonical event queries, `eth_getLogs`, receipts, filters, and WebSocket log subscriptions.
 
-The transaction must include `signer` and a signature from that signer. The validator then checks:
-
-- `from` is `account.v1` or delegated EOA with `DelegatedCodeID=account.v1`;
-- owner-only actions are signed by current `owner`;
-- guardian-only actions are signed by a configured guardian.
-
-The recovered account consumes the nonce and pays fees. The owner or guardian signer nonce is unchanged.
+Delay uses candidate block height, not finalized height. A reorg replays recovery state against canonical heights. Current WebSocket delivery does not emit `removed: true` for orphaned logs, so a recovery monitor must re-query canonical state/logs and use the local `safe`/`finalized` boundary instead of treating one notification as final.
 
 ## CLI
-
-Add:
 
 ```powershell
 chainlab tx recovery --rpc <url> --from <account> --private-key <owner-key> --action configure --guardian <guardian-a> --guardian <guardian-b> --threshold 2 --delay 3
@@ -137,37 +149,21 @@ chainlab tx recovery --rpc <url> --from <account> --private-key <owner-key> --ac
 chainlab tx recovery --rpc <url> --from <account> --private-key <owner-key> --action clear
 ```
 
-The CLI reuses pending nonce lookup for the recovered account. It signs as the owner or guardian and sets the transaction `signer` field because `from != signer`.
+The CLI uses the pending nonce of `--from` and always writes `signer`, including the `from == signer` edge. Guardians need native balance for `approve` and `execute` gas.
 
-## Errors
+## Required Evidence
 
-- Non-`account.v1` accounts return `account recovery requires account.v1 from account`.
-- Missing signer returns `account recovery requires signer`.
-- Non-owner config/cancel/clear returns `account recovery owner action requires current owner`.
-- Non-guardian approve/execute returns `account recovery guardian action requires configured guardian`.
-- Invalid guardian config returns explicit guardian or threshold errors.
-- Duplicate guardian approval returns `recovery approval already recorded`.
-- Execute before threshold returns `recovery approval threshold not met`.
-- Execute before delay returns `recovery delay has not elapsed`.
+- Smart-account and delegated-EOA configure/approve/execute/transfer lifecycles.
+- Role isolation, signature/envelope validation, maximum guardian set, malformed/corrupted stored state, height/nonce overflow, exact delay/expiry boundaries, split-vote convergence, voting-round rollover, fee ownership, insufficient guardian funds, and atomic failures.
+- Session transfer/call authority invalid after rotation.
+- Direct owner rotation and delegation replacement clear stale authority.
+- Real-node CLI workflow, mempool cross-guardian replacement rejection, persistence/replay, and account-addressed recovery logs.
+- Full tests, race detector, vet, demo, build, and formatting checks.
 
-## Testing
+## Non-Goals
 
-Core tests must prove:
-
-- owner can configure guardians, threshold, and delay;
-- guardian approvals are recorded on the account and do not increment guardian nonce;
-- execution before threshold or delay fails without consuming account nonce;
-- execution after threshold and delay rotates owner and clears pending state;
-- old owner can no longer authorize account transfer;
-- new owner can authorize account transfer;
-- non-owner cannot configure;
-- non-guardian cannot approve;
-- owner can cancel pending recovery.
-
-CLI tests must prove:
-
-- `tx recovery --action configure` stores guardian config;
-- guardian approvals and execute rotate owner on a real node;
-- a subsequent `tx transfer --from <account> --private-key <new-owner-key>` succeeds.
-
-Documentation must state that this is ChainLab-native guardian recovery, not ERC-4337, ERC-7579, Safe modules, or passkey recovery.
+- ERC-4337 EntryPoint, bundler, keyed nonce, or `UserOperation` compatibility.
+- ERC-7579/Safe module formats or ERC-1271 contract guardians.
+- EIP-7702 authorization tuples or root-key recovery for delegated EOAs.
+- Guardian weights, multiple simultaneous threshold-approved proposals, finalized-height timelocks, passkeys, email, WebAuthn, or off-chain identity recovery.
+- Recovery for `multisig.v1`.
