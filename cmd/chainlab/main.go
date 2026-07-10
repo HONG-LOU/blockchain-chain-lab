@@ -270,7 +270,7 @@ func faucetRequestCommand(args []string, out io.Writer) error {
 
 func txCommand(args []string, out io.Writer) {
 	if len(args) < 1 {
-		log.Fatal("usage: chainlab tx <transfer|batch-transfer|set-code|session-key|deploy|call|wasm-upload|stake|proposal-submit|vote|proposal-execute|validator-join|validator-leave|validator-slash|raw-submit>")
+		log.Fatal("usage: chainlab tx <transfer|batch-transfer|set-code|session-key|recovery|deploy|call|wasm-upload|stake|proposal-submit|vote|proposal-execute|validator-join|validator-leave|validator-slash|raw-submit>")
 	}
 	switch args[0] {
 	case "transfer":
@@ -287,6 +287,10 @@ func txCommand(args []string, out io.Writer) {
 		}
 	case "session-key":
 		if err := sessionKeyCommand(args[1:], out); err != nil {
+			log.Fatal(err)
+		}
+	case "recovery":
+		if err := recoveryCommand(args[1:], out); err != nil {
 			log.Fatal(err)
 		}
 	case "deploy":
@@ -584,6 +588,86 @@ func sessionKeyCommand(args []string, out io.Writer) error {
 	tx, err := buildSignedTransactionFromSpec(*rpcURL, *privateKeyHex, signedTransactionSpec{
 		txType:       types.TxSessionKey,
 		fromOverride: *from,
+		gasLimit:     *gasLimit,
+		gasPrice:     *gasPrice,
+		payload:      payload,
+	})
+	if err != nil {
+		return err
+	}
+	response, err := submitTransaction(*rpcURL, tx)
+	if err != nil {
+		return err
+	}
+	return writeTo(out, response)
+}
+
+func recoveryCommand(args []string, out io.Writer) error {
+	flags := flag.NewFlagSet("tx recovery", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
+	from := flags.String("from", "", "account or delegated EOA address to recover")
+	privateKeyHex := flags.String("private-key", "", "owner or guardian private key")
+	action := flags.String("action", "", "recovery action: configure, approve, execute, cancel, or clear")
+	threshold := flags.Uint64("threshold", 0, "guardian approval threshold")
+	delay := flags.Uint64("delay", 0, "recovery execution delay in blocks")
+	newOwner := flags.String("new-owner", "", "proposed new owner address")
+	gasLimit := flags.Uint64("gas-limit", 55_000, "gas limit")
+	gasPrice := flags.Uint64("gas-price", 1, "gas price")
+	var guardians stringListFlag
+	flags.Var(&guardians, "guardian", "guardian address; can be repeated")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected recovery arguments: %s", strings.Join(flags.Args(), " "))
+	}
+	if strings.TrimSpace(*from) == "" {
+		return fmt.Errorf("from account is required")
+	}
+
+	setFlags := make(map[string]bool)
+	flags.Visit(func(visited *flag.Flag) {
+		setFlags[visited.Name] = true
+	})
+	normalizedAction := strings.ToLower(strings.TrimSpace(*action))
+	payload := map[string]string{"action": normalizedAction}
+	switch normalizedAction {
+	case "configure":
+		if !setFlags["guardian"] || len(guardians) == 0 {
+			return fmt.Errorf("configure requires at least one --guardian")
+		}
+		if !setFlags["threshold"] || *threshold == 0 {
+			return fmt.Errorf("configure requires a positive --threshold")
+		}
+		if !setFlags["delay"] {
+			return fmt.Errorf("configure requires explicit --delay")
+		}
+		if setFlags["new-owner"] {
+			return fmt.Errorf("configure does not allow --new-owner")
+		}
+		payload["guardians"] = strings.Join(guardians.Values(), ",")
+		payload["threshold"] = strconv.FormatUint(*threshold, 10)
+		payload["delay"] = strconv.FormatUint(*delay, 10)
+	case "approve", "execute":
+		if !setFlags["new-owner"] || strings.TrimSpace(*newOwner) == "" {
+			return fmt.Errorf("%s requires --new-owner", normalizedAction)
+		}
+		if setFlags["guardian"] || setFlags["threshold"] || setFlags["delay"] {
+			return fmt.Errorf("%s does not allow --guardian, --threshold, or --delay", normalizedAction)
+		}
+		payload["new_owner"] = *newOwner
+	case "cancel", "clear":
+		if setFlags["guardian"] || setFlags["threshold"] || setFlags["delay"] || setFlags["new-owner"] {
+			return fmt.Errorf("%s does not allow recovery action flags", normalizedAction)
+		}
+	default:
+		return fmt.Errorf("action must be configure, approve, execute, cancel, or clear")
+	}
+
+	tx, err := buildSignedTransactionFromSpec(*rpcURL, *privateKeyHex, signedTransactionSpec{
+		txType:       types.TxAccountRecovery,
+		fromOverride: *from,
+		forceSigner:  true,
 		gasLimit:     *gasLimit,
 		gasPrice:     *gasPrice,
 		payload:      payload,
@@ -1033,6 +1117,7 @@ func buildSignedBatchTransactionFromWithFeeCapsAndPaymaster(rpcURL string, priva
 type signedTransactionSpec struct {
 	txType                 types.TxType
 	fromOverride           string
+	forceSigner            bool
 	authPrivateKeyHexes    []string
 	to                     string
 	value                  uint64
@@ -1077,7 +1162,7 @@ func buildSignedTransactionFromSpec(rpcURL string, privateKeyHex string, spec si
 	}
 	signerField := ""
 	useAuthorizations := len(spec.authPrivateKeyHexes) > 0
-	if !useAuthorizations && !strings.EqualFold(from, signer) {
+	if !useAuthorizations && (spec.forceSigner || !strings.EqualFold(from, signer)) {
 		signerField = signer
 	}
 	var chainIDHex string

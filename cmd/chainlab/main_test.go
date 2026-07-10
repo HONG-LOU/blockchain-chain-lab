@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -218,6 +219,45 @@ func TestBuildSignedTransferFetchesNonceFromRPC(t *testing.T) {
 	}
 	if !crypto.Verify(alice, tx.SigningBytes(), tx.Signature) {
 		t.Fatal("signature should verify")
+	}
+}
+
+func TestBuildSignedTransactionForceSignerWhenFromMatchesKey(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	account := crypto.AddressFromPrivateKey(key)
+	n, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{account: 1_000_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	tx, err := buildSignedTransactionFromSpec(server.URL, crypto.PrivateKeyToHex(key), signedTransactionSpec{
+		txType:       types.TxAccountRecovery,
+		fromOverride: account,
+		forceSigner:  true,
+		gasLimit:     55_000,
+		gasPrice:     1,
+		payload:      map[string]string{"action": "clear"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tx.Signer != account {
+		t.Fatalf("signer = %q, want %q", tx.Signer, account)
+	}
+	if tx.Nonce != 0 {
+		t.Fatalf("nonce = %d", tx.Nonce)
+	}
+	if !crypto.Verify(account, tx.SigningBytes(), tx.Signature) {
+		t.Fatal("forced signer transaction signature should verify")
 	}
 }
 
@@ -732,6 +772,225 @@ func TestSessionKeyCommandInstallsCallPolicyAndSessionCallWorks(t *testing.T) {
 	}
 	if got := n.Account(session).Nonce; got != 0 {
 		t.Fatalf("session nonce = %d", got)
+	}
+}
+
+func TestRecoveryCommandRotatesAccountOwnerEndToEnd(t *testing.T) {
+	ownerKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	guardianAKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	guardianBKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	newOwnerKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := crypto.AddressFromPrivateKey(ownerKey)
+	guardianA := crypto.AddressFromPrivateKey(guardianAKey)
+	guardianB := crypto.AddressFromPrivateKey(guardianBKey)
+	newOwner := crypto.AddressFromPrivateKey(newOwnerKey)
+	receiver := "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	const guardianBalance uint64 = 500_000
+
+	n, err := node.New(node.Config{
+		ChainID:     "chainlab-local",
+		ProposerKey: ownerKey,
+		GenesisBalance: map[string]uint64{
+			owner:     2_000_000,
+			guardianA: guardianBalance,
+			guardianB: guardianBalance,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	var deployOut bytes.Buffer
+	if err := deployCommand([]string{
+		"--rpc", server.URL,
+		"--private-key", crypto.PrivateKeyToHex(ownerKey),
+		"--code-id", contracts.AccountCodeID,
+		"--arg", "owner=" + owner,
+	}, &deployOut); err != nil {
+		t.Fatal(err)
+	}
+	deployBlock, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deployBlock.Receipts) != 1 || deployBlock.Receipts[0].ContractAddress == "" {
+		t.Fatalf("deploy receipts = %#v", deployBlock.Receipts)
+	}
+	account := deployBlock.Receipts[0].ContractAddress
+
+	var fundOut bytes.Buffer
+	if err := transferCommand([]string{
+		"--rpc", server.URL,
+		"--private-key", crypto.PrivateKeyToHex(ownerKey),
+		"--to", account,
+		"--value", "400000",
+	}, &fundOut); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+	if got := n.Account(account).Balance; got != 400_000 {
+		t.Fatalf("funded account balance = %d", got)
+	}
+
+	submitRecovery := func(key crypto.PrivateKey, action string, extra ...string) types.Block {
+		t.Helper()
+		args := []string{
+			"--rpc", server.URL,
+			"--from", account,
+			"--private-key", crypto.PrivateKeyToHex(key),
+			"--action", action,
+		}
+		args = append(args, extra...)
+		var out bytes.Buffer
+		if err := recoveryCommand(args, &out); err != nil {
+			t.Fatalf("recovery %s: %v", action, err)
+		}
+		block, err := n.ProduceBlock()
+		if err != nil {
+			t.Fatalf("produce recovery %s block: %v", action, err)
+		}
+		if len(block.Transactions) != 1 || len(block.Receipts) != 1 || !block.Receipts[0].Success {
+			t.Fatalf("recovery %s block = %#v", action, block)
+		}
+		return block
+	}
+	assertRecoveryTx := func(block types.Block, signer string, nonce uint64, action string) {
+		t.Helper()
+		tx := block.Transactions[0]
+		if tx.Type != types.TxAccountRecovery || tx.From != account || tx.Signer != signer || tx.Nonce != nonce {
+			t.Fatalf("recovery %s transaction = %+v", action, tx)
+		}
+		if tx.GasLimit != 55_000 || tx.GasPrice != 1 || tx.Payload["action"] != action {
+			t.Fatalf("recovery %s gas/payload = %+v", action, tx)
+		}
+	}
+
+	configureBlock := submitRecovery(ownerKey, "configure",
+		"--guardian", guardianA,
+		"--guardian", guardianB,
+		"--threshold", "2",
+		"--delay", "2",
+	)
+	assertRecoveryTx(configureBlock, owner, 0, "configure")
+	configured := n.Account(account)
+	if configured.Storage["recovery:guardians"] != guardianA+","+guardianB ||
+		configured.Storage["recovery:threshold"] != "2" || configured.Storage["recovery:delay"] != "2" {
+		t.Fatalf("recovery configuration = %#v", configured.Storage)
+	}
+
+	approveABlock := submitRecovery(guardianAKey, "approve", "--new-owner", newOwner)
+	assertRecoveryTx(approveABlock, guardianA, 1, "approve")
+	if approveABlock.Receipts[0].FeePayer != guardianA {
+		t.Fatalf("guardian A fee payer = %q", approveABlock.Receipts[0].FeePayer)
+	}
+	approveBBlock := submitRecovery(guardianBKey, "approve", "--new-owner", newOwner)
+	assertRecoveryTx(approveBBlock, guardianB, 2, "approve")
+	if approveBBlock.Receipts[0].FeePayer != guardianB {
+		t.Fatalf("guardian B fee payer = %q", approveBBlock.Receipts[0].FeePayer)
+	}
+	wantExecuteAfter := approveBBlock.Header.Height + 2
+	if got := n.Account(account).Storage["recovery:execute_after"]; got != strconv.FormatUint(wantExecuteAfter, 10) {
+		t.Fatalf("execute after = %q, want %d", got, wantExecuteAfter)
+	}
+
+	for i := uint64(0); i < 2; i++ {
+		block, err := n.ProduceBlock()
+		if err != nil {
+			t.Fatalf("produce delay block %d: %v", i+1, err)
+		}
+		if len(block.Transactions) != 0 {
+			t.Fatalf("delay block %d transactions = %#v", block.Header.Height, block.Transactions)
+		}
+	}
+
+	executeBlock := submitRecovery(guardianAKey, "execute", "--new-owner", newOwner)
+	assertRecoveryTx(executeBlock, guardianA, 3, "execute")
+	if executeBlock.Receipts[0].FeePayer != guardianA {
+		t.Fatalf("execute fee payer = %q", executeBlock.Receipts[0].FeePayer)
+	}
+	if got := n.Account(account).Storage["owner"]; got != newOwner {
+		t.Fatalf("recovered account owner = %q, want %q", got, newOwner)
+	}
+	if got := n.Account(guardianA); got.Balance != guardianBalance-110_000 || got.Nonce != 0 {
+		t.Fatalf("guardian A account = %+v", got)
+	}
+	if got := n.Account(guardianB); got.Balance != guardianBalance-55_000 || got.Nonce != 0 {
+		t.Fatalf("guardian B account = %+v", got)
+	}
+
+	var transferOut bytes.Buffer
+	if err := transferCommand([]string{
+		"--rpc", server.URL,
+		"--from", account,
+		"--private-key", crypto.PrivateKeyToHex(newOwnerKey),
+		"--to", receiver,
+		"--value", "100",
+	}, &transferOut); err != nil {
+		t.Fatal(err)
+	}
+	transferBlock, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(transferBlock.Transactions) != 1 || transferBlock.Transactions[0].Signer != newOwner || transferBlock.Transactions[0].Nonce != 4 {
+		t.Fatalf("new owner transfer = %#v", transferBlock.Transactions)
+	}
+	if got := n.Account(receiver).Balance; got != 100 {
+		t.Fatalf("receiver balance = %d", got)
+	}
+	if got := n.Account(newOwner).Nonce; got != 0 {
+		t.Fatalf("new owner nonce = %d", got)
+	}
+}
+
+func TestRecoveryCommandRejectsInvalidActionFlags(t *testing.T) {
+	account := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	guardian := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	newOwner := "0xcccccccccccccccccccccccccccccccccccccccc"
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "missing from", args: []string{"--action", "clear"}, want: "from account is required"},
+		{name: "unknown action", args: []string{"--from", account, "--action", "recover"}, want: "action must be"},
+		{name: "configure missing guardian", args: []string{"--from", account, "--action", "configure", "--threshold", "1", "--delay", "0"}, want: "at least one --guardian"},
+		{name: "configure missing threshold", args: []string{"--from", account, "--action", "configure", "--guardian", guardian, "--delay", "0"}, want: "positive --threshold"},
+		{name: "configure zero threshold", args: []string{"--from", account, "--action", "configure", "--guardian", guardian, "--threshold", "0", "--delay", "0"}, want: "positive --threshold"},
+		{name: "configure missing explicit delay", args: []string{"--from", account, "--action", "configure", "--guardian", guardian, "--threshold", "1"}, want: "explicit --delay"},
+		{name: "configure rejects new owner and accepts zero delay", args: []string{"--from", account, "--action", "configure", "--guardian", guardian, "--threshold", "1", "--delay", "0", "--new-owner", newOwner}, want: "does not allow --new-owner"},
+		{name: "approve missing new owner", args: []string{"--from", account, "--action", "approve"}, want: "approve requires --new-owner"},
+		{name: "approve rejects configure flags", args: []string{"--from", account, "--action", "approve", "--new-owner", newOwner, "--guardian", guardian}, want: "approve does not allow"},
+		{name: "execute missing new owner", args: []string{"--from", account, "--action", "execute"}, want: "execute requires --new-owner"},
+		{name: "execute rejects configure flags", args: []string{"--from", account, "--action", "execute", "--new-owner", newOwner, "--delay", "1"}, want: "execute does not allow"},
+		{name: "cancel rejects action flags", args: []string{"--from", account, "--action", "cancel", "--threshold", "1"}, want: "cancel does not allow recovery action flags"},
+		{name: "clear rejects action flags", args: []string{"--from", account, "--action", "clear", "--new-owner", newOwner}, want: "clear does not allow recovery action flags"},
+		{name: "rejects positional arguments", args: []string{"--from", account, "--action", "clear", "extra"}, want: "unexpected recovery arguments"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := recoveryCommand(test.args, &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want containing %q", err, test.want)
+			}
+		})
 	}
 }
 
