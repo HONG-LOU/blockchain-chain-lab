@@ -1,21 +1,22 @@
 # ChainLab
 
-ChainLab is a production-target sovereign blockchain implemented in Go. The repository contains the evolving protocol implementation and a local PoA development network used to replay and verify its deterministic application state transition before the CometBFT-based production network is activated. Local block timestamps and hashes are not cross-run deterministic.
+ChainLab is being built as a production-grade sovereign blockchain implemented in Go, not as a learning project or toy chain. The repository contains the evolving protocol implementation and a local PoA development network used to replay and verify its deterministic application state transition before the CometBFT-based production network is activated. Local block timestamps and hashes are not cross-run deterministic.
 
 It currently implements:
 
 - account balances, nonces, storage, and deterministic state roots
 - secp256k1 signatures and Ethereum-style 20-byte addresses
-- transfers, staking, unstaking, and a governance proposal lifecycle for parameter changes
+- transfers plus stake accounting; governance proposal/vote/execute transactions are fail-closed until finalized voting-power snapshots, unbonding locks, deposits, and versioned activation exist
 - local proof-of-authority block production with deterministic multi-validator proposer rotation
-- dynamic validator joins, leaves, and slashing through `validator.join` / `validator.leave` / `validator.slash` transactions, with validator set committed into state roots and snapshots
-- PoA finality-attestation certificates from validator commit signatures, with conservative block-depth fallback when no certificate exists; production Byzantine consensus is being integrated through CometBFT ABCI++
-- finality double-vote evidence detection for validators that sign conflicting block hashes at the same height, with automatic local `validator.slash` transaction creation when the reporter can pay and the target has stake
+- a fixed genesis validator set committed into state roots and snapshots; `validator.join` and `validator.leave` are rejected until finalized epoch transitions are implemented through the production consensus lifecycle
+- PoA finality-attestation certificates from validator commit signatures, with a monotonic highest-certificate finality lock that rejects longer conflicting branches; without a quorum certificate, `finalized` remains at genesis and the separate `depth_confirmation` result is only a local `safe` heuristic
+- finality double-vote evidence detection and persistent vote memory; a valid conflicting quorum certificate triggers a persistent sticky HALT, while `validator.slash` accepts only same-chain, same-height, cryptographically verified conflicting signatures, consumes each chain/validator/height offence once regardless of which conflicting vote pair proves it, and clears the target's current stake without changing the fixed validator set
 - transaction, receipt, and state roots
-- native smart-contract runtime with `counter.v1` and `token.v1`
+- native smart-contract runtime with a sealed, versioned `chainlab-native-v1` gas schedule and bounded input, storage, event, and output work
 - sandboxed WASM contract runtime with built-in `wasm.echo.v1` and chain-state uploaded modules through `wasm.upload`
-- versioned Wasmtime WASM execution with deterministic guest fuel, shared host gas, fixed declared memory/table resources, bounded host I/O/events/writes, and atomic rollback
+- versioned Wasmtime WASM execution with deterministic guest fuel, shared host gas, fixed declared memory/table resources, a maximum 64-node direct-call graph, bounded host I/O/events/writes, and atomic rollback
 - EIP-1559-style local fee market with block base fee, gas used/limit, base fee burn, priority fee rewards, and legacy `gas_price` compatibility
+- included deterministic execution failures with stable receipt codes, business-state rollback, sender-nonce consumption, and actual-gas fee settlement; out-of-gas consumes the full transaction gas limit and a paymaster funds sponsored failures
 - native paymaster-sponsored transactions: the user signs the operation and consumes their own nonce, while a paymaster signs an authorization and pays gas
 - ChainLab-native batched user operations: one signed transaction can atomically execute up to 128 transfer/call operations with one sender nonce and one fee settlement
 - ChainLab-native smart contract accounts through `account.v1`: a contract account holds the balance and nonce while its stored owner signs with the transaction `signer`
@@ -23,13 +24,15 @@ It currently implements:
 - ChainLab-native EIP-7702-style delegated EOAs through `set_code`: an EOA keeps its address, balance, and nonce while delegating authorization to `account.v1`
 - ChainLab-native session keys for `account.v1` and delegated EOAs: an owner installs a limited key for capped transfers or one allowed contract method, with optional block-height expiry
 - ChainLab-native social recovery for `account.v1` and delegated EOAs: bounded guardian voting rounds, threshold-triggered delay, guardian-funded approval/execution, owner rotation, and session-authority invalidation
-- HTTP REST endpoints and a small JSON-RPC-style endpoint with single-request and batch-request bodies
-- persistent node snapshots with committed blocks, state, transaction index, and a canonical event index rebuilt on restart or reorg
+- HTTP REST and JSON-RPC endpoints with bounded request concurrency, batch sizes, query ranges, result counts, and response bytes, plus halt-aware readiness and separate liveness checks
+- strict persistent snapshot v2 envelopes with generation and checksum, an explicitly timestamped genesis, current state, canonical and known blocks, finality lock, partial votes, and equivocation evidence; restart replays block history from genesis and verifies state roots before publishing it
 - local fork-choice that stores known branches and reorgs to a longer validated branch
 - EVM-shaped JSON-RPC read subset: `web3_clientVersion`, `net_version`, `net_listening`, `eth_chainId`, `eth_accounts`, `eth_coinbase`, `eth_mining`, `eth_hashrate`, `eth_syncing`, `eth_blockNumber`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getCode`, `eth_getStorageAt`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockReceipts`, `eth_getBlockByNumber`, `eth_getBlockByHash`, block transaction-count/index lookups, `eth_feeHistory`, `eth_getLogs`, `eth_call`, `eth_estimateGas`
-- minimal ABI-compatible `eth_call` support for native read methods, including Solidity-style calldata selectors for `get()`, `symbol()`, `owner()`, and `balanceOf(address)`, plus ABI-shaped `uint256`, `address`, and dynamic `string` return data
+- minimal latest-state ABI-compatible `eth_call` support for native read methods, including Solidity-style calldata selectors for `get()`, `symbol()`, `owner()`, and `balanceOf(address)`, plus ABI-shaped `uint256`, `address`, and dynamic `string` return data; reads pin an immutable read-only state version so block production and reorg processing can continue concurrently
 - EVM-style `safe` and `finalized` block tags for block and log reads
 - bounded pending/queued txpool inspection and nonce promotion: 2 MiB per transaction, 128 MiB/4,096 transactions total, 2,048 queued, 64 per sender, nonce gap 64, plus principal-safe 10 percent same-nonce replacement, pending lookup/filter polling, and WebSocket notifications
+- consensus-visible 2 MiB transaction and 16 MiB block limits, including a 12 MiB uncertified base-block ceiling that reserves 4 MiB for a quorum certificate, plus 4,096 transaction/receipt/finality-signature count limits
+- account storage caps of 4,096 entries, 256 bytes per key, 64 KiB per value, and 8 MiB total per account with O(1) derived byte accounting; an 8 MiB RPC txpool-source ceiling; 32 concurrent ordinary HTTP requests; 1,024 random-ID filters with active five-minute expiry, 64 KiB per log-filter definition, at most 64 pending filters and 65,536 retained pending hashes; and WebSocket limits of 64 connections, 64 subscriptions per connection, 1,024 subscriptions per node, and 64 log subscriptions
 - raw transaction submission for ChainLab-native signed JSON and a limited Ethereum EIP-1559 type-2 transfer subset
 - devnet faucet that creates a normal proposer-signed transfer into the mempool
 - local block explorer pages for head, finality, recent blocks, transactions, accounts, validators, mempool, and indexed recent contract events
@@ -37,6 +40,8 @@ It currently implements:
 - EVM-style block/log/pending transaction filter polling with `eth_newBlockFilter`, `eth_newPendingTransactionFilter`, `eth_newFilter`, `eth_getFilterLogs`, `eth_getFilterChanges`, and `eth_uninstallFilter`
 - local multi-node devnet sync over HTTP peers: transaction relay, block import, produced-block broadcast, and finality vote relay
 - CLI commands for keys, genesis, nodes, signed transfers, block production, queries, and demos
+
+These are safety boundaries of the local PoA harness, not a claim that it implements a production Byzantine-fault-tolerant network. It does not yet provide the authoritative CometBFT ABCI++ lifecycle, consensus rounds with prevote/precommit, production P2P and evidence handling, epoch-based validator transitions, or block/state sync. Its checksummed JSON snapshot is a fail-closed development persistence format, not a transactional production database, WAL, archive store, or crash-tested atomic index layer.
 
 The current implementation is not yet approved for public mainnet launch. [Mainstream Chain Capability And Production Gates](docs/mainstream-chain-capability-and-production-gates-2026-07-10.md) is the authoritative gate set; [the production technology roadmap](docs/current-blockchain-tech-roadmap.md) orders the implementation work. Mainnet requires deterministic execution, CometBFT ABCI++ consensus/networking, transactional storage, protocol upgrades, security testing, economics, and operational evidence.
 
@@ -51,24 +56,24 @@ go run ./cmd/chainlab demo
 
 ## CLI
 
-Generate a key:
+Generate an additional validator key file without printing the secret:
 
 ```powershell
-go run ./cmd/chainlab keygen
+go run ./cmd/chainlab keygen --out config/validator-2-key.json
 ```
 
-Create a local genesis file:
+Create a public local genesis and a separate validator key file:
 
 ```powershell
-go run ./cmd/chainlab init --out config/genesis.json
+go run ./cmd/chainlab init --out config/genesis.json --key-out config/validator-1-key.json
 ```
 
-The generated genesis includes a `validators` array. For a multi-validator devnet, generate additional keys with `keygen`, add their addresses to `validators`, and start each validator with its own `--private-key`.
+The genesis contains only public consensus data, including an explicit `genesis_time_unix`, validator set, and balances. It never contains a private key and is the artifact every node shares. Key files are created with exclusive-create semantics and Unix mode `0600`; never share one validator key between nodes. Windows remains a development target because Unix mode bits do not prove a restricted Windows DACL. For a multi-validator devnet, generate additional key files, add their public addresses to `validators` before first start, and keep each key on only its owning validator.
 
 Start a local node:
 
 ```powershell
-go run ./cmd/chainlab node --genesis config/genesis.json --listen :8547
+go run ./cmd/chainlab node --genesis config/genesis.json --key-file config/validator-1-key.json --listen :8547
 ```
 
 Open the local explorer at `http://127.0.0.1:8547/explorer`. Block, transaction, account, and recent event pages are linked from the overview.
@@ -76,25 +81,27 @@ Open the local explorer at `http://127.0.0.1:8547/explorer`. Block, transaction,
 Start a persistent local node:
 
 ```powershell
-go run ./cmd/chainlab node --genesis config/genesis.json --listen :8547 --data-dir data/localnet
+go run ./cmd/chainlab node --genesis config/genesis.json --key-file config/validator-1-key.json --listen :8547 --data-dir data/localnet
 ```
+
+An initialized data directory contains a checksummed `manifest.json` and snapshot v2 `chain.json`. If either file later disappears, the node refuses to silently construct a new genesis over the directory. Snapshot reads and writes share a 512 MiB ceiling; loading rejects unknown or non-canonical fields, verifies generation/checksum, bounds WASM code and account storage before decoding large values, and replays canonical and known branches from genesis before publishing state. If rename succeeds but directory synchronization fails, the process treats the result as commit-uncertain and enters sticky HALT instead of continuing from rolled-back memory. This remains development JSON persistence; production storage is a separate roadmap gate.
 
 Start a follower node:
 
 ```powershell
-go run ./cmd/chainlab node --genesis config/genesis.json --listen :8548 --data-dir data/follower
+go run ./cmd/chainlab node --genesis config/genesis.json --key-file config/validator-2-key.json --listen :8548 --data-dir data/validator-2
 ```
 
 Start a producing node that broadcasts to the follower:
 
 ```powershell
-go run ./cmd/chainlab node --genesis config/genesis.json --listen :8547 --data-dir data/producer --peer http://127.0.0.1:8548
+go run ./cmd/chainlab node --genesis config/genesis.json --key-file config/validator-1-key.json --listen :8547 --data-dir data/validator-1 --peer http://127.0.0.1:8548
 ```
 
 Start a second validator from the same genesis:
 
 ```powershell
-go run ./cmd/chainlab node --genesis config/genesis.json --private-key <validator-2-private-key> --listen :8548 --data-dir data/validator-2 --peer http://127.0.0.1:8547
+go run ./cmd/chainlab node --genesis config/genesis.json --key-file config/validator-2-key.json --listen :8548 --data-dir data/validator-2 --peer http://127.0.0.1:8547
 ```
 
 Run the built-in demo:
@@ -132,7 +139,7 @@ Submit a batched transfer with one user signature and one nonce:
 go run ./cmd/chainlab tx batch-transfer --rpc http://127.0.0.1:8547 --private-key <hex-private-key> --to <address-1>:10 --to <address-2>:20
 ```
 
-Batch transactions use type `batch` and carry a `batch` array of operations. The first version supports `transfer` and contract `call` operations. Execution is atomic on a cloned state: if any operation fails, earlier operations in the same batch roll back and the sender nonce is not consumed. A batch can also include `--paymaster-private-key`, so a sponsor pays the single transaction-level fee.
+Batch transactions use type `batch` and carry a `batch` array of operations. The current format supports `transfer` and contract `call` operations. Execution is atomic: if an operation fails during included transaction execution, every business-state change from the batch rolls back, while the transaction produces a failed receipt, consumes the sender nonce, and pays for gas already consumed. A batch can also include `--paymaster-private-key`, in which case the sponsor pays the single transaction-level fee, including for an included failure. Signature, nonce, intrinsic-gas, and fee-capacity admission failures are rejected before inclusion and do not consume nonce or fees.
 
 Deploy a smart contract account and send from it with the owner key:
 
@@ -241,36 +248,22 @@ go run ./cmd/chainlab query call --rpc http://127.0.0.1:8547 --to <contract-addr
 
 The upload receipt contains `receipt.code_id`; use that value in the deploy command. Use `--wasm-file <path>` or `--bytecode <0x...>` to upload your own module instead of the built-in `--example echo` module. The built-in `wasm.echo.v1` code id is still available for quick local tests without an upload transaction.
 
-Uploaded WASM runs inside the version-pinned Wasmtime-Go v46.0.1 runtime and only receives ChainLab host functions for args, contract storage, return data, and events. Metering version `chainlab-wasm-v1` requires fixed-size memory and tables, rejects start/WASI/unknown ABI, and requires `deploy`, `call`, and `read` exports. This is a ChainLab-specific ABI, not CosmWasm compatibility.
+Uploaded WASM runs inside the version-pinned Wasmtime-Go v46.0.1 runtime and only receives ChainLab host functions for args, contract storage, return data, and events. Metering version `chainlab-wasm-v1` requires fixed-size memory and tables, rejects start/WASI/unknown ABI, and requires `deploy`, `call`, and `read` exports. Admission parses validated function bodies, rejects recursion, `call_indirect`, tail calls, function-reference calls, and unsupported opcodes, and limits the longest defined-plus-import direct-call path to 64 function nodes. The native Wasmtime stack ceiling remains defense in depth rather than the consensus call-depth rule. This is a ChainLab-specific ABI, not CosmWasm compatibility.
 
 WASM upload gas scales with bytecode size. Every invocation charges the admitted original module bytes plus declared memory pages and table elements before instantiation, then uses Wasmtime fuel for guest execution and the same remaining budget for host calls and copied bytes. Infinite loops terminate by deterministic out-of-fuel, not a wall-clock deadline. Direct runtime calls are atomic; transaction execution owns an outer rollback store and avoids a second whole-state copy per contract call.
 
-This runtime implementation is not a mainnet-readiness claim. Production activation still requires a supported Linux/amd64 artifact and golden replay vectors, deterministic call-depth handling or equivalent cross-target proof, hard JIT-memory lifecycle bounds, failed-transaction fee/nonce semantics, versioned native-contract gas, protocol-wide fatal runtime-fault halt and deterministic recovery/upgrade behavior, reproducible builds/checksums/SBOM, fuzz/load evidence, upgrade activation, and external review.
+The deterministic call-depth rule, included-failure settlement, and `chainlab-native-v1` schedule close local implementation sub-gates; they are not a mainnet-readiness claim. Production activation still requires a supported Linux/amd64 artifact and golden block replay vectors, hard JIT-memory lifecycle bounds, protocol-wide fatal runtime-fault halt and deterministic recovery/upgrade behavior through ABCI++, reproducible builds/checksums/SBOM, broader property/fuzz/load evidence, scheduled protocol activation, and external review.
 
-Stake, join, and leave the validator set:
+Stake and submit cryptographic validator-equivocation evidence:
 
 ```powershell
 go run ./cmd/chainlab tx stake --rpc http://127.0.0.1:8547 --private-key <hex-private-key> --value 500
-go run ./cmd/chainlab tx validator-join --rpc http://127.0.0.1:8547 --private-key <hex-private-key>
-go run ./cmd/chainlab tx validator-leave --rpc http://127.0.0.1:8547 --private-key <hex-private-key>
-go run ./cmd/chainlab tx validator-slash --rpc http://127.0.0.1:8547 --private-key <reporter-private-key> --target <validator-address> --amount 100 --evidence <evidence-ref>
+go run ./cmd/chainlab tx validator-slash --rpc http://127.0.0.1:8547 --private-key <reporter-private-key> --target <validator-address> --height <height> --first-block-hash <hash-a> --first-signature <signature-a> --second-block-hash <hash-b> --second-signature <signature-b>
 ```
 
-Submit, vote on, execute, and query a governance parameter-change proposal:
+The genesis file fixes validator membership for the current protocol version. Staking and unstaking change stake accounting but do not add or remove consensus validators. The `validator-join` and `validator-leave` commands intentionally return a disabled error until certified epoch transitions exist. A slash reporter and target must both be genesis validators, and the two canonical low-s target signatures must verify for distinct block hashes at the same positive height and chain ID. The canonical evidence ID includes the sorted vote pair, while the persistent offence tombstone binds only chain, validator, and height, so a third old vote cannot slash newly staked funds again. Inclusion clears all current stake but deliberately leaves the fixed validator set unchanged.
 
-```powershell
-go run ./cmd/chainlab tx proposal-submit --rpc http://127.0.0.1:8547 --private-key <hex-private-key> --title "Set quorum" --kind param.change --param governance.quorum --value majority --voting-period 2
-go run ./cmd/chainlab chain produce --rpc http://127.0.0.1:8547
-go run ./cmd/chainlab query tx --rpc http://127.0.0.1:8547 --hash <proposal-submit-tx-hash>
-go run ./cmd/chainlab tx vote --rpc http://127.0.0.1:8547 --private-key <hex-private-key> --proposal <proposal-id> --choice yes
-go run ./cmd/chainlab chain produce --rpc http://127.0.0.1:8547
-go run ./cmd/chainlab tx proposal-execute --rpc http://127.0.0.1:8547 --private-key <hex-private-key> --proposal <proposal-id>
-go run ./cmd/chainlab chain produce --rpc http://127.0.0.1:8547
-go run ./cmd/chainlab query proposal --rpc http://127.0.0.1:8547 --id <proposal-id>
-go run ./cmd/chainlab query param --rpc http://127.0.0.1:8547 --key governance.quorum
-```
-
-Proposal ids are returned in the submit transaction receipt as `receipt.proposal_id`. The current pass rule is intentionally simple for the dev chain: yes votes must be greater than no votes and greater than zero after the voting period closes.
+Governance transaction names remain reserved in the development schema and CLI, but `proposal.submit`, `vote`, and `proposal.execute` currently return a disabled error before admission. The previous current-stake voting demo was unsafe because stake could be unstaked, transferred, and counted again from another address. Re-enabling governance requires a versioned protocol with finalized voting-power snapshots, unbonding or vote locks, proposal deposits, quorum/timelock rules, and migration vectors.
 
 Produce a block:
 
@@ -284,11 +277,13 @@ Submit a validator finality vote for a produced block:
 go run ./cmd/chainlab chain finality-vote --rpc http://127.0.0.1:8547 --private-key <validator-private-key> --height <block-height>
 ```
 
-When more than two thirds of the active validators sign the same block hash, ChainLab attaches a `finality_certificate` to that block and `query finality` reports `safe_source` / `finalized_source` as `bft_certificate`. Without a quorum certificate it falls back to local depth rules.
+When more than two thirds of the fixed genesis validators sign the same block hash, the local harness attaches a `finality_certificate` to that block and `query finality` reports `safe_source` / `finalized_source` as `bft_certificate`. The highest certified block becomes a monotonic finality lock: a competing branch, even if longer, cannot replace it. A later compatible certificate can advance the lock, and additional valid signatures for the same block are merged and persisted.
+
+Without a quorum certificate, `safe_source=depth_confirmation` reports only a local depth-based confirmation and must not be treated as Byzantine finality. `finalized` remains at genesis with `finalized_source=genesis_without_certificate` until a certificate exists.
 
 Nodes started with `--peer` relay submitted finality votes to their configured HTTP peers through `/peer/finality-vote`, so a devnet peer that already imported the block can independently assemble the same certificate.
 
-If a validator submits finality votes for two different block hashes at the same height, the second vote is rejected and a `FinalityEquivocationEvidence` record is stored in the node snapshot. When the local node is an active validator and the equivocation target has stake, the node also creates a signed `validator.slash` transaction in the mempool; the penalty is still applied only after normal block production.
+If a validator submits finality votes for two different block hashes at the same height, the second vote is rejected and signed `FinalityEquivocationEvidence` is persisted. Partial votes are also persisted so restarting does not erase the node's double-sign memory. Evidence identity canonicalizes the sorted hash pair; the one-time offence identity binds chain, validator, and height. If a crash occurs after evidence persistence but before inclusion, restart reconstructs the automatic slash transaction when it is still applicable. If the node encounters two independently valid conflicting quorum certificates, it writes a checksummed `HALT.json` marker and remains halted across restarts rather than choosing either history.
 
 Query chain state:
 
@@ -312,7 +307,10 @@ go run ./cmd/chainlab query estimate-gas --rpc http://127.0.0.1:8547 --type call
 
 ## HTTP API
 
-- `GET /health`
+All ordinary HTTP routes share 32 execution slots; `/health/live` and valid WebSocket upgrades use independent paths. Every POST body is capped at 16 MiB before JSON decoding, and `/rpc` has a tighter 5 MiB request limit, 32 inner execution slots, at most 100 calls per batch, and a 16 MiB encoded batch-response limit enforced while each child response is recorded. Txpool content queries reject a source above 8 MiB before cloning it. `eth_feeHistory` accepts at most 1,024 blocks. Log queries accept at most a 10,000-block range, 1,000 results, 8 MiB of encoded results, 256 canonical addresses, four topic positions, and 256 canonical alternatives per topic position; a failed bounded filter poll does not advance its cursor. Installed filters use unpredictable IDs, are globally capped at 1,024, actively expire after five idle minutes, and limit each log definition to 64 KiB. Pending filters are capped at 64 and collectively retain at most 65,536 hashes. WebSockets allow 64 connections, 64 subscriptions per connection, 1,024 per node, and 64 log subscriptions; idle reads expire after 60 seconds, Ping runs every 25 seconds, writes time out after 10 seconds, delivery queues are bounded, and log matching stops after 100,000 checks per block. The CLI HTTP server also sets 5-second header, 15-second read, 30-second write, and 60-second idle timeouts.
+
+- `GET /health` and `GET /health/ready` are readiness checks; both return HTTP 503 while the node is persistently halted
+- `GET /health/live` is a process-liveness check and remains HTTP 200 while halted
 - `GET /explorer`
 - `GET /explorer/events`
 - `GET /explorer/block/{height}`
@@ -328,24 +326,24 @@ go run ./cmd/chainlab query estimate-gas --rpc http://127.0.0.1:8547 --type call
 - `GET /param/{key}`
 - `GET /tx/{hash}`
 - `GET /txpool`
-- `POST /tx` for signed transactions, including `transfer`, `batch`, `set_code`, `account.session_key`, `account.recovery`, `deploy`, `call`, `wasm.upload`, staking, validator, and governance transaction types. Future-nonce transactions within a gap of 64 are accepted into a bounded node-local queued pool and promoted when earlier nonces arrive. If a pending or queued transaction already has the same sender and nonce, ChainLab accepts a replacement only when the authorization principal matches, the new legacy gas price or both EIP-1559 fee caps are bumped by at least 10 percent, and the replacement remains within the pool byte limit.
+- `POST /tx` for signed transactions, including `transfer`, `batch`, `set_code`, `account.session_key`, `account.recovery`, `deploy`, `call`, `wasm.upload`, staking, and evidence-backed validator slashing. Governance proposal/vote/execute and validator join/leave transactions fail admission. Future-nonce transactions within a gap of 64 are accepted into a bounded node-local queued pool and promoted when earlier nonces arrive. If a pending or queued transaction already has the same sender and nonce, ChainLab accepts a replacement only when the authorization principal matches, the new legacy gas price or both EIP-1559 fee caps are bumped by at least 10 percent, and the replacement remains within the pool byte limit.
 - `POST /tx/raw`
 - `POST /faucet`
 - `POST /chain/produce`
 - `POST /peer/tx`
 - `POST /peer/block`
 - `POST /peer/finality-vote`
-- `POST /rpc` accepts either one JSON-RPC-style request object or a batch array. Batch responses preserve request order and isolate per-request errors.
+- `POST /rpc` accepts either one JSON-RPC-style request object or a batch array within the limits above. Batch responses preserve request order and isolate per-request errors.
 - `GET /rpc/ws` supports WebSocket JSON-RPC `eth_subscribe` for `newHeads`, filtered `logs`, and `newPendingTransactions`, plus `eth_unsubscribe`. New block headers and matching EVM-style logs are pushed after local block production and canonical peer block import; pending transaction hashes are pushed after local txpool acceptance. This is a node-local development subscription path.
 - `POST /rpc` with methods `chain_head`, `chain_finality`, `chain_finalityEvidence`, `chain_sendFinalityVote`, `chain_feeMarket`, `chain_getAccount`, `chain_validators`, `chain_proposal`, `chain_param`, `chain_sendTx`, `chain_sendUserOperation`, and `chain_faucet`
-- `POST /rpc` with EVM-style methods `web3_clientVersion`, `net_version`, `net_listening`, `eth_chainId`, `eth_accounts`, `eth_coinbase`, `eth_mining`, `eth_hashrate`, `eth_syncing`, `eth_blockNumber`, `eth_gasPrice`, `eth_maxPriorityFeePerGas`, `eth_feeHistory`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getCode`, `eth_getStorageAt`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `debug_traceTransaction`, `eth_getBlockReceipts`, `eth_getBlockByNumber`, `eth_getBlockByHash`, `eth_getBlockTransactionCountByHash`, `eth_getBlockTransactionCountByNumber`, `eth_getTransactionByBlockHashAndIndex`, `eth_getTransactionByBlockNumberAndIndex`, `eth_getLogs`, `eth_newBlockFilter`, `eth_newPendingTransactionFilter`, `eth_newFilter`, `eth_getFilterLogs`, `eth_getFilterChanges`, `eth_uninstallFilter`, `eth_call`, `eth_estimateGas`, and `eth_sendRawTransaction`. Block range tags support `earliest`, `latest`, `safe`, `finalized`, and hex quantities. `eth_syncing` currently returns `false` because ChainLab's HTTP devnet import path is not a staged sync pipeline. `eth_accounts` and `eth_coinbase` expose only the node's local proposer address; ChainLab does not yet include a multi-account wallet manager. `eth_mining` reflects whether that local proposer is currently an active validator, while `eth_hashrate` returns `0x0` because ChainLab uses PoA, not proof of work. `eth_getTransactionCount` also supports `pending` for mempool-aware nonce calculation, counting executable pending transactions but not nonce-gap queued transactions. `eth_getTransactionByHash` returns committed transactions first and falls back to txpool pending or queued transactions with null block fields; if a pending or queued transaction is replaced by a higher-fee same-sender/same-nonce transaction, only the replacement remains visible through txpool reads. `eth_getTransactionReceipt` remains `null` until block inclusion. `debug_traceTransaction` returns a receipt-backed ChainLab trace summary plus empty opcode `structLogs`; it is not a full EVM opcode tracer or replay tracer. `eth_getBlockReceipts` accepts a block number/tag or block hash and returns all receipts in that block using the same EVM-style receipt projection. `eth_feeHistory` returns canonical block base fees, gas used ratios, the next base fee, and optional gas-weighted priority-fee rewards from receipts. `eth_newBlockFilter` tracks canonical block hashes produced after filter creation; `eth_newPendingTransactionFilter` tracks pending txpool transaction hashes first seen after filter creation, including accepted pending replacements and queued transactions after they are promoted; log filters continue to track EVM-style log projections. `eth_getCode` returns `0x` for accounts without code and a deterministic hex projection of ChainLab `CodeID` for contract accounts or `DelegatedCodeID` for delegated EOAs. `eth_getStorageAt` reads the current canonical ChainLab storage by plain key or hex-encoded key and returns one 32-byte word; it is not a full EVM 256-bit storage-slot or archive-state implementation. `eth_getBlockByHash` and block+index transaction reads project known ChainLab blocks into the same EVM-style shape as number/hash transaction reads. `eth_call` accepts ChainLab-native `payload` read calls or a limited Solidity-style `data` / `input` selector for `get()`, `symbol()`, `owner()`, and `balanceOf(address)`, and returns ABI-shaped data. ChainLab does not yet expose a full contract ABI registry or general calldata decoder.
+- `POST /rpc` with EVM-style methods `web3_clientVersion`, `net_version`, `net_listening`, `eth_chainId`, `eth_accounts`, `eth_coinbase`, `eth_mining`, `eth_hashrate`, `eth_syncing`, `eth_blockNumber`, `eth_gasPrice`, `eth_maxPriorityFeePerGas`, `eth_feeHistory`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getCode`, `eth_getStorageAt`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `debug_traceTransaction`, `eth_getBlockReceipts`, `eth_getBlockByNumber`, `eth_getBlockByHash`, `eth_getBlockTransactionCountByHash`, `eth_getBlockTransactionCountByNumber`, `eth_getTransactionByBlockHashAndIndex`, `eth_getTransactionByBlockNumberAndIndex`, `eth_getLogs`, `eth_newBlockFilter`, `eth_newPendingTransactionFilter`, `eth_newFilter`, `eth_getFilterLogs`, `eth_getFilterChanges`, `eth_uninstallFilter`, `eth_call`, `eth_estimateGas`, and `eth_sendRawTransaction`. Block and log reads support `earliest`, `latest`, `safe`, `finalized`, and hex quantities where applicable; `eth_call` deliberately supports only `latest`. `eth_syncing` currently returns `false` because ChainLab's HTTP devnet import path is not a staged sync pipeline. `eth_accounts` and `eth_coinbase` expose only the node's local proposer address; ChainLab does not yet include a multi-account wallet manager. `eth_mining` reflects whether that local proposer is currently a genesis validator, while `eth_hashrate` returns `0x0` because ChainLab uses PoA, not proof of work. `eth_getTransactionCount` also supports `pending` for mempool-aware nonce calculation, counting executable pending transactions but not nonce-gap queued transactions. `eth_getTransactionByHash` returns committed transactions first and falls back to txpool pending or queued transactions with null block fields; if a pending or queued transaction is replaced by a higher-fee same-sender/same-nonce transaction, only the replacement remains visible through txpool reads. `eth_getTransactionReceipt` remains `null` until block inclusion. `debug_traceTransaction` returns a receipt-backed ChainLab trace summary plus empty opcode `structLogs`; it is not a full EVM opcode tracer or replay tracer. `eth_getBlockReceipts` accepts a block number/tag or block hash and returns all receipts in that block using the same EVM-style receipt projection. `eth_feeHistory` returns canonical block base fees, gas used ratios, the next base fee, and optional gas-weighted priority-fee rewards from receipts. `eth_newBlockFilter` tracks canonical block hashes produced after filter creation; `eth_newPendingTransactionFilter` tracks pending txpool transaction hashes first seen after filter creation, including accepted pending replacements and queued transactions after they are promoted; log filters continue to track EVM-style log projections. `eth_getCode` returns `0x` for accounts without code and a deterministic hex projection of ChainLab `CodeID` for contract accounts or `DelegatedCodeID` for delegated EOAs. `eth_getStorageAt` reads the current canonical ChainLab storage by plain key or hex-encoded key and returns one 32-byte word; it is not a full EVM 256-bit storage-slot or archive-state implementation. `eth_getBlockByHash` and block+index transaction reads project known ChainLab blocks into the same EVM-style shape as number/hash transaction reads. `eth_call` accepts ChainLab-native `payload` read calls or a limited Solidity-style `data` / `input` selector for `get()`, `symbol()`, `owner()`, and `balanceOf(address)`, pins the current immutable read-only state version in O(1), releases the node lock before execution, and returns ABI-shaped data. ChainLab does not yet expose historical contract-state execution, a full contract ABI registry, or a general calldata decoder.
 - `POST /rpc` with txpool-style methods `txpool_status` and `txpool_content`
 
 ## Roadmap
 
 The production sequence is:
 
-- consensus-safe deterministic WASM instruction and resource metering
+- production activation and Linux/amd64 evidence for the implemented deterministic WASM, included-failure, and native-contract metering rules
 - CometBFT ABCI++ consensus, P2P, evidence, validator updates, block/state sync, and multi-process fault tests
 - transactional KV storage, atomic commits, schema migrations, snapshots, and pruned/full/archive profiles
 - protocol upgrades, inclusion proofs, protected validator signing, metrics/alerts, backup/recovery, fuzz/property/race/fault/load/soak validation

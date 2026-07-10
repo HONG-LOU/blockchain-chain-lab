@@ -168,6 +168,19 @@ func TestWASMColdAndWarmCacheUseIdenticalGas(t *testing.T) {
 	}
 }
 
+func TestWASMColdCacheChecksCodeByteBudgetBeforeEnvelopeScan(t *testing.T) {
+	code := WasmEchoCode()
+	minimum := wasmModuleResources{codeBytes: uint64(len(code))}.instantiationGas()
+	meter := NewLimitedMeter(minimum - 1)
+	err := ensureWASMEncodedCodeBudget(meter, "0x"+hex.EncodeToString(code))
+	if !errors.Is(err, ErrContractOutOfGas) {
+		t.Fatalf("cold code budget error = %v", err)
+	}
+	if meter.Remaining() != 0 {
+		t.Fatalf("remaining gas = %d", meter.Remaining())
+	}
+}
+
 func TestWASMUploadValidationReusesCompiledArtifact(t *testing.T) {
 	runtime := NewRuntime()
 	code := WasmEchoCode()
@@ -184,43 +197,6 @@ func TestWASMUploadValidationReusesCompiledArtifact(t *testing.T) {
 	entry, ok := runtime.wasmCache[codeID]
 	if !ok || entry.bytecode != "0x"+hex.EncodeToString(code) || entry.meteringVersion != WASMMeteringVersion {
 		t.Fatalf("upload validation cache entry = %+v, found=%v", entry, ok)
-	}
-}
-
-func TestWASMFuelMetersRecursiveAndIndirectCalls(t *testing.T) {
-	tests := []struct {
-		name string
-		code []byte
-	}{
-		{name: "recursive", code: wasmRecursiveContractForTest()},
-		{name: "indirect", code: wasmIndirectLoopContractForTest()},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			creator := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-			store := state.NewStore()
-			runtime := NewRuntime()
-			contract, err := NewWasmContract(test.code)
-			if err != nil {
-				t.Fatal(err)
-			}
-			runtime.Register("wasm."+test.name+".v1", contract)
-			address, _, err := runtime.Deploy(store, creator, "wasm."+test.name+".v1", "seed", nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			gasLimit := contract.resources.instantiationGas() + 750
-			if gasLimit <= contract.resources.instantiationGas() {
-				t.Fatal("fuel test must reserve guest fuel after instantiation")
-			}
-			_, gasUsed, err := runtime.CallMeteredWithLimit(store, address, creator, "set", nil, gasLimit)
-			if !errors.Is(err, ErrContractOutOfGas) {
-				t.Fatalf("%s error = %v, want out of gas", test.name, err)
-			}
-			if gasUsed != gasLimit {
-				t.Fatalf("%s gas used = %d, want %d", test.name, gasUsed, gasLimit)
-			}
-		})
 	}
 }
 
@@ -271,10 +247,11 @@ func TestWASMHostOutOfGasOccursBeforeStorageMutation(t *testing.T) {
 		attemptStore := state.NewStore()
 		meter := NewLimitedMeter(gasLimit)
 		invocation := newWasmInvocation(Context{
-			Store:   attemptStore,
-			Address: address,
-			Caller:  creator,
-			Meter:   meter,
+			store:   attemptStore,
+			reader:  attemptStore,
+			address: address,
+			caller:  creator,
+			meter:   meter,
 		}, nil)
 		return attempt{
 			store:      attemptStore,

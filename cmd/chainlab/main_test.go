@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -22,151 +24,528 @@ import (
 	"chainlab/internal/types"
 )
 
-func TestWriteAndReadGenesisFile(t *testing.T) {
+func TestCreateGenesisFilesSeparatesValidatorSecret(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "genesis.json")
-	genesis, err := createGenesisFile(path)
+	genesisPath := filepath.Join(dir, "genesis.json")
+	keyPath := filepath.Join(dir, "validator-key.json")
+	genesis, keyFile, err := createGenesisFiles(genesisPath, keyPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if genesis.ChainID != "chainlab-local" {
-		t.Fatalf("chain id = %q", genesis.ChainID)
+	if genesis.ChainID != "chainlab-local" || genesis.GenesisTimeUnix <= 0 {
+		t.Fatalf("genesis identity = %+v", genesis)
 	}
-
-	raw, err := os.ReadFile(path)
+	if len(genesis.Validators) != 1 || genesis.Validators[0] != keyFile.Address {
+		t.Fatalf("genesis validators = %#v, key address = %q", genesis.Validators, keyFile.Address)
+	}
+	genesisRaw, err := os.ReadFile(genesisPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var fromDisk GenesisFile
-	if err := json.Unmarshal(raw, &fromDisk); err != nil {
+	if bytes.Contains(genesisRaw, []byte("private_key")) || bytes.Contains(genesisRaw, []byte(keyFile.PrivateKey)) {
+		t.Fatal("shared genesis contains validator secret material")
+	}
+	loadedGenesis, err := readGenesisFile(genesisPath)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if fromDisk.Proposer == "" || fromDisk.PrivateKey == "" {
-		t.Fatalf("genesis missing proposer credentials: %+v", fromDisk)
+	if loadedGenesis.Validators[0] != keyFile.Address {
+		t.Fatalf("loaded validator = %q", loadedGenesis.Validators[0])
 	}
-	var rawGenesis map[string]any
-	if err := json.Unmarshal(raw, &rawGenesis); err != nil {
+	loadedKey, err := readValidatorKeyFile(keyPath)
+	if err != nil {
 		t.Fatal(err)
 	}
-	validators, ok := rawGenesis["validators"].([]any)
-	if !ok || len(validators) != 1 || validators[0] != fromDisk.Proposer {
-		t.Fatalf("genesis validators = %#v", rawGenesis["validators"])
+	if got := crypto.AddressFromPrivateKey(loadedKey); got != keyFile.Address {
+		t.Fatalf("loaded key address = %q", got)
+	}
+	if runtime.GOOS != "windows" {
+		for _, path := range []string{genesisPath, keyPath} {
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := info.Mode().Perm(); got != 0o600 {
+				t.Fatalf("%s permissions = %#o", path, got)
+			}
+		}
+	}
+}
+
+func TestRunKeygenCommandWritesExclusiveSecretFile(t *testing.T) {
+	if err := runKeygenCommand(nil, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "requires --out") {
+		t.Fatalf("missing output error = %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "validator-key.json")
+	var out bytes.Buffer
+	if err := runKeygenCommand([]string{"--out", path}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "private_key") {
+		t.Fatal("keygen output contains private key")
+	}
+	key, err := readValidatorKeyFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), crypto.AddressFromPrivateKey(key)) {
+		t.Fatalf("keygen output = %s", out.String())
+	}
+	if err := runKeygenCommand([]string{"--out", path}, &bytes.Buffer{}); err == nil || !errors.Is(err, os.ErrExist) {
+		t.Fatalf("overwrite error = %v", err)
+	}
+}
+
+func TestRunInitCommandRequiresOutputAndCreatesDefaultKeyFile(t *testing.T) {
+	if err := runInitCommand(nil, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "requires --out") {
+		t.Fatalf("missing output error = %v", err)
+	}
+	genesisPath := filepath.Join(t.TempDir(), "network.json")
+	var out bytes.Buffer
+	if err := runInitCommand([]string{"--out", genesisPath}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "private_key") {
+		t.Fatal("init output contains validator secret material")
+	}
+	if _, err := os.Stat(defaultValidatorKeyPath(genesisPath)); err != nil {
+		t.Fatalf("default validator key file: %v", err)
 	}
 
+	explicitDir := t.TempDir()
+	explicitGenesisPath := filepath.Join(explicitDir, "genesis.json")
+	explicitKeyPath := filepath.Join(explicitDir, "node-key.json")
+	out.Reset()
+	if err := runInitCommand([]string{
+		"--out", explicitGenesisPath,
+		"--key-out", explicitKeyPath,
+	}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(explicitKeyPath); err != nil {
+		t.Fatalf("explicit validator key file: %v", err)
+	}
+	if strings.Contains(out.String(), "private_key") {
+		t.Fatal("init output contains validator secret material")
+	}
+}
+
+func TestCreateGenesisFilesNeverOverwritesAndRollsBackPartialCreation(t *testing.T) {
+	dir := t.TempDir()
+	genesisPath := filepath.Join(dir, "genesis.json")
+	keyPath := filepath.Join(dir, "validator-key.json")
+	if _, _, err := createGenesisFiles(genesisPath, keyPath); err != nil {
+		t.Fatal(err)
+	}
+	genesisBefore, err := os.ReadFile(genesisPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyBefore, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := createGenesisFiles(genesisPath, keyPath); err == nil {
+		t.Fatal("second init overwrote existing artifacts")
+	}
+	genesisAfter, _ := os.ReadFile(genesisPath)
+	keyAfter, _ := os.ReadFile(keyPath)
+	if !bytes.Equal(genesisBefore, genesisAfter) || !bytes.Equal(keyBefore, keyAfter) {
+		t.Fatal("failed init changed existing artifacts")
+	}
+
+	rollbackDir := t.TempDir()
+	rollbackGenesis := filepath.Join(rollbackDir, "genesis.json")
+	existingKey := filepath.Join(rollbackDir, "validator-key.json")
+	sentinel := []byte("existing validator key")
+	if err := os.WriteFile(existingKey, sentinel, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := createGenesisFiles(rollbackGenesis, existingKey); err == nil {
+		t.Fatal("init unexpectedly replaced existing validator key")
+	}
+	if _, err := os.Stat(rollbackGenesis); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("partial genesis was not cleaned up: %v", err)
+	}
+	keyAfter, err = os.ReadFile(existingKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(keyAfter, sentinel) {
+		t.Fatal("rollback changed pre-existing validator key")
+	}
+
+	samePath := filepath.Join(t.TempDir(), "artifact.json")
+	if _, _, err := createGenesisFiles(samePath, samePath); err == nil {
+		t.Fatal("same genesis and key path was accepted")
+	}
+	if _, err := os.Stat(samePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("same-path rejection created a file: %v", err)
+	}
+}
+
+func TestReadGenesisFileEnforcesCanonicalArtifact(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validator := crypto.AddressFromPrivateKey(key)
+	base := `{
+		"chain_id":"chainlab-local",
+		"genesis_time_unix":1700000000,
+		"validators":["` + validator + `"],
+		"balances":{"` + validator + `":1}
+	}`
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "missing time", raw: strings.Replace(base, `"genesis_time_unix":1700000000,`, "", 1)},
+		{name: "unknown field", raw: strings.Replace(base, `"balances":`, `"unknown":true,"balances":`, 1)},
+		{name: "legacy private key", raw: strings.Replace(base, `"balances":`, `"private_key":"secret","balances":`, 1)},
+		{name: "case variant", raw: strings.Replace(base, `"chain_id"`, `"Chain_ID"`, 1)},
+		{name: "duplicate chain id", raw: strings.Replace(base, `"chain_id":"chainlab-local"`, `"chain_id":"chainlab-local","chain_id":"other"`, 1)},
+		{name: "duplicate balance address", raw: strings.Replace(base, `"`+validator+`":1`, `"`+validator+`":1,"`+validator+`":2`, 1)},
+		{name: "empty validators", raw: strings.Replace(base, `["`+validator+`"]`, `[]`, 1)},
+		{name: "null balances", raw: strings.Replace(base, `{"`+validator+`":1}`, `null`, 1)},
+		{name: "trailing value", raw: base + `{}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "genesis.json")
+			writeRawTestFile(t, path, []byte(test.raw), 0o600)
+			if _, err := readGenesisFile(path); err == nil {
+				t.Fatal("invalid genesis was accepted")
+			}
+		})
+	}
+
+	emptyBalances := strings.Replace(base, `{"`+validator+`":1}`, `{}`, 1)
+	path := filepath.Join(t.TempDir(), "genesis.json")
+	writeRawTestFile(t, path, []byte(emptyBalances), 0o600)
 	loaded, err := readGenesisFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Proposer != fromDisk.Proposer {
-		t.Fatalf("loaded proposer = %q", loaded.Proposer)
+	if len(loaded.Balances) != 0 {
+		t.Fatalf("empty balances = %#v", loaded.Balances)
 	}
 }
 
-func TestBuildNodeConfigUsesDataDir(t *testing.T) {
-	key, err := createGenesisFile(filepath.Join(t.TempDir(), "genesis.json"))
+func TestReadValidatorKeyFileEnforcesCanonicalArtifact(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyFile := ValidatorKeyFile{
+		Address:    crypto.AddressFromPrivateKey(key),
+		PrivateKey: crypto.PrivateKeyToHex(key),
+	}
+	validPath := filepath.Join(t.TempDir(), "validator-key.json")
+	writeJSONTestFile(t, validPath, keyFile, 0o600)
+	loaded, err := readValidatorKeyFile(validPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if crypto.AddressFromPrivateKey(loaded) != keyFile.Address {
+		t.Fatal("loaded validator key changed identity")
+	}
+
+	base := `{"address":"` + keyFile.Address + `","private_key":"` + keyFile.PrivateKey + `"}`
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "unknown field", raw: strings.Replace(base, `}`, `,"unknown":true}`, 1)},
+		{name: "case variant", raw: strings.Replace(base, `"private_key"`, `"Private_Key"`, 1)},
+		{name: "duplicate private key", raw: strings.Replace(base, `}`, `,"private_key":"`+keyFile.PrivateKey+`"}`, 1)},
+		{name: "mismatched address", raw: strings.Replace(base, keyFile.Address, crypto.AddressFromPrivateKey(otherKey), 1)},
+		{name: "non-canonical private key", raw: strings.Replace(base, keyFile.PrivateKey, strings.TrimPrefix(keyFile.PrivateKey, "0x"), 1)},
+		{name: "zero private key", raw: strings.Replace(base, keyFile.PrivateKey, "0x"+strings.Repeat("0", 64), 1)},
+		{name: "trailing value", raw: base + `{}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "validator-key.json")
+			writeRawTestFile(t, path, []byte(test.raw), 0o600)
+			if _, err := readValidatorKeyFile(path); err == nil {
+				t.Fatal("invalid validator key file was accepted")
+			}
+		})
+	}
+	if runtime.GOOS != "windows" {
+		path := filepath.Join(t.TempDir(), "validator-key.json")
+		writeJSONTestFile(t, path, keyFile, 0o644)
+		if err := os.Chmod(path, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readValidatorKeyFile(path); err == nil || !strings.Contains(err.Error(), "permissions") {
+			t.Fatalf("insecure key permissions error = %v", err)
+		}
+	}
+}
+
+func TestGenesisAndValidatorKeyReadersBoundSizeAndDepth(t *testing.T) {
+	oversizedGenesis := filepath.Join(t.TempDir(), "genesis.json")
+	file, err := os.OpenFile(oversizedGenesis, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(maxGenesisFileBytes + 1); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readGenesisFile(oversizedGenesis); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized genesis error = %v", err)
+	}
+
+	oversizedKey := filepath.Join(t.TempDir(), "validator-key.json")
+	file, err = os.OpenFile(oversizedKey, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(maxValidatorKeyFileBytes + 1); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readValidatorKeyFile(oversizedKey); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized key error = %v", err)
+	}
+
+	deep := strings.Repeat("[", maxJSONArtifactDepth+1) + "0" + strings.Repeat("]", maxJSONArtifactDepth+1)
+	deepGenesis := `{"chain_id":"chainlab-local","genesis_time_unix":1700000000,"validators":` + deep + `,"balances":{}}`
+	deepPath := filepath.Join(t.TempDir(), "genesis.json")
+	writeRawTestFile(t, deepPath, []byte(deepGenesis), 0o600)
+	if _, err := readGenesisFile(deepPath); err == nil || !strings.Contains(err.Error(), "maximum JSON depth") {
+		t.Fatalf("deep genesis error = %v", err)
+	}
+}
+
+func TestBuildNodeConfigUsesSharedGenesisAndSeparateKeys(t *testing.T) {
+	keyA, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyB, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validatorA := crypto.AddressFromPrivateKey(keyA)
+	validatorB := crypto.AddressFromPrivateKey(keyB)
+	genesis := GenesisFile{
+		ChainID:         "chainlab-local",
+		GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
+		Validators:      []string{validatorA, validatorB},
+		Balances:        map[string]uint64{},
+	}
+	dir := t.TempDir()
+	genesisPath := filepath.Join(dir, "genesis.json")
+	keyAPath := filepath.Join(dir, "validator-a.json")
+	keyBPath := filepath.Join(dir, "validator-b.json")
+	writeJSONTestFile(t, genesisPath, genesis, 0o600)
+	writeJSONTestFile(t, keyAPath, validatorKeyFileForTest(keyA), 0o600)
+	writeJSONTestFile(t, keyBPath, validatorKeyFileForTest(keyB), 0o600)
+
+	configA, err := buildNodeConfig(nodeOptions{GenesisPath: genesisPath, KeyPath: keyAPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	configB, err := buildNodeConfig(nodeOptions{GenesisPath: genesisPath, KeyPath: keyBPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(configA.GenesisBalance) != 0 || len(configB.GenesisBalance) != 0 {
+		t.Fatal("empty shared balances were replaced with local defaults")
+	}
+	if configA.Role != node.RoleValidator || configB.Role != node.RoleValidator {
+		t.Fatalf("default roles = %q and %q, want validator", configA.Role, configB.Role)
+	}
+	nodeA, err := node.New(configA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeB, err := node.New(configB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nodeA.Head().Hash() != nodeB.Head().Hash() {
+		t.Fatalf("shared genesis hashes differ: %s != %s", nodeA.Head().Hash(), nodeB.Head().Hash())
+	}
+}
+
+func TestBuildNodeConfigKeySourcesAndSharedGenesisRequirements(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, options := range []nodeOptions{
+		{DataDir: t.TempDir()},
+		{Peers: []string{"http://127.0.0.1:8548"}},
+	} {
+		if _, err := buildNodeConfig(options); err == nil || !strings.Contains(err.Error(), "shared genesis") {
+			t.Fatalf("build config error = %v", err)
+		}
+	}
+	for _, options := range []nodeOptions{
+		{PrivateKeyHex: crypto.PrivateKeyToHex(key)},
+		{PrivateKeyHex: "0x" + strings.Repeat("0", 64)},
+		{PrivateKeyHex: crypto.PrivateKeyToHex(key), KeyPath: filepath.Join(t.TempDir(), "missing-key.json")},
+		{PrivateKeyHex: crypto.PrivateKeyToHex(key), DataDir: t.TempDir()},
+	} {
+		if _, err := buildNodeConfig(options); err == nil || !strings.Contains(err.Error(), "--key-file instead of --private-key") {
+			t.Fatalf("raw private key error = %v", err)
+		}
+	}
+
+	dir := t.TempDir()
+	genesisPath := filepath.Join(dir, "genesis.json")
+	keyPath := filepath.Join(dir, "validator-key.json")
+	genesis, _, err := createGenesisFiles(genesisPath, keyPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	dataDir := t.TempDir()
-	config, err := buildNodeConfig(nodeOptions{
-		GenesisPath: keyPath(t, key),
-		DataDir:     dataDir,
+	config, err := buildNodeConfig(nodeOptions{GenesisPath: genesisPath, KeyPath: keyPath, DataDir: dataDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.DataDir != dataDir || config.ChainID != genesis.ChainID {
+		t.Fatalf("node config = %+v", config)
+	}
+	if config.Role != node.RoleValidator {
+		t.Fatalf("default role = %q, want validator", config.Role)
+	}
+	if _, err := buildNodeConfig(nodeOptions{GenesisPath: genesisPath}); err == nil || !strings.Contains(err.Error(), "--key-file") {
+		t.Fatalf("missing key source error = %v", err)
+	}
+
+	observerDataDir := t.TempDir()
+	observerConfig, err := buildNodeConfig(nodeOptions{
+		Role:        string(node.RoleObserver),
+		GenesisPath: genesisPath,
+		DataDir:     observerDataDir,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.DataDir != dataDir {
-		t.Fatalf("data dir = %q", config.DataDir)
+	if observerConfig.Role != node.RoleObserver || observerConfig.ProposerKey != nil || observerConfig.DataDir != observerDataDir {
+		t.Fatalf("observer config = %+v", observerConfig)
 	}
-	if config.ChainID != "chainlab-local" {
-		t.Fatalf("chain id = %q", config.ChainID)
-	}
-}
-
-func TestBuildNodeConfigUsesGenesisValidators(t *testing.T) {
-	keyA, err := crypto.GenerateKey()
+	observer, err := node.New(observerConfig)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("construct observer from CLI config: %v", err)
 	}
-	keyB, err := crypto.GenerateKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	validatorA := crypto.AddressFromPrivateKey(keyA)
-	validatorB := crypto.AddressFromPrivateKey(keyB)
-	path := filepath.Join(t.TempDir(), "genesis.json")
-	raw := []byte(`{
-		"chain_id": "chainlab-local",
-		"private_key": "` + crypto.PrivateKeyToHex(keyA) + `",
-		"proposer": "` + validatorA + `",
-		"validators": ["` + validatorA + `", "` + validatorB + `"],
-		"balances": {"` + validatorA + `": 1000000}
-	}`)
-	if err := os.WriteFile(path, raw, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	config, err := buildNodeConfig(nodeOptions{GenesisPath: path})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(config.Validators) != 2 {
-		t.Fatalf("validator count = %d", len(config.Validators))
-	}
-	if config.Validators[0] != validatorA || config.Validators[1] != validatorB {
-		t.Fatalf("validators = %#v", config.Validators)
-	}
-}
-
-func TestBuildNodeConfigPrivateKeyFlagOverridesGenesisKey(t *testing.T) {
-	keyA, err := crypto.GenerateKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	keyB, err := crypto.GenerateKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	validatorA := crypto.AddressFromPrivateKey(keyA)
-	validatorB := crypto.AddressFromPrivateKey(keyB)
-	path := filepath.Join(t.TempDir(), "genesis.json")
-	raw := []byte(`{
-		"chain_id": "chainlab-local",
-		"private_key": "` + crypto.PrivateKeyToHex(keyA) + `",
-		"proposer": "` + validatorA + `",
-		"validators": ["` + validatorA + `", "` + validatorB + `"],
-		"balances": {"` + validatorA + `": 1000000}
-	}`)
-	if err := os.WriteFile(path, raw, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	config, err := buildNodeConfig(nodeOptions{
-		GenesisPath:   path,
-		PrivateKeyHex: crypto.PrivateKeyToHex(keyB),
+	t.Cleanup(func() {
+		if err := observer.Close(); err != nil {
+			t.Errorf("close observer: %v", err)
+		}
 	})
-	if err != nil {
-		t.Fatal(err)
+	if _, err := buildNodeConfig(nodeOptions{
+		Role:        string(node.RoleObserver),
+		GenesisPath: genesisPath,
+		KeyPath:     keyPath,
+	}); err == nil || !strings.Contains(err.Error(), "must not configure --key-file") {
+		t.Fatalf("observer key-file error = %v", err)
 	}
-	if got := crypto.AddressFromPrivateKey(config.ProposerKey); got != validatorB {
-		t.Fatalf("proposer = %q", got)
-	}
-	if len(config.Validators) != 2 {
-		t.Fatalf("validator count = %d", len(config.Validators))
+	if _, err := buildNodeConfig(nodeOptions{Role: "archive", GenesisPath: genesisPath}); err == nil || !strings.Contains(err.Error(), "unsupported node role") {
+		t.Fatalf("unknown role error = %v", err)
 	}
 }
 
-func keyPath(t *testing.T, genesis GenesisFile) string {
+func TestBuildNodeConfigRejectsKeyOutsideGenesisValidatorSet(t *testing.T) {
+	validatorKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	outsiderKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	genesisPath := filepath.Join(t.TempDir(), "genesis.json")
+	outsiderKeyPath := filepath.Join(t.TempDir(), "outsider-key.json")
+	writeJSONTestFile(t, genesisPath, GenesisFile{
+		ChainID:         "chainlab-local",
+		GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
+		Validators:      []string{crypto.AddressFromPrivateKey(validatorKey)},
+		Balances:        map[string]uint64{},
+	}, 0o600)
+	writeJSONTestFile(t, outsiderKeyPath, validatorKeyFileForTest(outsiderKey), 0o600)
+	if _, err := buildNodeConfig(nodeOptions{
+		GenesisPath: genesisPath,
+		KeyPath:     outsiderKeyPath,
+	}); err == nil || !strings.Contains(err.Error(), "not in the genesis validator set") {
+		t.Fatalf("outsider key error = %v", err)
+	}
+}
+
+func TestRejectDuplicateSecuritySensitiveFlags(t *testing.T) {
+	for _, args := range [][]string{
+		{"--out", "one", "--out=two"},
+		{"--private-key", "one", "-private-key", "two"},
+		{"--key-file=one", "--key-file", "two"},
+		{"--role", "validator", "--role=observer"},
+	} {
+		if err := rejectDuplicateFlags(args, "out", "private-key", "key-file", "role"); err == nil || !strings.Contains(err.Error(), "only once") {
+			t.Fatalf("duplicate flag error for %#v = %v", args, err)
+		}
+	}
+	if err := rejectDuplicateFlags([]string{"--peer", "one", "--peer", "two"}, "private-key"); err != nil {
+		t.Fatalf("repeatable peer flag was rejected: %v", err)
+	}
+}
+
+func TestBuildNodeConfigRejectsExplicitPrivateKeyWithPublicGenesis(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validator := crypto.AddressFromPrivateKey(key)
+	genesisPath := filepath.Join(t.TempDir(), "genesis.json")
+	writeJSONTestFile(t, genesisPath, GenesisFile{
+		ChainID:         "chainlab-local",
+		GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
+		Validators:      []string{validator},
+		Balances:        map[string]uint64{validator: 1_000_000},
+	}, 0o600)
+	if _, err := buildNodeConfig(nodeOptions{
+		GenesisPath:   genesisPath,
+		PrivateKeyHex: crypto.PrivateKeyToHex(key),
+	}); err == nil || !strings.Contains(err.Error(), "--key-file instead of --private-key") {
+		t.Fatalf("explicit private key error = %v", err)
+	}
+}
+
+func validatorKeyFileForTest(key crypto.PrivateKey) ValidatorKeyFile {
+	return ValidatorKeyFile{
+		Address:    crypto.AddressFromPrivateKey(key),
+		PrivateKey: crypto.PrivateKeyToHex(key),
+	}
+}
+
+func writeJSONTestFile(t *testing.T, path string, value any, mode os.FileMode) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "genesis.json")
-	raw, err := json.Marshal(genesis)
+	raw, err := json.Marshal(value)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, raw, 0o600); err != nil {
+	writeRawTestFile(t, path, raw, mode)
+}
+
+func writeRawTestFile(t *testing.T, path string, raw []byte, mode os.FileMode) {
+	t.Helper()
+	if err := os.WriteFile(path, raw, mode); err != nil {
 		t.Fatal(err)
 	}
-	return path
 }
 
 func TestPeerListFlagAcceptsRepeatedPeers(t *testing.T) {
@@ -193,10 +572,10 @@ func TestBuildSignedTransferFetchesNonceFromRPC(t *testing.T) {
 	}
 	alice := crypto.AddressFromPrivateKey(key)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -228,10 +607,10 @@ func TestBuildSignedTransactionForceSignerWhenFromMatchesKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	account := crypto.AddressFromPrivateKey(key)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{account: 1_000_000},
+		GenesisBalance: map[string]uint64{account: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -268,10 +647,10 @@ func TestSubmitTransferCommandSendsSignedTx(t *testing.T) {
 	}
 	alice := crypto.AddressFromPrivateKey(key)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -316,10 +695,10 @@ func TestTransferCommandSupportsEIP1559FeeCaps(t *testing.T) {
 	}
 	alice := crypto.AddressFromPrivateKey(key)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -359,13 +738,13 @@ func TestTransferCommandSupportsPaymasterSponsoredFees(t *testing.T) {
 	user := crypto.AddressFromPrivateKey(userKey)
 	paymaster := crypto.AddressFromPrivateKey(paymasterKey)
 	receiver := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:     "chainlab-local",
 		ProposerKey: paymasterKey,
 		GenesisBalance: map[string]uint64{
 			user:      100,
 			paymaster: 100_000,
-		},
+		}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -415,10 +794,10 @@ func TestBatchTransferCommandSendsSignedBatchTx(t *testing.T) {
 	alice := crypto.AddressFromPrivateKey(key)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -478,10 +857,10 @@ func TestTransferCommandCanBuildSmartAccountTx(t *testing.T) {
 	owner := crypto.AddressFromPrivateKey(ownerKey)
 	smartAccount := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	receiver := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    ownerKey,
-		GenesisBalance: map[string]uint64{owner: 1_000_000},
+		GenesisBalance: map[string]uint64{owner: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -530,10 +909,10 @@ func TestSetCodeCommandDelegatesEOAAndOwnerTransfer(t *testing.T) {
 	eoa := crypto.AddressFromPrivateKey(eoaKey)
 	owner := crypto.AddressFromPrivateKey(ownerKey)
 	receiver := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    eoaKey,
-		GenesisBalance: map[string]uint64{eoa: 1_000_000},
+		GenesisBalance: map[string]uint64{eoa: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -592,10 +971,10 @@ func TestSessionKeyCommandInstallsKeyAndSessionTransferWorks(t *testing.T) {
 	owner := crypto.AddressFromPrivateKey(ownerKey)
 	session := crypto.AddressFromPrivateKey(sessionKey)
 	receiver := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    ownerKey,
-		GenesisBalance: map[string]uint64{owner: 1_000_000},
+		GenesisBalance: map[string]uint64{owner: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -681,10 +1060,10 @@ func TestSessionKeyCommandInstallsCallPolicyAndSessionCallWorks(t *testing.T) {
 	}
 	owner := crypto.AddressFromPrivateKey(ownerKey)
 	session := crypto.AddressFromPrivateKey(sessionKey)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    ownerKey,
-		GenesisBalance: map[string]uint64{owner: 1_000_000},
+		GenesisBalance: map[string]uint64{owner: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -799,14 +1178,14 @@ func TestRecoveryCommandRotatesAccountOwnerEndToEnd(t *testing.T) {
 	receiver := "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 	const guardianBalance uint64 = 500_000
 
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:     "chainlab-local",
 		ProposerKey: ownerKey,
 		GenesisBalance: map[string]uint64{
 			owner:     2_000_000,
 			guardianA: guardianBalance,
 			guardianB: guardianBalance,
-		},
+		}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1003,10 +1382,10 @@ func TestBatchTransferCommandCanBuildSmartAccountTx(t *testing.T) {
 	smartAccount := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    ownerKey,
-		GenesisBalance: map[string]uint64{owner: 1_000_000},
+		GenesisBalance: map[string]uint64{owner: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1053,10 +1432,10 @@ func TestTransferCommandCanBuildMultisigAccountTx(t *testing.T) {
 	ownerB := crypto.AddressFromPrivateKey(ownerBKey)
 	multisig := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	receiver := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    ownerAKey,
-		GenesisBalance: map[string]uint64{ownerA: 1_000_000},
+		GenesisBalance: map[string]uint64{ownerA: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1103,10 +1482,10 @@ func TestTransferCommandUsesPendingNonceAndQueryMempool(t *testing.T) {
 	}
 	alice := crypto.AddressFromPrivateKey(key)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1179,10 +1558,10 @@ func TestRawTransactionCommandsBuildAndSubmitRawTx(t *testing.T) {
 	}
 	alice := crypto.AddressFromPrivateKey(key)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1242,10 +1621,10 @@ func TestFaucetRequestCommandRequestsFunds(t *testing.T) {
 	}
 	proposer := crypto.AddressFromPrivateKey(key)
 	recipient := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{proposer: 1_000_000},
+		GenesisBalance: map[string]uint64{proposer: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1283,7 +1662,7 @@ func TestFaucetRequestCommandRequestsFunds(t *testing.T) {
 	}
 }
 
-func TestStakeAndValidatorJoinCommandsSendSignedTx(t *testing.T) {
+func TestStakeCommandAndDisabledValidatorJoin(t *testing.T) {
 	proposerKey, err := crypto.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
@@ -1294,14 +1673,14 @@ func TestStakeAndValidatorJoinCommandsSendSignedTx(t *testing.T) {
 	}
 	proposer := crypto.AddressFromPrivateKey(proposerKey)
 	validator := crypto.AddressFromPrivateKey(validatorKey)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:     "chainlab-local",
 		ProposerKey: proposerKey,
 		GenesisBalance: map[string]uint64{
 			proposer:  1_000_000,
 			validator: 1_000_000,
 		},
-		Validators: []string{proposer},
+		Validators: []string{proposer}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1324,36 +1703,40 @@ func TestStakeAndValidatorJoinCommandsSendSignedTx(t *testing.T) {
 	if len(stakeBlock.Transactions) != 1 || stakeBlock.Transactions[0].Type != types.TxStake {
 		t.Fatalf("stake block transactions = %#v", stakeBlock.Transactions)
 	}
+	if got := n.StakeOf(validator); got != 500 {
+		t.Fatalf("validator stake = %d", got)
+	}
 
 	var joinOut bytes.Buffer
-	if err := validatorJoinCommand([]string{
+	err = validatorJoinCommand([]string{
 		"--rpc", server.URL,
 		"--private-key", crypto.PrivateKeyToHex(validatorKey),
-	}, &joinOut); err != nil {
-		t.Fatal(err)
+	}, &joinOut)
+	if err == nil || !strings.Contains(err.Error(), "certified epoch transition") || !strings.Contains(err.Error(), "disabled") {
+		t.Fatalf("validator join error = %v", err)
 	}
-	joinBlock, err := n.ProduceBlock()
-	if err != nil {
-		t.Fatal(err)
+	if joinOut.Len() != 0 {
+		t.Fatalf("disabled validator join output = %q", joinOut.String())
 	}
-	if len(joinBlock.Transactions) != 1 || joinBlock.Transactions[0].Type != types.TxValidatorJoin {
-		t.Fatalf("join block transactions = %#v", joinBlock.Transactions)
+	pool := n.TxPool()
+	if pool.PendingCount != 0 || pool.QueuedCount != 0 {
+		t.Fatalf("disabled validator join entered tx pool: %+v", pool)
 	}
-	if len(joinBlock.Receipts) != 1 || len(joinBlock.Receipts[0].Events) != 1 || joinBlock.Receipts[0].Events[0].Type != "validator.joined" {
-		t.Fatalf("join receipt = %#v", joinBlock.Receipts)
+	if validators := n.Validators(); len(validators) != 1 || validators[0] != proposer {
+		t.Fatalf("validators after disabled join = %#v", validators)
 	}
 }
 
-func TestGovernanceProposalCommandsSubmitVoteExecuteAndQuery(t *testing.T) {
+func TestGovernanceTransactionCommandsAreDisabled(t *testing.T) {
 	key, err := crypto.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
 	alice := crypto.AddressFromPrivateKey(key)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1361,108 +1744,38 @@ func TestGovernanceProposalCommandsSubmitVoteExecuteAndQuery(t *testing.T) {
 	server := httptest.NewServer(chainrpc.NewServer(n))
 	defer server.Close()
 
-	var stakeOut bytes.Buffer
-	if err := stakeCommand([]string{
-		"--rpc", server.URL,
-		"--private-key", crypto.PrivateKeyToHex(key),
-		"--value", "500",
-	}, &stakeOut); err != nil {
-		t.Fatal(err)
+	privateKey := crypto.PrivateKeyToHex(key)
+	tests := []struct {
+		name string
+		run  func(*bytes.Buffer) error
+	}{
+		{name: "submit", run: func(out *bytes.Buffer) error {
+			return proposalSubmitCommand([]string{"--rpc", server.URL, "--private-key", privateKey, "--title", "x", "--kind", "param.change", "--param", "x", "--value", "y", "--voting-period", "2"}, out)
+		}},
+		{name: "vote", run: func(out *bytes.Buffer) error {
+			return voteCommand([]string{"--rpc", server.URL, "--private-key", privateKey, "--proposal", "proposal:disabled", "--choice", "yes"}, out)
+		}},
+		{name: "execute", run: func(out *bytes.Buffer) error {
+			return proposalExecuteCommand([]string{"--rpc", server.URL, "--private-key", privateKey, "--proposal", "proposal:disabled"}, out)
+		}},
 	}
-	if _, err := n.ProduceBlock(); err != nil {
-		t.Fatal(err)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var out bytes.Buffer
+			if err := test.run(&out); err == nil || !strings.Contains(err.Error(), "voting-power snapshots") {
+				t.Fatalf("command error = %v", err)
+			}
+			if out.Len() != 0 {
+				t.Fatalf("disabled command output = %q", out.String())
+			}
+		})
 	}
-
-	var submitOut bytes.Buffer
-	if err := proposalSubmitCommand([]string{
-		"--rpc", server.URL,
-		"--private-key", crypto.PrivateKeyToHex(key),
-		"--title", "Set local quorum",
-		"--description", "Use majority quorum for ChainLab governance",
-		"--kind", "param.change",
-		"--param", "governance.quorum",
-		"--value", "majority",
-		"--voting-period", "2",
-	}, &submitOut); err != nil {
-		t.Fatal(err)
-	}
-	var submitResult struct {
-		Hash string `json:"hash"`
-	}
-	if err := json.Unmarshal(submitOut.Bytes(), &submitResult); err != nil {
-		t.Fatal(err)
-	}
-	if submitResult.Hash == "" {
-		t.Fatalf("submit result = %+v", submitResult)
-	}
-	if _, err := n.ProduceBlock(); err != nil {
-		t.Fatal(err)
-	}
-
-	var txOut bytes.Buffer
-	if err := txQueryCommand([]string{"--rpc", server.URL, "--hash", submitResult.Hash}, &txOut); err != nil {
-		t.Fatal(err)
-	}
-	var txResult types.TransactionRecord
-	if err := json.Unmarshal(txOut.Bytes(), &txResult); err != nil {
-		t.Fatal(err)
-	}
-	proposalID := txResult.Receipt.ProposalID
-	if proposalID == "" {
-		t.Fatalf("tx result = %+v", txResult)
-	}
-
-	var voteOut bytes.Buffer
-	if err := voteCommand([]string{
-		"--rpc", server.URL,
-		"--private-key", crypto.PrivateKeyToHex(key),
-		"--proposal", proposalID,
-		"--choice", "yes",
-	}, &voteOut); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := n.ProduceBlock(); err != nil {
-		t.Fatal(err)
-	}
-
-	var executeOut bytes.Buffer
-	if err := proposalExecuteCommand([]string{
-		"--rpc", server.URL,
-		"--private-key", crypto.PrivateKeyToHex(key),
-		"--proposal", proposalID,
-	}, &executeOut); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := n.ProduceBlock(); err != nil {
-		t.Fatal(err)
-	}
-
-	var proposalOut bytes.Buffer
-	if err := proposalCommand([]string{"--rpc", server.URL, "--id", proposalID}, &proposalOut); err != nil {
-		t.Fatal(err)
-	}
-	var proposal types.Proposal
-	if err := json.Unmarshal(proposalOut.Bytes(), &proposal); err != nil {
-		t.Fatal(err)
-	}
-	if proposal.Status != types.ProposalStatusExecuted || proposal.Votes["yes"] != 500 {
-		t.Fatalf("proposal = %+v", proposal)
-	}
-
-	var paramOut bytes.Buffer
-	if err := paramCommand([]string{"--rpc", server.URL, "--key", "governance.quorum"}, &paramOut); err != nil {
-		t.Fatal(err)
-	}
-	var param map[string]string
-	if err := json.Unmarshal(paramOut.Bytes(), &param); err != nil {
-		t.Fatal(err)
-	}
-	if param["value"] != "majority" {
-		t.Fatalf("param = %+v", param)
+	if pool := n.TxPool(); pool.PendingCount != 0 || pool.QueuedCount != 0 {
+		t.Fatalf("disabled governance entered txpool: %+v", pool)
 	}
 }
 
-func TestValidatorLeaveCommandSendsSignedTx(t *testing.T) {
+func TestValidatorLeaveCommandIsDisabledWithoutSubmittingTx(t *testing.T) {
 	proposerKey, err := crypto.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
@@ -1473,14 +1786,14 @@ func TestValidatorLeaveCommandSendsSignedTx(t *testing.T) {
 	}
 	proposer := crypto.AddressFromPrivateKey(proposerKey)
 	validator := crypto.AddressFromPrivateKey(validatorKey)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:     "chainlab-local",
 		ProposerKey: proposerKey,
 		GenesisBalance: map[string]uint64{
 			proposer:  1_000_000,
 			validator: 1_000_000,
 		},
-		Validators: []string{proposer, validator},
+		Validators: []string{proposer, validator}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1489,24 +1802,22 @@ func TestValidatorLeaveCommandSendsSignedTx(t *testing.T) {
 	defer server.Close()
 
 	var leaveOut bytes.Buffer
-	if err := validatorLeaveCommand([]string{
+	err = validatorLeaveCommand([]string{
 		"--rpc", server.URL,
 		"--private-key", crypto.PrivateKeyToHex(validatorKey),
-	}, &leaveOut); err != nil {
-		t.Fatal(err)
+	}, &leaveOut)
+	if err == nil || !strings.Contains(err.Error(), "certified epoch transition") || !strings.Contains(err.Error(), "disabled") {
+		t.Fatalf("validator leave error = %v", err)
 	}
-	leaveBlock, err := n.ProduceBlock()
-	if err != nil {
-		t.Fatal(err)
+	if leaveOut.Len() != 0 {
+		t.Fatalf("disabled validator leave output = %q", leaveOut.String())
 	}
-	if len(leaveBlock.Transactions) != 1 || leaveBlock.Transactions[0].Type != types.TxValidatorLeave {
-		t.Fatalf("leave block transactions = %#v", leaveBlock.Transactions)
-	}
-	if len(leaveBlock.Receipts) != 1 || len(leaveBlock.Receipts[0].Events) != 1 || leaveBlock.Receipts[0].Events[0].Type != "validator.left" {
-		t.Fatalf("leave receipt = %#v", leaveBlock.Receipts)
+	pool := n.TxPool()
+	if pool.PendingCount != 0 || pool.QueuedCount != 0 {
+		t.Fatalf("disabled validator leave entered tx pool: %+v", pool)
 	}
 	validators := n.Validators()
-	if len(validators) != 1 || validators[0] != proposer {
+	if len(validators) != 2 || validators[0] != proposer || validators[1] != validator {
 		t.Fatalf("validators = %#v", validators)
 	}
 }
@@ -1522,14 +1833,14 @@ func TestValidatorSlashCommandSendsSignedTx(t *testing.T) {
 	}
 	proposer := crypto.AddressFromPrivateKey(proposerKey)
 	validator := crypto.AddressFromPrivateKey(validatorKey)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:     "chainlab-local",
 		ProposerKey: proposerKey,
 		GenesisBalance: map[string]uint64{
 			proposer:  1_000_000,
 			validator: 1_000_000,
 		},
-		Validators: []string{proposer, validator},
+		Validators: []string{proposer, validator}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1549,14 +1860,28 @@ func TestValidatorSlashCommandSendsSignedTx(t *testing.T) {
 	if err := n.SubmitTx(stake); err != nil {
 		t.Fatal(err)
 	}
+	const evidenceHeight = uint64(3)
+	firstBlockHash := "0x" + strings.Repeat("77", 32)
+	secondBlockHash := "0x" + strings.Repeat("88", 32)
+	firstSignature, err := crypto.Sign(validatorKey, types.FinalityVoteSigningBytes("chainlab-local", evidenceHeight, firstBlockHash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondSignature, err := crypto.Sign(validatorKey, types.FinalityVoteSigningBytes("chainlab-local", evidenceHeight, secondBlockHash))
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	var slashOut bytes.Buffer
 	if err := validatorSlashCommand([]string{
 		"--rpc", server.URL,
 		"--private-key", crypto.PrivateKeyToHex(proposerKey),
 		"--target", validator,
-		"--amount", "300",
-		"--evidence", "double-sign-height-3",
+		"--height", strconv.FormatUint(evidenceHeight, 10),
+		"--first-block-hash", firstBlockHash,
+		"--first-signature", firstSignature,
+		"--second-block-hash", secondBlockHash,
+		"--second-signature", secondSignature,
 	}, &slashOut); err != nil {
 		t.Fatal(err)
 	}
@@ -1567,6 +1892,15 @@ func TestValidatorSlashCommandSendsSignedTx(t *testing.T) {
 	if len(slashBlock.Transactions) != 2 || slashBlock.Transactions[1].Type != types.TxValidatorSlash {
 		t.Fatalf("slash block transactions = %#v", slashBlock.Transactions)
 	}
+	slashTx := slashBlock.Transactions[1]
+	if slashTx.Payload["target"] != validator ||
+		slashTx.Payload["height"] != strconv.FormatUint(evidenceHeight, 10) ||
+		slashTx.Payload["first_block_hash"] != firstBlockHash ||
+		slashTx.Payload["first_signature"] != firstSignature ||
+		slashTx.Payload["second_block_hash"] != secondBlockHash ||
+		slashTx.Payload["second_signature"] != secondSignature {
+		t.Fatalf("slash transaction payload = %#v", slashTx.Payload)
+	}
 	if len(slashBlock.Receipts) != 2 || len(slashBlock.Receipts[1].Events) != 1 || slashBlock.Receipts[1].Events[0].Type != "validator.slashed" {
 		t.Fatalf("slash receipt = %#v", slashBlock.Receipts)
 	}
@@ -1574,7 +1908,7 @@ func TestValidatorSlashCommandSendsSignedTx(t *testing.T) {
 		t.Fatalf("validator stake = %d", got)
 	}
 	validators := n.Validators()
-	if len(validators) != 1 || validators[0] != proposer {
+	if len(validators) != 2 || validators[0] != proposer || validators[1] != validator {
 		t.Fatalf("validators = %#v", validators)
 	}
 }
@@ -1585,10 +1919,10 @@ func TestDeployAndContractCallCommandsSendSignedTx(t *testing.T) {
 		t.Fatal(err)
 	}
 	alice := crypto.AddressFromPrivateKey(key)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1679,10 +2013,10 @@ func TestWASMUploadCommandDeploysUploadedCode(t *testing.T) {
 		t.Fatal(err)
 	}
 	alice := crypto.AddressFromPrivateKey(key)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1781,10 +2115,10 @@ func TestWASMUploadCommandUsesMeteredDefaultGasLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	alice := crypto.AddressFromPrivateKey(key)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1816,10 +2150,10 @@ func TestQueryAccountAndProduceCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 	alice := crypto.AddressFromPrivateKey(key)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1870,10 +2204,10 @@ func TestQueryFinalityCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	alice := crypto.AddressFromPrivateKey(key)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1898,7 +2232,7 @@ func TestQueryFinalityCommand(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &finality); err != nil {
 		t.Fatal(err)
 	}
-	if finality.HeadHeight != 3 || finality.SafeHeight != 2 || finality.FinalizedHeight != 1 {
+	if finality.HeadHeight != 3 || finality.SafeHeight != 2 || finality.FinalizedHeight != 0 {
 		t.Fatalf("finality = %+v", finality)
 	}
 }
@@ -1919,11 +2253,11 @@ func TestQueryFinalityEvidenceCommand(t *testing.T) {
 	validatorA := crypto.AddressFromPrivateKey(keyA)
 	validatorB := crypto.AddressFromPrivateKey(keyB)
 	validatorC := crypto.AddressFromPrivateKey(keyC)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    keyA,
 		GenesisBalance: map[string]uint64{validatorA: 1_000_000},
-		Validators:     []string{validatorA, validatorB, validatorC},
+		Validators:     []string{validatorA, validatorB, validatorC}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1961,11 +2295,11 @@ func TestChainFinalityVoteCommandSignsAndSubmitsVote(t *testing.T) {
 	validatorA := crypto.AddressFromPrivateKey(keyA)
 	validatorB := crypto.AddressFromPrivateKey(keyB)
 	validatorC := crypto.AddressFromPrivateKey(keyC)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    keyA,
 		GenesisBalance: map[string]uint64{validatorA: 1_000_000},
-		Validators:     []string{validatorA, validatorB, validatorC},
+		Validators:     []string{validatorA, validatorB, validatorC}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2010,10 +2344,10 @@ func TestQueryFeesCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	alice := crypto.AddressFromPrivateKey(key)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2044,10 +2378,10 @@ func TestQueryLogsCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	alice := crypto.AddressFromPrivateKey(key)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2060,7 +2394,7 @@ func TestQueryLogsCommand(t *testing.T) {
 		Type:     types.TxDeploy,
 		From:     alice,
 		Nonce:    0,
-		GasLimit: 80_000,
+		GasLimit: 100_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"code_id": "counter.v1",
@@ -2082,7 +2416,7 @@ func TestQueryLogsCommand(t *testing.T) {
 		From:     alice,
 		To:       counter,
 		Nonce:    1,
-		GasLimit: 50_000,
+		GasLimit: 60_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"method": "increment",
@@ -2125,10 +2459,10 @@ func TestQueryCallAndEstimateGasCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 	alice := crypto.AddressFromPrivateKey(key)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2141,7 +2475,7 @@ func TestQueryCallAndEstimateGasCommands(t *testing.T) {
 		Type:     types.TxDeploy,
 		From:     alice,
 		Nonce:    0,
-		GasLimit: 80_000,
+		GasLimit: 100_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"code_id": "counter.v1",

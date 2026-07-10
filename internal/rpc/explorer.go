@@ -193,7 +193,12 @@ func writeExplorerHTML(w http.ResponseWriter, tmpl *template.Template, data any)
 func (s *Server) explorerData() explorerPageData {
 	head := s.node.Head()
 	finality := s.node.Finality()
-	pool := s.node.TxPool()
+	pool, err := s.node.TxPoolBounded(MaxTxPoolResponseSourceBytes)
+	if err != nil {
+		pending, queued := s.node.TxPoolCounts()
+		pool.PendingCount = pending
+		pool.QueuedCount = queued
+	}
 	validators := s.node.Validators()
 
 	blocks := make([]explorerBlock, 0, explorerRecentBlockLimit)

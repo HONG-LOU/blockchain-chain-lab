@@ -11,24 +11,23 @@ import (
 )
 
 type Summary struct {
-	Height                      uint64
-	TransferReceiverBalance     uint64
-	SponsoredReceiverBalance    uint64
-	SponsoredUserBalance        uint64
-	BatchReceiverBalance        uint64
-	BatchCounterValue           string
-	SmartAccountReceiverBalance uint64
-	SmartAccountBalance         uint64
-	SmartAccountNonce           uint64
-	MultisigReceiverBalance     uint64
-	MultisigBalance             uint64
-	MultisigNonce               uint64
-	CounterValue                string
-	TokenReceiverBalance        string
-	WASMValue                   string
-	Stake                       uint64
-	YesVotes                    uint64
-	GovernanceParam             string
+	Height                        uint64
+	TransferReceiverBalance       uint64
+	SponsoredReceiverBalance      uint64
+	SponsoredUserBalance          uint64
+	BatchReceiverBalance          uint64
+	BatchCounterValue             string
+	SmartAccountReceiverBalance   uint64
+	SmartAccountBalance           uint64
+	SmartAccountNonce             uint64
+	MultisigReceiverBalance       uint64
+	MultisigBalance               uint64
+	MultisigNonce                 uint64
+	CounterValue                  string
+	TokenReceiverBalance          string
+	WASMValue                     string
+	Stake                         uint64
+	GovernanceTransactionsEnabled bool
 }
 
 func RunDemo() (Summary, error) {
@@ -52,10 +51,10 @@ func RunDemo() (Summary, error) {
 	batchReceiver := "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 	smartAccountReceiver := "0xffffffffffffffffffffffffffffffffffffffff"
 	multisigReceiver := "0xabababababababababababababababababababab"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 2_000_000, sponsoredUser: 15},
+		GenesisBalance: map[string]uint64{alice: 2_000_000, sponsoredUser: 15}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		return Summary{}, err
@@ -79,7 +78,7 @@ func RunDemo() (Summary, error) {
 		Type:     types.TxDeploy,
 		From:     alice,
 		Nonce:    1,
-		GasLimit: 80_000,
+		GasLimit: 100_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"code_id": "counter.v1",
@@ -97,7 +96,7 @@ func RunDemo() (Summary, error) {
 		From:     alice,
 		To:       counter,
 		Nonce:    2,
-		GasLimit: 50_000,
+		GasLimit: 60_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"method": "increment",
@@ -112,7 +111,7 @@ func RunDemo() (Summary, error) {
 		Type:     types.TxDeploy,
 		From:     alice,
 		Nonce:    3,
-		GasLimit: 80_000,
+		GasLimit: 100_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"code_id": "token.v1",
@@ -130,7 +129,7 @@ func RunDemo() (Summary, error) {
 		From:     alice,
 		To:       token,
 		Nonce:    4,
-		GasLimit: 50_000,
+		GasLimit: 60_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"method": "mint",
@@ -146,7 +145,7 @@ func RunDemo() (Summary, error) {
 		From:     alice,
 		To:       token,
 		Nonce:    5,
-		GasLimit: 50_000,
+		GasLimit: 60_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"method": "transfer",
@@ -226,56 +225,6 @@ func RunDemo() (Summary, error) {
 		return Summary{}, err
 	}
 
-	proposalBlock, err := submitAndProduce(n, key, types.Transaction{
-		ChainID:  "chainlab-local",
-		Type:     types.TxProposalSubmit,
-		From:     alice,
-		Nonce:    10,
-		GasLimit: 35_000,
-		GasPrice: 1,
-		Payload: map[string]string{
-			"title":         "Set local quorum",
-			"description":   "Use majority quorum for the local chain",
-			"kind":          "param.change",
-			"param":         "governance.quorum",
-			"value":         "majority",
-			"voting_period": "2",
-		},
-	})
-	if err != nil {
-		return Summary{}, err
-	}
-	proposalID := proposalBlock.Receipts[0].ProposalID
-
-	if _, err := submitAndProduce(n, key, types.Transaction{
-		ChainID:  "chainlab-local",
-		Type:     types.TxVote,
-		From:     alice,
-		Nonce:    11,
-		GasLimit: 25_000,
-		GasPrice: 1,
-		Payload: map[string]string{
-			"proposal": proposalID,
-			"choice":   "yes",
-		},
-	}); err != nil {
-		return Summary{}, err
-	}
-
-	if _, err := submitAndProduce(n, key, types.Transaction{
-		ChainID:  "chainlab-local",
-		Type:     types.TxProposalExecute,
-		From:     alice,
-		Nonce:    12,
-		GasLimit: 35_000,
-		GasPrice: 1,
-		Payload: map[string]string{
-			"proposal": proposalID,
-		},
-	}); err != nil {
-		return Summary{}, err
-	}
-
 	sponsoredTransfer := types.Transaction{
 		ChainID:   "chainlab-local",
 		Type:      types.TxTransfer,
@@ -298,8 +247,8 @@ func RunDemo() (Summary, error) {
 		ChainID:  "chainlab-local",
 		Type:     types.TxDeploy,
 		From:     alice,
-		Nonce:    13,
-		GasLimit: 80_000,
+		Nonce:    10,
+		GasLimit: 100_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"code_id": "counter.v1",
@@ -315,8 +264,8 @@ func RunDemo() (Summary, error) {
 		ChainID:  "chainlab-local",
 		Type:     types.TxBatch,
 		From:     alice,
-		Nonce:    14,
-		GasLimit: 113_000,
+		Nonce:    11,
+		GasLimit: 200_000,
 		GasPrice: 1,
 		Batch: []types.BatchOperation{
 			{
@@ -337,8 +286,8 @@ func RunDemo() (Summary, error) {
 		ChainID:  "chainlab-local",
 		Type:     types.TxDeploy,
 		From:     alice,
-		Nonce:    15,
-		GasLimit: 80_000,
+		Nonce:    12,
+		GasLimit: 100_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"code_id": contracts.AccountCodeID,
@@ -355,7 +304,7 @@ func RunDemo() (Summary, error) {
 		Type:     types.TxTransfer,
 		From:     alice,
 		To:       smartAccount,
-		Nonce:    16,
+		Nonce:    13,
 		Value:    50_000,
 		GasLimit: 21_000,
 		GasPrice: 1,
@@ -381,8 +330,8 @@ func RunDemo() (Summary, error) {
 		ChainID:  "chainlab-local",
 		Type:     types.TxDeploy,
 		From:     alice,
-		Nonce:    17,
-		GasLimit: 80_000,
+		Nonce:    14,
+		GasLimit: 100_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"code_id":   contracts.MultisigCodeID,
@@ -400,7 +349,7 @@ func RunDemo() (Summary, error) {
 		Type:     types.TxTransfer,
 		From:     alice,
 		To:       multisig,
-		Nonce:    18,
+		Nonce:    15,
 		Value:    50_000,
 		GasLimit: 21_000,
 		GasPrice: 1,
@@ -425,24 +374,23 @@ func RunDemo() (Summary, error) {
 	}
 
 	return Summary{
-		Height:                      n.Head().Header.Height,
-		TransferReceiverBalance:     n.Account(bob).Balance,
-		SponsoredReceiverBalance:    n.Account(sponsoredReceiver).Balance,
-		SponsoredUserBalance:        n.Account(sponsoredUser).Balance,
-		BatchReceiverBalance:        n.Account(batchReceiver).Balance,
-		BatchCounterValue:           n.Account(batchCounter).Storage["count"],
-		SmartAccountReceiverBalance: n.Account(smartAccountReceiver).Balance,
-		SmartAccountBalance:         n.Account(smartAccount).Balance,
-		SmartAccountNonce:           n.Account(smartAccount).Nonce,
-		MultisigReceiverBalance:     n.Account(multisigReceiver).Balance,
-		MultisigBalance:             n.Account(multisig).Balance,
-		MultisigNonce:               n.Account(multisig).Nonce,
-		CounterValue:                n.Account(counter).Storage["count"],
-		TokenReceiverBalance:        n.Account(token).Storage["balance:"+bob],
-		WASMValue:                   wasmValue,
-		Stake:                       n.StakeOf(alice),
-		YesVotes:                    n.Proposal(proposalID).Votes["yes"],
-		GovernanceParam:             n.Param("governance.quorum"),
+		Height:                        n.Head().Header.Height,
+		TransferReceiverBalance:       n.Account(bob).Balance,
+		SponsoredReceiverBalance:      n.Account(sponsoredReceiver).Balance,
+		SponsoredUserBalance:          n.Account(sponsoredUser).Balance,
+		BatchReceiverBalance:          n.Account(batchReceiver).Balance,
+		BatchCounterValue:             n.Account(batchCounter).Storage["count"],
+		SmartAccountReceiverBalance:   n.Account(smartAccountReceiver).Balance,
+		SmartAccountBalance:           n.Account(smartAccount).Balance,
+		SmartAccountNonce:             n.Account(smartAccount).Nonce,
+		MultisigReceiverBalance:       n.Account(multisigReceiver).Balance,
+		MultisigBalance:               n.Account(multisig).Balance,
+		MultisigNonce:                 n.Account(multisig).Nonce,
+		CounterValue:                  n.Account(counter).Storage["count"],
+		TokenReceiverBalance:          n.Account(token).Storage["balance:"+bob],
+		WASMValue:                     wasmValue,
+		Stake:                         n.StakeOf(alice),
+		GovernanceTransactionsEnabled: false,
 	}, nil
 }
 

@@ -2,6 +2,7 @@ package contracts
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 
 	"chainlab/internal/types"
@@ -14,10 +15,16 @@ func (Counter) Deploy(ctx Context, args map[string]string) ([]types.Event, error
 	if initial == "" {
 		initial = "0"
 	}
-	if _, err := strconv.ParseUint(initial, 10, 64); err != nil {
+	parsed, err := strconv.ParseUint(initial, 10, 64)
+	if err != nil {
 		return nil, fmt.Errorf("invalid initial counter value: %w", err)
 	}
-	ctx.Store.SetStorage(ctx.Address, "count", initial)
+	if strconv.FormatUint(parsed, 10) != initial {
+		return nil, fmt.Errorf("invalid initial counter value")
+	}
+	if err := ctx.SetStorage("count", initial); err != nil {
+		return nil, err
+	}
 	return []types.Event{{Type: "counter.initialized", Attributes: map[string]string{"count": initial}}}, nil
 }
 
@@ -32,17 +39,28 @@ func (Counter) Call(ctx Context, method string, args map[string]string) ([]types
 		if err != nil {
 			return nil, fmt.Errorf("invalid increment amount: %w", err)
 		}
-		currentRaw := ctx.Store.GetStorage(ctx.Address, "count")
+		if strconv.FormatUint(delta, 10) != amount {
+			return nil, fmt.Errorf("invalid increment amount")
+		}
+		currentRaw, err := ctx.GetStorage("count")
+		if err != nil {
+			return nil, err
+		}
 		if currentRaw == "" {
-			currentRaw = "0"
+			return nil, fmt.Errorf("%w: stored counter value is missing", ErrContractStateFault)
 		}
 		current, err := strconv.ParseUint(currentRaw, 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("invalid stored counter value: %w", err)
+		if err != nil || strconv.FormatUint(current, 10) != currentRaw {
+			return nil, fmt.Errorf("%w: invalid stored counter value", ErrContractStateFault)
+		}
+		if math.MaxUint64-current < delta {
+			return nil, fmt.Errorf("counter overflow")
 		}
 		next := current + delta
 		nextRaw := strconv.FormatUint(next, 10)
-		ctx.Store.SetStorage(ctx.Address, "count", nextRaw)
+		if err := ctx.SetStorage("count", nextRaw); err != nil {
+			return nil, err
+		}
 		return []types.Event{{Type: "counter.incremented", Attributes: map[string]string{"count": nextRaw}}}, nil
 	default:
 		return nil, fmt.Errorf("unknown counter method %q", method)
@@ -52,9 +70,16 @@ func (Counter) Call(ctx Context, method string, args map[string]string) ([]types
 func (Counter) Read(ctx Context, method string, args map[string]string) (string, error) {
 	switch method {
 	case "get":
-		current := ctx.Store.GetStorage(ctx.Address, "count")
+		current, err := ctx.GetStorage("count")
+		if err != nil {
+			return "", err
+		}
 		if current == "" {
-			return "0", nil
+			return "", fmt.Errorf("%w: stored counter value is missing", ErrContractStateFault)
+		}
+		parsed, err := strconv.ParseUint(current, 10, 64)
+		if err != nil || strconv.FormatUint(parsed, 10) != current {
+			return "", fmt.Errorf("%w: invalid stored counter value", ErrContractStateFault)
 		}
 		return current, nil
 	default:

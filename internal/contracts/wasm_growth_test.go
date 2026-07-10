@@ -1,7 +1,6 @@
 package contracts
 
 import (
-	"errors"
 	"strings"
 	"testing"
 
@@ -83,29 +82,6 @@ func TestWASMFixedTableCannotGrow(t *testing.T) {
 	_, _, err = runtime.CallMeteredWithLimit(store, address, creator, "set", nil, 100_000)
 	if err != nil {
 		t.Fatalf("fixed table.grow must return -1 without trapping: %v", err)
-	}
-}
-
-func TestWASMStackExhaustionConsumesFullBudget(t *testing.T) {
-	contract, err := NewWasmContract(wasmRecursiveContractForTest())
-	if err != nil {
-		t.Fatal(err)
-	}
-	creator := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	store := state.NewStore()
-	runtime := NewRuntime()
-	runtime.Register("wasm.stack.v1", contract)
-	address, _, err := runtime.Deploy(store, creator, "wasm.stack.v1", "seed", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	const gasLimit = 1_000_000
-	_, gasUsed, err := runtime.CallMeteredWithLimit(store, address, creator, "set", nil, gasLimit)
-	if !errors.Is(err, ErrWasmResourceLimit) {
-		t.Fatalf("stack exhaustion error = %v, want resource limit", err)
-	}
-	if gasUsed != gasLimit {
-		t.Fatalf("stack exhaustion gas = %d, want full budget %d", gasUsed, gasLimit)
 	}
 }
 

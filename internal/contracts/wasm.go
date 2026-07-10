@@ -22,7 +22,7 @@ const (
 	wasmInstantiationByteGas uint64 = 1
 	wasmMemoryPageGas        uint64 = 1000
 	wasmTableElementGas      uint64 = 10
-	wasmMaxModuleBytes              = 512 * 1024
+	wasmMaxModuleBytes              = types.MaxWASMModuleBytes
 	wasmMaxMemoryBytes       int64  = 16 * 1024 * 1024
 	wasmMaxMemoryPages       uint64 = 256
 	wasmMaxTableElements     int64  = 1024
@@ -49,7 +49,7 @@ const (
 
 const (
 	MaxWASMModuleBytes  = wasmMaxModuleBytes
-	WASMMeteringVersion = "chainlab-wasm-v1"
+	WASMMeteringVersion = types.WASMMeteringVersion
 	WASMRuntimeVersion  = "wasmtime-go-v46.0.1"
 )
 
@@ -83,6 +83,7 @@ type wasmBinaryPolicy struct {
 	types                 []wasmBinarySignature
 	importedFunctionTypes []uint32
 	functionTypes         []uint32
+	codeBodies            [][]byte
 	seenImports           map[string]struct{}
 	seenExports           map[string]struct{}
 	seenSections          map[byte]struct{}
@@ -163,7 +164,8 @@ func compileWasmModule(code []byte, admitted bool) (*wasmtime.Module, wasmModule
 	if len(code) > wasmMaxModuleBytes {
 		return nil, wasmModuleResources{}, fmt.Errorf("wasm module size exceeds %d bytes", wasmMaxModuleBytes)
 	}
-	if err := validateWasmEnvelope(code, &resources); err != nil {
+	var policy wasmBinaryPolicy
+	if err := validateWasmEnvelopeWithPolicy(code, &resources, &policy); err != nil {
 		if admitted {
 			return nil, wasmModuleResources{}, fmt.Errorf("%w: admitted wasm envelope mismatch", ErrWasmRuntimeFault)
 		}
@@ -174,6 +176,12 @@ func compileWasmModule(code []byte, admitted bool) (*wasmtime.Module, wasmModule
 			return nil, wasmModuleResources{}, fmt.Errorf("%w: admitted wasm validation failed", ErrWasmRuntimeFault)
 		}
 		return nil, wasmModuleResources{}, errors.New("invalid wasm bytecode")
+	}
+	if err := policy.validateDirectCallGraph(); err != nil {
+		if admitted {
+			return nil, wasmModuleResources{}, fmt.Errorf("%w: admitted wasm call policy mismatch", ErrWasmRuntimeFault)
+		}
+		return nil, wasmModuleResources{}, err
 	}
 	module, err := wasmtime.NewModule(chainlabWasmEngine, code)
 	if err != nil {
@@ -190,6 +198,10 @@ func compileWasmModule(code []byte, admitted bool) (*wasmtime.Module, wasmModule
 }
 
 func validateWasmEnvelope(code []byte, resources *wasmModuleResources) error {
+	return validateWasmEnvelopeWithPolicy(code, resources, nil)
+}
+
+func validateWasmEnvelopeWithPolicy(code []byte, resources *wasmModuleResources, result *wasmBinaryPolicy) error {
 	if len(code) < 8 || string(code[:4]) != "\x00asm" || string(code[4:8]) != "\x01\x00\x00\x00" {
 		return errors.New("invalid wasm bytecode header")
 	}
@@ -271,7 +283,13 @@ func validateWasmEnvelope(code []byte, resources *wasmModuleResources) error {
 		}
 		offset = int(sectionEnd)
 	}
-	return policy.validateComplete()
+	if err := policy.validateComplete(); err != nil {
+		return err
+	}
+	if result != nil {
+		*result = policy
+	}
+	return nil
 }
 
 func validateWasmVectorCount(section []byte, maximum uint32, name string) error {
@@ -526,6 +544,7 @@ func validateWasmCodeSection(section []byte, policy *wasmBinaryPolicy) error {
 		return errors.New("wasm code bodies exceed the version-1 limit")
 	}
 	policy.codeBodyCount = count
+	policy.codeBodies = make([][]byte, 0, count)
 	var moduleLocals uint64
 	for functionIndex := uint32(0); functionIndex < count; functionIndex++ {
 		bodySize, ok := reader.readU32()
@@ -559,6 +578,7 @@ func validateWasmCodeSection(section []byte, policy *wasmBinaryPolicy) error {
 		if moduleLocals > wasmMaxLocalsPerModule {
 			return errors.New("wasm locals exceed the module limit")
 		}
+		policy.codeBodies = append(policy.codeBodies, append([]byte(nil), body[bodyReader.offset:]...))
 	}
 	if !reader.exhausted() {
 		return errors.New("wasm code section has trailing data")
@@ -707,8 +727,8 @@ func newWasmInvocation(ctx Context, args map[string]string) *wasmInvocation {
 	if args == nil {
 		args = map[string]string{}
 	}
-	if ctx.Meter == nil {
-		ctx.Meter = NewLimitedMeter(DefaultContractGasLimit)
+	if ctx.meter == nil {
+		ctx.meter = NewLimitedMeter(DefaultContractGasLimit)
 	}
 	return &wasmInvocation{contractCtx: ctx, args: args}
 }
@@ -720,7 +740,7 @@ func (i *wasmInvocation) call(module *wasmtime.Module, resources wasmModuleResou
 	if !i.charge(resources.instantiationGas()) {
 		return i.err
 	}
-	fuelLimit := i.contractCtx.Meter.Remaining()
+	fuelLimit := i.contractCtx.meter.Remaining()
 	store := wasmtime.NewStoreWithData(chainlabWasmEngine, i)
 	i.store = store
 	defer store.Close()
@@ -842,7 +862,7 @@ func wasmHostStorageCopy(caller *wasmtime.Caller, keyPtr int32, keyLen int32, ds
 	if trap != nil {
 		return 0, trap
 	}
-	value := invocation.contractCtx.Store.GetStorage(invocation.contractCtx.Address, key)
+	value := invocation.contractCtx.reader.GetStorage(invocation.contractCtx.address, key)
 	if trap := invocation.prepareHostRead(uint32(len(value)), wasmMaxValueBytes, "storage value", 0); trap != nil {
 		return 0, trap
 	}
@@ -851,7 +871,7 @@ func wasmHostStorageCopy(caller *wasmtime.Caller, keyPtr int32, keyLen int32, ds
 
 func wasmHostStorageSet(caller *wasmtime.Caller, keyPtr int32, keyLen int32, valuePtr int32, valueLen int32) (int32, *wasmtime.Trap) {
 	invocation := wasmInvocationFromCaller(caller)
-	if invocation.contractCtx.ReadOnly {
+	if invocation.contractCtx.readOnly {
 		return 1, invocation.fail(ErrReadOnlyContract)
 	}
 	if invocation.storageWrites >= wasmMaxStorageWrites {
@@ -875,8 +895,8 @@ func wasmHostStorageSet(caller *wasmtime.Caller, keyPtr int32, keyLen int32, val
 	if trap != nil {
 		return 1, trap
 	}
-	keyExists := invocation.contractCtx.Store.HasStorage(invocation.contractCtx.Address, key)
-	oldValue := invocation.contractCtx.Store.GetStorage(invocation.contractCtx.Address, key)
+	keyExists := invocation.contractCtx.reader.HasStorage(invocation.contractCtx.address, key)
+	oldValue := invocation.contractCtx.reader.GetStorage(invocation.contractCtx.address, key)
 	var growth uint64
 	if !keyExists {
 		growth += uint64(len(key))
@@ -891,7 +911,9 @@ func wasmHostStorageSet(caller *wasmtime.Caller, keyPtr int32, keyLen int32, val
 		return 1, trap
 	}
 	invocation.storageWrites++
-	invocation.contractCtx.Store.SetStorage(invocation.contractCtx.Address, key, value)
+	if err := invocation.contractCtx.store.SetStorage(invocation.contractCtx.address, key, value); err != nil {
+		return 1, invocation.fail(fmt.Errorf("%w: storage entries", ErrWasmResourceLimit))
+	}
 	return 0, nil
 }
 
@@ -910,7 +932,7 @@ func wasmHostReturnSet(caller *wasmtime.Caller, valuePtr int32, valueLen int32) 
 
 func wasmHostEmitEvent(caller *wasmtime.Caller, typePtr int32, typeLen int32, keyPtr int32, keyLen int32, valuePtr int32, valueLen int32) (int32, *wasmtime.Trap) {
 	invocation := wasmInvocationFromCaller(caller)
-	if invocation.contractCtx.ReadOnly {
+	if invocation.contractCtx.readOnly {
 		return 1, invocation.fail(ErrReadOnlyContract)
 	}
 	if len(invocation.events) >= wasmMaxEvents {
@@ -947,6 +969,9 @@ func wasmHostEmitEvent(caller *wasmtime.Caller, typePtr int32, typeLen int32, ke
 	value, trap := invocation.readString(caller, uint32(valuePtr), uint32(valueLen))
 	if trap != nil {
 		return 1, trap
+	}
+	if eventType == "" || key == "" {
+		return 1, invocation.fail(fmt.Errorf("%w: event shape", ErrWasmResourceLimit))
 	}
 	invocation.eventBytes += totalBytes
 	invocation.events = append(invocation.events, types.Event{Type: eventType, Attributes: map[string]string{key: value}})
@@ -1058,7 +1083,7 @@ func (i *wasmInvocation) fail(err error) *wasmtime.Trap {
 }
 
 func (i *wasmInvocation) charge(amount uint64) bool {
-	if err := i.contractCtx.Meter.Charge(amount); err != nil {
+	if err := i.contractCtx.meter.Charge(amount); err != nil {
 		if i.err == nil {
 			i.err = err
 		}

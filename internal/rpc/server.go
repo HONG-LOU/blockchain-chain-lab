@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"sort"
@@ -24,12 +25,45 @@ import (
 	"chainlab/internal/types"
 )
 
+// MaxRequestBodyBytes bounds every HTTP POST body before JSON decoding. It is
+// aligned with the canonical block limit so peer blocks cannot bypass ingress
+// controls through a larger transport envelope.
+const MaxRequestBodyBytes = node.MaxBlockBytes
+
+const (
+	MaxJSONRPCRequestBodyBytes             = 5 * 1024 * 1024
+	MaxJSONRPCBatchRequests                = 100
+	MaxJSONRPCBatchResponseBytes           = 16 * 1024 * 1024
+	MaxConcurrentJSONRPCRequests           = 32
+	MaxConcurrentHTTPRequests              = 32
+	MaxConcurrentHTTPPOSTRequests          = 32
+	MaxConcurrentLivenessRequests          = 8
+	MaxFeeHistoryBlockCount                = 1024
+	MaxTxPoolResponseSourceBytes           = 8 * 1024 * 1024
+	MaxWebSocketConnections                = 64
+	MaxWebSocketSubscriptions              = 1024
+	MaxWebSocketSubscriptionsPerConnection = 64
+	MaxWebSocketLogSubscriptions           = 64
+	MaxWebSocketLogMatchChecksPerBlock     = 100_000
+	WebSocketPongTimeout                   = 60 * time.Second
+	WebSocketPingInterval                  = 25 * time.Second
+	WebSocketWriteTimeout                  = 10 * time.Second
+	maxWebSocketUpgradeHeaderBytes         = 32
+	maxWebSocketConnectionHeaderBytes      = 256
+	maxWebSocketVersionHeaderBytes         = 2
+	maxWebSocketKeyHeaderBytes             = 24
+)
+
 func NewServer(n *node.Node) http.Handler {
 	return NewServerWithPeers(n, nil)
 }
 
 func NewServerWithPeers(n *node.Node, peers []string) http.Handler {
-	server := &Server{
+	return newServer(n, peers).routes()
+}
+
+func newServer(n *node.Node, peers []string) *Server {
+	return &Server{
 		node:                  n,
 		peers:                 append([]string(nil), peers...),
 		client:                &http.Client{Timeout: 5 * time.Second},
@@ -37,8 +71,14 @@ func NewServerWithPeers(n *node.Node, peers []string) http.Handler {
 		wsNewHeads:            make(map[string]chan types.Block),
 		wsLogs:                make(map[string]*wsLogSubscription),
 		wsPendingTransactions: make(map[string]chan string),
+		rpcSlots:              make(chan struct{}, MaxConcurrentJSONRPCRequests),
+		requestSlots:          make(chan struct{}, MaxConcurrentHTTPRequests),
+		postSlots:             make(chan struct{}, MaxConcurrentHTTPPOSTRequests),
+		wsConnectionSlots:     make(chan struct{}, MaxWebSocketConnections),
+		livenessSlots:         make(chan struct{}, MaxConcurrentLivenessRequests),
+		wsTimeouts:            defaultWebSocketTimeouts(),
+		wsConnections:         make(map[string]*webSocketConnection),
 	}
-	return server.routes()
 }
 
 type Server struct {
@@ -51,6 +91,47 @@ type Server struct {
 	wsNewHeads            map[string]chan types.Block
 	wsLogs                map[string]*wsLogSubscription
 	wsPendingTransactions map[string]chan string
+	wsConnections         map[string]*webSocketConnection
+	wsLogDispatchOffset   int
+	rpcSlots              chan struct{}
+	requestSlots          chan struct{}
+	postSlots             chan struct{}
+	livenessSlots         chan struct{}
+	wsConnectionSlots     chan struct{}
+	wsTimeouts            webSocketTimeouts
+	pendingHashes         func() []string
+	pendingHashMu         sync.Mutex
+	pendingHashSnapshot   []string
+	pendingHashValid      bool
+	pendingHashRevision   uint64
+}
+
+type webSocketTimeouts struct {
+	pongTimeout  time.Duration
+	pingInterval time.Duration
+	writeTimeout time.Duration
+}
+
+func defaultWebSocketTimeouts() webSocketTimeouts {
+	return webSocketTimeouts{
+		pongTimeout:  WebSocketPongTimeout,
+		pingInterval: WebSocketPingInterval,
+		writeTimeout: WebSocketWriteTimeout,
+	}
+}
+
+func (timeouts webSocketTimeouts) withDefaults() webSocketTimeouts {
+	defaults := defaultWebSocketTimeouts()
+	if timeouts.pongTimeout <= 0 {
+		timeouts.pongTimeout = defaults.pongTimeout
+	}
+	if timeouts.pingInterval <= 0 {
+		timeouts.pingInterval = defaults.pingInterval
+	}
+	if timeouts.writeTimeout <= 0 {
+		timeouts.writeTimeout = defaults.writeTimeout
+	}
+	return timeouts
 }
 
 type wsLogSubscription struct {
@@ -60,8 +141,17 @@ type wsLogSubscription struct {
 
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+	readiness := func(w http.ResponseWriter, r *http.Request) {
+		if err := s.node.HaltError(); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "halted", "error": err.Error()})
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	}
+	mux.HandleFunc("GET /health", readiness)
+	mux.HandleFunc("GET /health/ready", readiness)
+	mux.HandleFunc("GET /health/live", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "alive"})
 	})
 	mux.HandleFunc("GET /explorer", s.handleExplorer)
 	mux.HandleFunc("GET /explorer/events", s.handleExplorerEvents)
@@ -137,12 +227,17 @@ func (s *Server) routes() http.Handler {
 		writeJSON(w, http.StatusOK, record)
 	})
 	mux.HandleFunc("GET /txpool", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, s.node.TxPool())
+		pool, err := s.node.TxPoolBounded(MaxTxPoolResponseSourceBytes)
+		if err != nil {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, pool)
 	})
 	mux.HandleFunc("POST /tx", func(w http.ResponseWriter, r *http.Request) {
 		tx, err := decodeTransaction(r)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			writeRequestError(w, err)
 			return
 		}
 		if err := s.node.SubmitTx(tx); err != nil {
@@ -156,7 +251,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /tx/raw", func(w http.ResponseWriter, r *http.Request) {
 		tx, err := decodeRawTransaction(r, s.node.ChainID())
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			writeRequestError(w, err)
 			return
 		}
 		if err := s.node.SubmitTx(tx); err != nil {
@@ -170,7 +265,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /faucet", func(w http.ResponseWriter, r *http.Request) {
 		request, err := decodeFaucetRequest(r)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			writeRequestError(w, err)
 			return
 		}
 		tx, err := s.node.RequestFaucet(request.recipient(), request.Amount)
@@ -185,7 +280,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /peer/tx", func(w http.ResponseWriter, r *http.Request) {
 		tx, err := decodeTransaction(r)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			writeRequestError(w, err)
 			return
 		}
 		if err := s.node.SubmitTx(tx); err != nil {
@@ -197,24 +292,25 @@ func (s *Server) routes() http.Handler {
 	})
 	mux.HandleFunc("POST /peer/block", func(w http.ResponseWriter, r *http.Request) {
 		var block types.Block
-		if err := json.NewDecoder(r.Body).Decode(&block); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid block json"})
+		if err := decodeJSONRequest(r, &block); err != nil {
+			writeJSONRequestError(w, err, "invalid block json")
 			return
 		}
+		previousHeadHash := s.node.Head().Hash()
 		if err := s.node.ImportBlock(block); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		if head := s.node.Head(); head.Hash() == block.Hash() {
-			s.notifyNewHead(block)
-			s.notifyLogs(block)
+		if head := s.node.Head(); head.Hash() != previousHeadHash {
+			s.notifyNewHead(head)
+			s.notifyLogs(head)
 		}
 		writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted", "hash": block.Hash()})
 	})
 	mux.HandleFunc("POST /peer/finality-vote", func(w http.ResponseWriter, r *http.Request) {
 		vote, err := decodeFinalityVote(r)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			writeRequestError(w, err)
 			return
 		}
 		if err := s.node.SubmitFinalityVote(vote); err != nil {
@@ -223,14 +319,21 @@ func (s *Server) routes() http.Handler {
 		}
 		writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted", "validator": vote.Validator})
 	})
-	mux.HandleFunc("POST /rpc", s.handleJSONRPC)
+	mux.HandleFunc("POST /rpc", s.handleBoundedJSONRPC)
 	mux.HandleFunc("GET /rpc/ws", s.handleWebSocketJSONRPC)
-	return mux
+	return limitConcurrentHTTPRequests(
+		limitRequestBodies(limitConcurrentPOSTRequests(mux, s.postSlots)),
+		s.requestSlots,
+		s.livenessSlots,
+	)
 }
 
 func decodeTransaction(r *http.Request) (types.Transaction, error) {
 	var tx types.Transaction
-	if err := json.NewDecoder(r.Body).Decode(&tx); err != nil {
+	if err := decodeJSONRequest(r, &tx); err != nil {
+		if requestBodyTooLarge(err) {
+			return types.Transaction{}, err
+		}
 		return types.Transaction{}, fmt.Errorf("invalid transaction json")
 	}
 	return tx, nil
@@ -240,7 +343,10 @@ func decodeRawTransaction(r *http.Request, chainID string) (types.Transaction, e
 	var request struct {
 		Raw string `json:"raw"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+	if err := decodeJSONRequest(r, &request); err != nil {
+		if requestBodyTooLarge(err) {
+			return types.Transaction{}, err
+		}
 		return types.Transaction{}, fmt.Errorf("invalid raw transaction json")
 	}
 	if strings.TrimSpace(request.Raw) == "" {
@@ -255,7 +361,10 @@ func decodeRawTransaction(r *http.Request, chainID string) (types.Transaction, e
 
 func decodeFinalityVote(r *http.Request) (types.FinalitySignature, error) {
 	var vote types.FinalitySignature
-	if err := json.NewDecoder(r.Body).Decode(&vote); err != nil {
+	if err := decodeJSONRequest(r, &vote); err != nil {
+		if requestBodyTooLarge(err) {
+			return types.FinalitySignature{}, err
+		}
 		return types.FinalitySignature{}, fmt.Errorf("invalid finality vote json")
 	}
 	return vote, nil
@@ -276,10 +385,138 @@ func (f faucetRequest) recipient() string {
 
 func decodeFaucetRequest(r *http.Request) (faucetRequest, error) {
 	var request faucetRequest
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+	if err := decodeJSONRequest(r, &request); err != nil {
+		if requestBodyTooLarge(err) {
+			return faucetRequest{}, err
+		}
 		return faucetRequest{}, fmt.Errorf("invalid faucet json")
 	}
 	return request, nil
+}
+
+func limitRequestBodies(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.Body != nil {
+			if r.ContentLength > MaxRequestBodyBytes {
+				writeRequestBodyTooLarge(w)
+				return
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodyBytes)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func limitConcurrentPOSTRequests(next http.Handler, slots chan struct{}) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || slots == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		select {
+		case slots <- struct{}{}:
+			defer func() { <-slots }()
+			next.ServeHTTP(w, r)
+		default:
+			w.Header().Set("Retry-After", "1")
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "http post server is busy"})
+		}
+	})
+}
+
+func limitConcurrentHTTPRequests(next http.Handler, slots chan struct{}, livenessSlots chan struct{}) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/health/live" {
+			if livenessSlots == nil {
+				next.ServeHTTP(w, r)
+				return
+			}
+			select {
+			case livenessSlots <- struct{}{}:
+				defer func() { <-livenessSlots }()
+				next.ServeHTTP(w, r)
+			default:
+				w.Header().Set("Retry-After", "1")
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "liveness server is busy"})
+			}
+			return
+		}
+		if r.URL.Path == "/rpc/ws" && validWebSocketUpgradeRequest(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if slots == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		select {
+		case slots <- struct{}{}:
+			defer func() { <-slots }()
+			next.ServeHTTP(w, r)
+		default:
+			w.Header().Set("Retry-After", "1")
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "http server is busy"})
+		}
+	})
+}
+
+func decodeJSONRequest(r *http.Request, destination any) error {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("request body must contain exactly one JSON value")
+		}
+		return err
+	}
+	return nil
+}
+
+func decodeStrictJSON(raw []byte, destination any) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return errors.New("json must contain exactly one value")
+		}
+		return err
+	}
+	return nil
+}
+
+func requestBodyTooLarge(err error) bool {
+	var maxBytesError *http.MaxBytesError
+	return errors.As(err, &maxBytesError)
+}
+
+func writeJSONRequestError(w http.ResponseWriter, err error, invalidMessage string) {
+	if requestBodyTooLarge(err) {
+		writeRequestBodyTooLarge(w)
+		return
+	}
+	writeJSON(w, http.StatusBadRequest, map[string]string{"error": invalidMessage})
+}
+
+func writeRequestError(w http.ResponseWriter, err error) {
+	if requestBodyTooLarge(err) {
+		writeRequestBodyTooLarge(w)
+		return
+	}
+	writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+}
+
+func writeRequestBodyTooLarge(w http.ResponseWriter) {
+	writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
+		"error": fmt.Sprintf("request body exceeds %d bytes", MaxRequestBodyBytes),
+	})
 }
 
 func (s *Server) broadcastTransaction(tx types.Transaction) []string {
@@ -321,9 +558,10 @@ func (s *Server) broadcast(path string, payload any) []string {
 }
 
 type rpcRequest struct {
-	ID     any             `json:"id,omitempty"`
-	Method string          `json:"method"`
-	Params json.RawMessage `json:"params,omitempty"`
+	JSONRPC string          `json:"jsonrpc,omitempty"`
+	ID      any             `json:"id,omitempty"`
+	Method  string          `json:"method"`
+	Params  json.RawMessage `json:"params,omitempty"`
 }
 
 type rpcResponse struct {
@@ -332,12 +570,118 @@ type rpcResponse struct {
 	Error  string `json:"error,omitempty"`
 }
 
-const websocketGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+func logResultByteBudget(id any) (int, error) {
+	emptyResponse, err := json.Marshal(rpcResponse{ID: id, Result: []map[string]any{}})
+	if err != nil {
+		return 0, fmt.Errorf("encode log query response: %w", err)
+	}
+	const emptyResultBytes = 2
+	const encoderNewlineBytes = 1
+	envelopeBytes := len(emptyResponse) - emptyResultBytes + encoderNewlineBytes
+	if envelopeBytes > MaxLogResponseBytes-emptyResultBytes {
+		return 0, fmt.Errorf("log query response exceeds %d bytes", MaxLogResponseBytes)
+	}
+	return MaxLogResponseBytes - envelopeBytes, nil
+}
+
+const (
+	websocketGUID        = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+	websocketOpcodeText  = byte(0x1)
+	websocketOpcodeClose = byte(0x8)
+	websocketOpcodePing  = byte(0x9)
+	websocketOpcodePong  = byte(0xa)
+)
+
+type webSocketConnection struct {
+	conn      net.Conn
+	timeouts  webSocketTimeouts
+	writeMu   sync.Mutex
+	closeOnce sync.Once
+	closed    chan struct{}
+}
+
+func newWebSocketConnection(conn net.Conn, timeouts webSocketTimeouts) *webSocketConnection {
+	return &webSocketConnection{
+		conn:     conn,
+		timeouts: timeouts.withDefaults(),
+		closed:   make(chan struct{}),
+	}
+}
+
+func (connection *webSocketConnection) close() {
+	connection.closeOnce.Do(func() {
+		close(connection.closed)
+		_ = connection.conn.Close()
+	})
+}
+
+func (connection *webSocketConnection) refreshReadDeadline() error {
+	if err := connection.conn.SetReadDeadline(time.Now().Add(connection.timeouts.pongTimeout)); err != nil {
+		connection.close()
+		return err
+	}
+	return nil
+}
+
+func (connection *webSocketConnection) writeWithDeadline(write func() error) error {
+	connection.writeMu.Lock()
+	err := connection.conn.SetWriteDeadline(time.Now().Add(connection.timeouts.writeTimeout))
+	if err == nil {
+		err = write()
+	}
+	if err != nil {
+		connection.close()
+	}
+	connection.writeMu.Unlock()
+	return err
+}
+
+func (connection *webSocketConnection) writeHandshake(writer *bufio.ReadWriter, key string) error {
+	return connection.writeWithDeadline(func() error {
+		return writeWebSocketHandshake(writer, key)
+	})
+}
+
+func (connection *webSocketConnection) writeJSON(value any) error {
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	return connection.writeFrame(websocketOpcodeText, payload)
+}
+
+func (connection *webSocketConnection) writeFrame(opcode byte, payload []byte) error {
+	return connection.writeWithDeadline(func() error {
+		return writeWebSocketFrame(connection.conn, opcode, payload)
+	})
+}
+
+func (connection *webSocketConnection) runHeartbeat() {
+	ticker := time.NewTicker(connection.timeouts.pingInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			if err := connection.writeFrame(websocketOpcodePing, nil); err != nil {
+				return
+			}
+		case <-connection.closed:
+			return
+		}
+	}
+}
 
 func (s *Server) handleWebSocketJSONRPC(w http.ResponseWriter, r *http.Request) {
 	key := strings.TrimSpace(r.Header.Get("Sec-WebSocket-Key"))
-	if !websocketUpgradeRequested(r) || key == "" || r.Header.Get("Sec-WebSocket-Version") != "13" {
+	if !validWebSocketUpgradeRequest(r) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "websocket upgrade is required"})
+		return
+	}
+	select {
+	case s.wsConnectionSlots <- struct{}{}:
+		defer func() { <-s.wsConnectionSlots }()
+	default:
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "websocket connection limit reached"})
 		return
 	}
 	hijacker, ok := w.(http.Hijacker)
@@ -349,87 +693,194 @@ func (s *Server) handleWebSocketJSONRPC(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		return
 	}
-	defer conn.Close()
-	if err := writeWebSocketHandshake(rw, key); err != nil {
+	connection := newWebSocketConnection(conn, s.wsTimeouts)
+	defer connection.close()
+	if err := connection.refreshReadDeadline(); err != nil {
+		return
+	}
+	if err := connection.writeHandshake(rw, key); err != nil {
 		return
 	}
 	localSubscriptions := make(map[string]struct{})
 	defer func() {
+		connection.close()
 		for id := range localSubscriptions {
 			s.unregisterWebSocketSubscription(id)
 		}
 	}()
-	var writeMu sync.Mutex
+	go connection.runHeartbeat()
+	respond := func(response rpcResponse) bool {
+		return connection.writeJSON(response) == nil
+	}
 	for {
-		payload, err := readWebSocketTextFrame(rw.Reader)
+		opcode, payload, err := readWebSocketFrame(rw.Reader)
 		if err != nil {
 			return
 		}
+		if err := connection.refreshReadDeadline(); err != nil {
+			return
+		}
+		switch opcode {
+		case websocketOpcodeClose:
+			_ = connection.writeFrame(websocketOpcodeClose, payload)
+			return
+		case websocketOpcodePing:
+			if err := connection.writeFrame(websocketOpcodePong, payload); err != nil {
+				return
+			}
+			continue
+		case websocketOpcodePong:
+			continue
+		case websocketOpcodeText:
+		default:
+			return
+		}
 		var request rpcRequest
-		if err := json.Unmarshal([]byte(payload), &request); err != nil {
-			writeWebSocketRPCResponse(conn, &writeMu, rpcResponse{Error: "invalid json"})
+		if err := decodeStrictJSON(payload, &request); err != nil {
+			if !respond(rpcResponse{Error: "invalid json"}) {
+				return
+			}
 			continue
 		}
 		switch request.Method {
 		case "eth_subscribe":
 			params, err := rpcParams(request.Params)
 			if err != nil || len(params) < 1 {
-				writeWebSocketRPCResponse(conn, &writeMu, rpcResponse{ID: request.ID, Error: "subscription type is required"})
+				if !respond(rpcResponse{ID: request.ID, Error: "subscription type is required"}) {
+					return
+				}
 				continue
 			}
 			subscriptionType, ok := params[0].(string)
 			if !ok {
-				writeWebSocketRPCResponse(conn, &writeMu, rpcResponse{ID: request.ID, Error: "unsupported subscription"})
+				if !respond(rpcResponse{ID: request.ID, Error: "unsupported subscription"}) {
+					return
+				}
+				continue
+			}
+			if len(localSubscriptions) >= MaxWebSocketSubscriptionsPerConnection {
+				if !respond(rpcResponse{ID: request.ID, Error: fmt.Sprintf("connection subscription limit %d reached", MaxWebSocketSubscriptionsPerConnection)}) {
+					return
+				}
 				continue
 			}
 			switch subscriptionType {
 			case "newHeads":
-				id, events := s.registerNewHeadSubscription()
+				id, events, err := s.registerNewHeadSubscription(connection)
+				if err != nil {
+					if !respond(rpcResponse{ID: request.ID, Error: err.Error()}) {
+						return
+					}
+					continue
+				}
 				localSubscriptions[id] = struct{}{}
-				go s.writeNewHeadNotifications(conn, &writeMu, id, events)
-				writeWebSocketRPCResponse(conn, &writeMu, rpcResponse{ID: request.ID, Result: id})
+				if !respond(rpcResponse{ID: request.ID, Result: id}) {
+					return
+				}
+				go s.writeNewHeadNotifications(connection, id, events)
 			case "logs":
 				filter, err := s.parseWebSocketLogSubscription(params)
 				if err != nil {
-					writeWebSocketRPCResponse(conn, &writeMu, rpcResponse{ID: request.ID, Error: err.Error()})
+					if !respond(rpcResponse{ID: request.ID, Error: err.Error()}) {
+						return
+					}
 					continue
 				}
-				id, events := s.registerLogSubscription(filter)
+				id, events, err := s.registerLogSubscription(filter, connection)
+				if err != nil {
+					if !respond(rpcResponse{ID: request.ID, Error: err.Error()}) {
+						return
+					}
+					continue
+				}
 				localSubscriptions[id] = struct{}{}
-				go s.writeLogNotifications(conn, &writeMu, id, events)
-				writeWebSocketRPCResponse(conn, &writeMu, rpcResponse{ID: request.ID, Result: id})
+				if !respond(rpcResponse{ID: request.ID, Result: id}) {
+					return
+				}
+				go s.writeLogNotifications(connection, id, events)
 			case "newPendingTransactions":
-				id, events := s.registerPendingTransactionSubscription()
+				id, events, err := s.registerPendingTransactionSubscription(connection)
+				if err != nil {
+					if !respond(rpcResponse{ID: request.ID, Error: err.Error()}) {
+						return
+					}
+					continue
+				}
 				localSubscriptions[id] = struct{}{}
-				go s.writePendingTransactionNotifications(conn, &writeMu, id, events)
-				writeWebSocketRPCResponse(conn, &writeMu, rpcResponse{ID: request.ID, Result: id})
+				if !respond(rpcResponse{ID: request.ID, Result: id}) {
+					return
+				}
+				go s.writePendingTransactionNotifications(connection, id, events)
 			default:
-				writeWebSocketRPCResponse(conn, &writeMu, rpcResponse{ID: request.ID, Error: "unsupported subscription"})
+				if !respond(rpcResponse{ID: request.ID, Error: "unsupported subscription"}) {
+					return
+				}
 			}
 		case "eth_unsubscribe":
 			params, err := rpcParams(request.Params)
 			if err != nil || len(params) < 1 {
-				writeWebSocketRPCResponse(conn, &writeMu, rpcResponse{ID: request.ID, Error: "subscription id is required"})
+				if !respond(rpcResponse{ID: request.ID, Error: "subscription id is required"}) {
+					return
+				}
 				continue
 			}
 			id, ok := params[0].(string)
 			if !ok {
-				writeWebSocketRPCResponse(conn, &writeMu, rpcResponse{ID: request.ID, Error: "subscription id must be a string"})
+				if !respond(rpcResponse{ID: request.ID, Error: "subscription id must be a string"}) {
+					return
+				}
 				continue
 			}
 			_, local := localSubscriptions[id]
 			if local {
 				delete(localSubscriptions, id)
 			}
-			writeWebSocketRPCResponse(conn, &writeMu, rpcResponse{ID: request.ID, Result: local && s.unregisterWebSocketSubscription(id)})
+			if !respond(rpcResponse{ID: request.ID, Result: local && s.unregisterWebSocketSubscription(id)}) {
+				return
+			}
 		default:
-			writeWebSocketRPCResponse(conn, &writeMu, rpcResponse{ID: request.ID, Error: "unknown method"})
+			if !respond(rpcResponse{ID: request.ID, Error: "unknown method"}) {
+				return
+			}
 		}
 	}
 }
 
 func websocketUpgradeRequested(r *http.Request) bool {
-	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket") && strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
+	upgrade := r.Header.Get("Upgrade")
+	connection := r.Header.Get("Connection")
+	if len(upgrade) > maxWebSocketUpgradeHeaderBytes || len(connection) > maxWebSocketConnectionHeaderBytes {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(upgrade), "websocket") {
+		return false
+	}
+	for _, token := range strings.Split(connection, ",") {
+		if strings.EqualFold(strings.TrimSpace(token), "upgrade") {
+			return true
+		}
+	}
+	return false
+}
+
+func validWebSocketUpgradeRequest(r *http.Request) bool {
+	if r.Method != http.MethodGet {
+		return false
+	}
+	version := r.Header.Get("Sec-WebSocket-Version")
+	keyValue := r.Header.Get("Sec-WebSocket-Key")
+	if len(version) > maxWebSocketVersionHeaderBytes || len(keyValue) > maxWebSocketKeyHeaderBytes {
+		return false
+	}
+	if !websocketUpgradeRequested(r) || version != "13" {
+		return false
+	}
+	keyValue = strings.TrimSpace(keyValue)
+	if len(keyValue) != maxWebSocketKeyHeaderBytes {
+		return false
+	}
+	key, err := base64.StdEncoding.Strict().DecodeString(keyValue)
+	return err == nil && len(key) == 16
 }
 
 func writeWebSocketHandshake(writer *bufio.ReadWriter, key string) error {
@@ -446,67 +897,64 @@ func websocketAcceptKey(key string) string {
 	return base64.StdEncoding.EncodeToString(sum[:])
 }
 
-func readWebSocketTextFrame(reader *bufio.Reader) (string, error) {
+func readWebSocketFrame(reader *bufio.Reader) (byte, []byte, error) {
 	first, err := reader.ReadByte()
 	if err != nil {
-		return "", err
+		return 0, nil, err
+	}
+	if first&0x80 == 0 {
+		return 0, nil, errors.New("fragmented websocket frames are not supported")
+	}
+	if first&0x70 != 0 {
+		return 0, nil, errors.New("websocket reserved bits must be zero")
 	}
 	opcode := first & 0x0f
-	if opcode == 0x8 {
-		return "", io.EOF
-	}
-	if opcode != 0x1 {
-		return "", fmt.Errorf("unsupported websocket opcode %d", opcode)
+	switch opcode {
+	case websocketOpcodeText, websocketOpcodeClose, websocketOpcodePing, websocketOpcodePong:
+	default:
+		return 0, nil, fmt.Errorf("unsupported websocket opcode %d", opcode)
 	}
 	second, err := reader.ReadByte()
 	if err != nil {
-		return "", err
+		return 0, nil, err
 	}
 	masked := second&0x80 != 0
 	if !masked {
-		return "", errors.New("client websocket frames must be masked")
+		return 0, nil, errors.New("client websocket frames must be masked")
 	}
 	length := uint64(second & 0x7f)
 	switch length {
 	case 126:
+		if opcode >= websocketOpcodeClose {
+			return 0, nil, errors.New("websocket control payload is too large")
+		}
 		extended := make([]byte, 2)
 		if _, err := io.ReadFull(reader, extended); err != nil {
-			return "", err
+			return 0, nil, err
 		}
 		length = uint64(extended[0])<<8 | uint64(extended[1])
 	case 127:
-		return "", errors.New("websocket payload is too large")
+		return 0, nil, errors.New("websocket payload is too large")
 	}
 	var mask [4]byte
 	if _, err := io.ReadFull(reader, mask[:]); err != nil {
-		return "", err
+		return 0, nil, err
 	}
 	payload := make([]byte, length)
 	if _, err := io.ReadFull(reader, payload); err != nil {
-		return "", err
+		return 0, nil, err
 	}
 	for i := range payload {
 		payload[i] ^= mask[i%4]
 	}
-	return string(payload), nil
+	return opcode, payload, nil
 }
 
-func writeWebSocketRPCResponse(conn net.Conn, writeMu *sync.Mutex, response rpcResponse) {
-	writeWebSocketJSON(conn, writeMu, response)
-}
-
-func writeWebSocketJSON(conn net.Conn, writeMu *sync.Mutex, value any) {
-	payload, err := json.Marshal(value)
-	if err != nil {
-		return
+func writeWebSocketFrame(conn net.Conn, opcode byte, payload []byte) error {
+	if opcode >= websocketOpcodeClose && len(payload) > 125 {
+		return errors.New("websocket control payload is too large")
 	}
-	writeMu.Lock()
-	defer writeMu.Unlock()
-	_ = writeWebSocketTextFrame(conn, payload)
-}
-
-func writeWebSocketTextFrame(conn net.Conn, payload []byte) error {
-	header := []byte{0x81}
+	header := []byte{0x80 | opcode}
 	switch {
 	case len(payload) <= 125:
 		header = append(header, byte(len(payload)))
@@ -515,21 +963,34 @@ func writeWebSocketTextFrame(conn net.Conn, payload []byte) error {
 	default:
 		return errors.New("websocket payload is too large")
 	}
-	if _, err := conn.Write(header); err != nil {
-		return err
+	frame := make([]byte, 0, len(header)+len(payload))
+	frame = append(frame, header...)
+	frame = append(frame, payload...)
+	for len(frame) > 0 {
+		written, err := conn.Write(frame)
+		if err != nil {
+			return err
+		}
+		if written == 0 {
+			return io.ErrNoProgress
+		}
+		frame = frame[written:]
 	}
-	_, err := conn.Write(payload)
-	return err
+	return nil
 }
 
-func (s *Server) registerNewHeadSubscription() (string, <-chan types.Block) {
+func (s *Server) registerNewHeadSubscription(connection *webSocketConnection) (string, <-chan types.Block, error) {
 	s.wsMu.Lock()
 	defer s.wsMu.Unlock()
+	if err := s.reserveWebSocketSubscriptionLocked(); err != nil {
+		return "", nil, err
+	}
 	s.nextWSID++
 	id := quantity(s.nextWSID)
 	events := make(chan types.Block, 8)
 	s.wsNewHeads[id] = events
-	return id, events
+	s.bindWebSocketConnectionLocked(id, connection)
+	return id, events, nil
 }
 
 func (s *Server) unregisterNewHeadSubscription(id string) bool {
@@ -540,18 +1001,26 @@ func (s *Server) unregisterNewHeadSubscription(id string) bool {
 		return false
 	}
 	delete(s.wsNewHeads, id)
+	delete(s.wsConnections, id)
 	close(events)
 	return true
 }
 
-func (s *Server) registerLogSubscription(filter logFilter) (string, <-chan map[string]any) {
+func (s *Server) registerLogSubscription(filter logFilter, connection *webSocketConnection) (string, <-chan map[string]any, error) {
 	s.wsMu.Lock()
 	defer s.wsMu.Unlock()
+	if err := s.reserveWebSocketSubscriptionLocked(); err != nil {
+		return "", nil, err
+	}
+	if len(s.wsLogs) >= MaxWebSocketLogSubscriptions {
+		return "", nil, fmt.Errorf("websocket log subscription limit %d reached", MaxWebSocketLogSubscriptions)
+	}
 	s.nextWSID++
 	id := quantity(s.nextWSID)
 	events := make(chan map[string]any, 16)
 	s.wsLogs[id] = &wsLogSubscription{filter: filter, events: events}
-	return id, events
+	s.bindWebSocketConnectionLocked(id, connection)
+	return id, events, nil
 }
 
 func (s *Server) unregisterLogSubscription(id string) bool {
@@ -562,6 +1031,7 @@ func (s *Server) unregisterLogSubscription(id string) bool {
 		return false
 	}
 	delete(s.wsLogs, id)
+	delete(s.wsConnections, id)
 	close(subscription.events)
 	return true
 }
@@ -576,38 +1046,185 @@ func (s *Server) unregisterWebSocketSubscription(id string) bool {
 	return s.unregisterPendingTransactionSubscription(id)
 }
 
+func (s *Server) bindWebSocketConnectionLocked(id string, connection *webSocketConnection) {
+	if connection == nil {
+		return
+	}
+	if s.wsConnections == nil {
+		s.wsConnections = make(map[string]*webSocketConnection)
+	}
+	s.wsConnections[id] = connection
+}
+
+func (s *Server) closeSlowWebSocketConnectionLocked(id string) {
+	connection := s.wsConnections[id]
+	delete(s.wsConnections, id)
+	if connection != nil {
+		connection.close()
+	}
+}
+
 func (s *Server) notifyNewHead(block types.Block) {
+	s.invalidatePendingTransactionHashes()
 	s.wsMu.Lock()
 	defer s.wsMu.Unlock()
-	for _, events := range s.wsNewHeads {
+	for id, events := range s.wsNewHeads {
 		select {
 		case events <- block:
 		default:
+			delete(s.wsNewHeads, id)
+			close(events)
+			s.closeSlowWebSocketConnectionLocked(id)
 		}
 	}
 }
 
 func (s *Server) notifyLogs(block types.Block) {
+	s.notifyLogsWithLimit(block, MaxWebSocketLogMatchChecksPerBlock)
+}
+
+func (s *Server) notifyLogsWithLimit(block types.Block, workLimit int) (int, bool) {
 	s.wsMu.Lock()
 	defer s.wsMu.Unlock()
-	for _, subscription := range s.wsLogs {
-		for _, log := range evmBlockLogs(block, subscription.filter) {
-			select {
-			case subscription.events <- log:
-			default:
+	if len(s.wsLogs) == 0 {
+		return 0, true
+	}
+	if workLimit <= 0 {
+		s.closeAllLogSubscriptionsLocked()
+		return 0, false
+	}
+
+	ids := make([]string, 0, len(s.wsLogs))
+	for id := range s.wsLogs {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i int, j int) bool {
+		left, _ := strconv.ParseUint(strings.TrimPrefix(ids[i], "0x"), 16, 64)
+		right, _ := strconv.ParseUint(strings.TrimPrefix(ids[j], "0x"), 16, 64)
+		return left < right
+	})
+	offset := s.wsLogDispatchOffset % len(ids)
+	s.wsLogDispatchOffset = (offset + 1) % len(ids)
+	orderedIDs := append(append(make([]string, 0, len(ids)), ids[offset:]...), ids[:offset]...)
+
+	work := 0
+	consumeWork := func() bool {
+		if work >= workLimit {
+			s.closeAllLogSubscriptionsLocked()
+			return false
+		}
+		work++
+		return true
+	}
+	blockHash := ""
+	blockLogIndex := uint64(0)
+	for txIndex, tx := range block.Transactions {
+		if txIndex >= len(block.Receipts) {
+			continue
+		}
+		receipt := block.Receipts[txIndex]
+		address := strings.ToLower(types.EventSourceAddress(tx, receipt))
+		if address == "" {
+			continue
+		}
+		txHash := ""
+		for _, event := range receipt.Events {
+			if !consumeWork() {
+				return work, false
+			}
+			topics := eventTopics(event)
+			matchedIDs := make([]string, 0, len(orderedIDs))
+			for _, id := range orderedIDs {
+				subscription := s.wsLogs[id]
+				if subscription == nil {
+					continue
+				}
+				if !consumeWork() {
+					return work, false
+				}
+				if eventMatchesLogFilter(address, topics, subscription.filter) {
+					matchedIDs = append(matchedIDs, id)
+				}
+			}
+			if len(matchedIDs) == 0 {
+				blockLogIndex++
+				continue
+			}
+			if txHash == "" {
+				if !consumeWork() {
+					return work, false
+				}
+				txHash = tx.Hash()
+			}
+			if blockHash == "" {
+				if !consumeWork() {
+					return work, false
+				}
+				blockHash = block.Hash()
+			}
+			if !consumeWork() {
+				return work, false
+			}
+			log := map[string]any{
+				"removed":          false,
+				"logIndex":         quantity(blockLogIndex),
+				"transactionIndex": quantity(uint64(txIndex)),
+				"transactionHash":  txHash,
+				"blockHash":        blockHash,
+				"blockNumber":      quantity(block.Header.Height),
+				"address":          address,
+				"data":             eventData(event),
+				"topics":           topics,
+			}
+			blockLogIndex++
+			for _, id := range matchedIDs {
+				subscription := s.wsLogs[id]
+				if subscription == nil {
+					continue
+				}
+				select {
+				case subscription.events <- log:
+				default:
+					delete(s.wsLogs, id)
+					close(subscription.events)
+					s.closeSlowWebSocketConnectionLocked(id)
+				}
 			}
 		}
 	}
+	return work, true
 }
 
-func (s *Server) registerPendingTransactionSubscription() (string, <-chan string) {
+func (s *Server) closeAllLogSubscriptionsLocked() {
+	for id, subscription := range s.wsLogs {
+		delete(s.wsLogs, id)
+		close(subscription.events)
+		s.closeSlowWebSocketConnectionLocked(id)
+	}
+}
+
+func (s *Server) registerPendingTransactionSubscription(connection *webSocketConnection) (string, <-chan string, error) {
 	s.wsMu.Lock()
 	defer s.wsMu.Unlock()
+	if err := s.reserveWebSocketSubscriptionLocked(); err != nil {
+		return "", nil, err
+	}
 	s.nextWSID++
 	id := quantity(s.nextWSID)
 	events := make(chan string, 16)
 	s.wsPendingTransactions[id] = events
-	return id, events
+	s.bindWebSocketConnectionLocked(id, connection)
+	return id, events, nil
+}
+
+func (s *Server) reserveWebSocketSubscriptionLocked() error {
+	if len(s.wsNewHeads)+len(s.wsLogs)+len(s.wsPendingTransactions) >= MaxWebSocketSubscriptions {
+		return fmt.Errorf("websocket subscription limit %d reached", MaxWebSocketSubscriptions)
+	}
+	if s.nextWSID == math.MaxUint64 {
+		return errors.New("websocket subscription id space exhausted")
+	}
+	return nil
 }
 
 func (s *Server) unregisterPendingTransactionSubscription(id string) bool {
@@ -618,58 +1235,69 @@ func (s *Server) unregisterPendingTransactionSubscription(id string) bool {
 		return false
 	}
 	delete(s.wsPendingTransactions, id)
+	delete(s.wsConnections, id)
 	close(events)
 	return true
 }
 
 func (s *Server) notifyPendingTransaction(tx types.Transaction) {
+	s.invalidatePendingTransactionHashes()
 	hash := tx.Hash()
 	s.wsMu.Lock()
 	defer s.wsMu.Unlock()
-	for _, events := range s.wsPendingTransactions {
+	for id, events := range s.wsPendingTransactions {
 		select {
 		case events <- hash:
 		default:
+			delete(s.wsPendingTransactions, id)
+			close(events)
+			s.closeSlowWebSocketConnectionLocked(id)
 		}
 	}
 }
 
-func (s *Server) writeNewHeadNotifications(conn net.Conn, writeMu *sync.Mutex, id string, events <-chan types.Block) {
+func (s *Server) writeNewHeadNotifications(connection *webSocketConnection, id string, events <-chan types.Block) {
 	for block := range events {
-		writeWebSocketJSON(conn, writeMu, map[string]any{
+		if err := connection.writeJSON(map[string]any{
 			"jsonrpc": "2.0",
 			"method":  "eth_subscription",
 			"params": map[string]any{
 				"subscription": id,
 				"result":       evmBlockHeader(block),
 			},
-		})
+		}); err != nil {
+			return
+		}
 	}
 }
 
-func (s *Server) writeLogNotifications(conn net.Conn, writeMu *sync.Mutex, id string, events <-chan map[string]any) {
+func (s *Server) writeLogNotifications(connection *webSocketConnection, id string, events <-chan map[string]any) {
 	for log := range events {
-		writeWebSocketJSON(conn, writeMu, map[string]any{
+		if err := connection.writeJSON(map[string]any{
 			"jsonrpc": "2.0",
 			"method":  "eth_subscription",
 			"params": map[string]any{
 				"subscription": id,
 				"result":       log,
 			},
-		})
+		}); err != nil {
+			return
+		}
 	}
 }
 
-func (s *Server) writePendingTransactionNotifications(conn net.Conn, writeMu *sync.Mutex, id string, events <-chan string) {
+func (s *Server) writePendingTransactionNotifications(connection *webSocketConnection, id string, events <-chan string) {
 	for hash := range events {
-		writeWebSocketJSON(conn, writeMu, map[string]any{
+		if err := connection.writeJSON(map[string]any{
 			"jsonrpc": "2.0",
 			"method":  "eth_subscription",
 			"params": map[string]any{
 				"subscription": id,
 				"result":       hash,
 			},
-		})
+		}); err != nil {
+			return
+		}
 	}
 }
 
@@ -686,9 +1314,27 @@ func (s *Server) parseWebSocketLogSubscription(params []any) (logFilter, error) 
 }
 
 func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
-	raw, err := io.ReadAll(r.Body)
+	if r.ContentLength > MaxJSONRPCRequestBodyBytes {
+		writeJSON(w, http.StatusRequestEntityTooLarge, rpcResponse{
+			Error: fmt.Sprintf("json-rpc request body exceeds %d bytes", MaxJSONRPCRequestBodyBytes),
+		})
+		return
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, MaxJSONRPCRequestBodyBytes+1))
 	if err != nil {
+		if requestBodyTooLarge(err) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, rpcResponse{
+				Error: fmt.Sprintf("request body exceeds %d bytes", MaxRequestBodyBytes),
+			})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, rpcResponse{Error: "invalid json"})
+		return
+	}
+	if len(raw) > MaxJSONRPCRequestBodyBytes {
+		writeJSON(w, http.StatusRequestEntityTooLarge, rpcResponse{
+			Error: fmt.Sprintf("json-rpc request body exceeds %d bytes", MaxJSONRPCRequestBodyBytes),
+		})
 		return
 	}
 	raw = bytes.TrimSpace(raw)
@@ -698,7 +1344,7 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 	}
 	if raw[0] == '[' {
 		var requests []rpcRequest
-		if err := json.Unmarshal(raw, &requests); err != nil {
+		if err := decodeStrictJSON(raw, &requests); err != nil {
 			writeJSON(w, http.StatusBadRequest, rpcResponse{Error: "invalid json"})
 			return
 		}
@@ -706,40 +1352,83 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, rpcResponse{Error: "batch must include at least one request"})
 			return
 		}
+		if len(requests) > MaxJSONRPCBatchRequests {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{
+				Error: fmt.Sprintf("batch exceeds %d requests", MaxJSONRPCBatchRequests),
+			})
+			return
+		}
 		responses := make([]rpcResponse, 0, len(requests))
+		responseBytes := 2
 		for _, request := range requests {
-			responses = append(responses, s.responseForJSONRPCBatchRequest(request))
+			response, err := s.responseForJSONRPCBatchRequest(request, MaxJSONRPCBatchResponseBytes-responseBytes)
+			if err != nil {
+				writeJSON(w, http.StatusRequestEntityTooLarge, rpcResponse{Error: err.Error()})
+				return
+			}
+			encoded, err := json.Marshal(response)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, rpcResponse{Error: "failed to encode batch response"})
+				return
+			}
+			if len(responses) > 0 {
+				responseBytes++
+			}
+			if responseBytes > MaxJSONRPCBatchResponseBytes-len(encoded) {
+				writeJSON(w, http.StatusRequestEntityTooLarge, rpcResponse{
+					Error: fmt.Sprintf("batch response exceeds %d bytes", MaxJSONRPCBatchResponseBytes),
+				})
+				return
+			}
+			responseBytes += len(encoded)
+			responses = append(responses, response)
 		}
 		writeJSON(w, http.StatusOK, responses)
 		return
 	}
 
 	var request rpcRequest
-	if err := json.Unmarshal(raw, &request); err != nil {
+	if err := decodeStrictJSON(raw, &request); err != nil {
 		writeJSON(w, http.StatusBadRequest, rpcResponse{Error: "invalid json"})
 		return
 	}
 	s.handleSingleJSONRPC(w, request)
 }
 
-func (s *Server) responseForJSONRPCBatchRequest(request rpcRequest) rpcResponse {
-	recorder := newRPCResponseRecorder()
+func (s *Server) handleBoundedJSONRPC(w http.ResponseWriter, r *http.Request) {
+	select {
+	case s.rpcSlots <- struct{}{}:
+		defer func() { <-s.rpcSlots }()
+		s.handleJSONRPC(w, r)
+	default:
+		w.Header().Set("Retry-After", "1")
+		writeJSON(w, http.StatusServiceUnavailable, rpcResponse{Error: "json-rpc server is busy"})
+	}
+}
+
+func (s *Server) responseForJSONRPCBatchRequest(request rpcRequest, byteLimit int) (rpcResponse, error) {
+	recorder := newRPCResponseRecorder(byteLimit)
 	s.handleSingleJSONRPC(recorder, request)
+	if recorder.overflow {
+		return rpcResponse{}, fmt.Errorf("batch response exceeds %d bytes", MaxJSONRPCBatchResponseBytes)
+	}
 	var response rpcResponse
 	if err := json.Unmarshal(recorder.body.Bytes(), &response); err != nil {
-		return rpcResponse{ID: request.ID, Error: "invalid response"}
+		return rpcResponse{ID: request.ID, Error: "invalid response"}, nil
 	}
-	return response
+	return response, nil
 }
 
 type rpcResponseRecorder struct {
-	header http.Header
-	status int
-	body   bytes.Buffer
+	header   http.Header
+	status   int
+	body     bytes.Buffer
+	limit    int
+	overflow bool
 }
 
-func newRPCResponseRecorder() *rpcResponseRecorder {
-	return &rpcResponseRecorder{header: make(http.Header)}
+func newRPCResponseRecorder(limit int) *rpcResponseRecorder {
+	return &rpcResponseRecorder{header: make(http.Header), limit: limit}
 }
 
 func (r *rpcResponseRecorder) Header() http.Header {
@@ -756,10 +1445,18 @@ func (r *rpcResponseRecorder) Write(data []byte) (int, error) {
 	if r.status == 0 {
 		r.status = http.StatusOK
 	}
+	if r.limit < 0 || r.body.Len() > r.limit-len(data) {
+		r.overflow = true
+		return len(data), nil
+	}
 	return r.body.Write(data)
 }
 
 func (s *Server) handleSingleJSONRPC(w http.ResponseWriter, request rpcRequest) {
+	if request.JSONRPC != "" && request.JSONRPC != "2.0" {
+		writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "jsonrpc must be 2.0"})
+		return
+	}
 	n := s.node
 	switch request.Method {
 	case "web3_clientVersion":
@@ -822,12 +1519,7 @@ func (s *Server) handleSingleJSONRPC(w http.ResponseWriter, request rpcRequest) 
 			return
 		}
 		if len(params) > 1 && params[1] == "pending" {
-			account, err := n.PendingAccount(address)
-			if err != nil {
-				writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
-				return
-			}
-			writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: quantity(account.Nonce)})
+			writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: quantity(n.PendingNonce(address))})
 			return
 		}
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: quantity(n.Account(address).Nonce)})
@@ -887,7 +1579,7 @@ func (s *Server) handleSingleJSONRPC(w http.ResponseWriter, request rpcRequest) 
 		}
 		record, ok := n.Transaction(txHash)
 		if !ok {
-			if tx, ok := pendingTransactionByHash(n.TxPool(), txHash); ok {
+			if tx, ok := n.PendingTransaction(txHash); ok {
 				writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: evmPendingTransaction(tx)})
 				return
 			}
@@ -1091,7 +1783,16 @@ func (s *Server) handleSingleJSONRPC(w http.ResponseWriter, request rpcRequest) 
 			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
 			return
 		}
-		logs := evmLogs(n, filter)
+		responseByteLimit, err := logResultByteBudget(request.ID)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
+			return
+		}
+		logs, err := evmLogsWithByteLimit(n, filter, responseByteLimit)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
+			return
+		}
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: logs})
 	case "eth_newFilter":
 		params, err := rpcParams(request.Params)
@@ -1109,11 +1810,26 @@ func (s *Server) handleSingleJSONRPC(w http.ResponseWriter, request rpcRequest) 
 			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: s.registerLogFilter(filter, nextBlock)})
+		id, err := s.registerLogFilter(filter, nextBlock)
+		if err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, rpcResponse{ID: request.ID, Error: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: id})
 	case "eth_newBlockFilter":
-		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: s.registerBlockFilter(n.Finality().HeadHeight + 1)})
+		id, err := s.registerBlockFilter(n.Finality().HeadHeight + 1)
+		if err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, rpcResponse{ID: request.ID, Error: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: id})
 	case "eth_newPendingTransactionFilter":
-		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: s.registerPendingTransactionFilter()})
+		id, err := s.registerPendingTransactionFilter()
+		if err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, rpcResponse{ID: request.ID, Error: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: id})
 	case "eth_getFilterLogs":
 		params, err := rpcParams(request.Params)
 		if err != nil {
@@ -1125,9 +1841,18 @@ func (s *Server) handleSingleJSONRPC(w http.ResponseWriter, request rpcRequest) 
 			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
 			return
 		}
-		logs, ok := s.logFilterLogs(filterID)
+		responseByteLimit, err := logResultByteBudget(request.ID)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
+			return
+		}
+		logs, ok, err := s.logFilterLogs(filterID, responseByteLimit)
 		if !ok {
 			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "filter not found"})
+			return
+		}
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
 			return
 		}
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: logs})
@@ -1142,9 +1867,18 @@ func (s *Server) handleSingleJSONRPC(w http.ResponseWriter, request rpcRequest) 
 			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
 			return
 		}
-		changes, ok := s.filterChanges(filterID)
+		responseByteLimit, err := logResultByteBudget(request.ID)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
+			return
+		}
+		changes, ok, err := s.filterChanges(filterID, responseByteLimit)
 		if !ok {
 			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "filter not found"})
+			return
+		}
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
 			return
 		}
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: changes})
@@ -1170,6 +1904,13 @@ func (s *Server) handleSingleJSONRPC(w http.ResponseWriter, request rpcRequest) 
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: err.Error()})
 			return
+		}
+		if len(params) > 1 {
+			blockTag, ok := params[1].(string)
+			if !ok || blockTag != "latest" {
+				writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "eth_call currently supports only the latest block"})
+				return
+			}
 		}
 		result, err := n.ReadContract(call.from, call.to, call.method, call.payload)
 		if err != nil {
@@ -1279,13 +2020,18 @@ func (s *Server) handleSingleJSONRPC(w http.ResponseWriter, request rpcRequest) 
 		s.notifyPendingTransaction(tx)
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: map[string]string{"hash": tx.Hash()}})
 	case "txpool_status":
-		pool := n.TxPool()
+		pending, queued := n.TxPoolCounts()
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: map[string]string{
-			"pending": quantity(uint64(pool.PendingCount)),
-			"queued":  quantity(uint64(pool.QueuedCount)),
+			"pending": quantity(uint64(pending)),
+			"queued":  quantity(uint64(queued)),
 		}})
 	case "txpool_content":
-		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: evmTxPool(n.TxPool())})
+		pool, err := n.TxPoolBounded(MaxTxPoolResponseSourceBytes)
+		if err != nil {
+			writeJSON(w, http.StatusRequestEntityTooLarge, rpcResponse{ID: request.ID, Error: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: evmTxPool(pool)})
 	case "chain_getAccount":
 		var params struct {
 			Address string `json:"address"`
@@ -1328,7 +2074,7 @@ func (s *Server) handleSingleJSONRPC(w http.ResponseWriter, request rpcRequest) 
 		writeJSON(w, http.StatusOK, rpcResponse{ID: request.ID, Result: n.Param(key)})
 	case "chain_sendTx":
 		var tx types.Transaction
-		if err := json.Unmarshal(request.Params, &tx); err != nil {
+		if err := decodeStrictJSON(request.Params, &tx); err != nil {
 			writeJSON(w, http.StatusBadRequest, rpcResponse{ID: request.ID, Error: "invalid transaction"})
 			return
 		}
@@ -1348,11 +2094,11 @@ func parseRPCFinalityVoteParam(raw json.RawMessage) (types.FinalitySignature, er
 		return types.FinalitySignature{}, fmt.Errorf("finality vote is required")
 	}
 	var params []types.FinalitySignature
-	if err := json.Unmarshal(raw, &params); err == nil && len(params) > 0 {
+	if err := decodeStrictJSON(raw, &params); err == nil && len(params) > 0 {
 		return params[0], nil
 	}
 	var vote types.FinalitySignature
-	if err := json.Unmarshal(raw, &vote); err != nil {
+	if err := decodeStrictJSON(raw, &vote); err != nil {
 		return types.FinalitySignature{}, fmt.Errorf("invalid finality vote")
 	}
 	return vote, nil
@@ -1363,11 +2109,11 @@ func parseRPCTransactionParam(raw json.RawMessage) (types.Transaction, error) {
 		return types.Transaction{}, fmt.Errorf("transaction is required")
 	}
 	var params []types.Transaction
-	if err := json.Unmarshal(raw, &params); err == nil && len(params) > 0 {
+	if err := decodeStrictJSON(raw, &params); err == nil && len(params) > 0 {
 		return params[0], nil
 	}
 	var tx types.Transaction
-	if err := json.Unmarshal(raw, &tx); err != nil {
+	if err := decodeStrictJSON(raw, &tx); err != nil {
 		return types.Transaction{}, fmt.Errorf("invalid transaction")
 	}
 	if tx.ChainID == "" {
@@ -1515,6 +2261,9 @@ func feeHistory(n *node.Node, params []any) (map[string]any, error) {
 	}
 	if blockCount == 0 {
 		return nil, fmt.Errorf("block count must be positive")
+	}
+	if blockCount > MaxFeeHistoryBlockCount {
+		return nil, fmt.Errorf("block count exceeds %d", MaxFeeHistoryBlockCount)
 	}
 	newest, err := parseRPCBlockNumber(n, params[1])
 	if err != nil {
@@ -2088,6 +2837,14 @@ func evmReceipt(record types.TransactionRecord, block types.Block) map[string]an
 	if record.Receipt.Success {
 		status = 1
 	}
+	cumulativeGasUsed := uint64(0)
+	for index := 0; index <= record.Index && index < len(block.Receipts); index++ {
+		if math.MaxUint64-cumulativeGasUsed < block.Receipts[index].GasUsed {
+			cumulativeGasUsed = math.MaxUint64
+			break
+		}
+		cumulativeGasUsed += block.Receipts[index].GasUsed
+	}
 	return map[string]any{
 		"transactionHash":   record.Transaction.Hash(),
 		"transactionIndex":  quantity(uint64(record.Index)),
@@ -2096,7 +2853,7 @@ func evmReceipt(record types.TransactionRecord, block types.Block) map[string]an
 		"from":              strings.ToLower(record.Transaction.From),
 		"to":                nullableAddress(record.Transaction.To),
 		"contractAddress":   nullableAddress(record.Receipt.ContractAddress),
-		"cumulativeGasUsed": quantity(record.Receipt.GasUsed),
+		"cumulativeGasUsed": quantity(cumulativeGasUsed),
 		"gasUsed":           quantity(record.Receipt.GasUsed),
 		"effectiveGasPrice": quantity(record.Receipt.EffectiveGasPrice),
 		"feePayer":          nullableAddress(record.Receipt.FeePayer),
@@ -2135,6 +2892,10 @@ func debugTransactionTrace(record types.TransactionRecord) map[string]any {
 }
 
 func chainLabTraceSummary(record types.TransactionRecord) map[string]any {
+	failureCode := record.Receipt.FailureCode
+	if failureCode == "" {
+		failureCode = record.Receipt.Error
+	}
 	return map[string]any{
 		"transactionHash":   record.Transaction.Hash(),
 		"blockHash":         record.BlockHash,
@@ -2150,7 +2911,8 @@ func chainLabTraceSummary(record types.TransactionRecord) map[string]any {
 		"effectiveGasPrice": quantity(record.Receipt.EffectiveGasPrice),
 		"feePayer":          strings.ToLower(traceFeePayer(record)),
 		"contractAddress":   nullableAddress(record.Receipt.ContractAddress),
-		"error":             record.Receipt.Error,
+		"error":             failureCode,
+		"failureCode":       record.Receipt.FailureCode,
 		"events":            chainLabTraceEvents(record.Receipt.Events),
 	}
 }

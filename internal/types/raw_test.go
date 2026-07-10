@@ -1,6 +1,7 @@
 package types_test
 
 import (
+	"bytes"
 	"encoding/hex"
 	"strings"
 	"testing"
@@ -144,6 +145,11 @@ func signedEthereumType2TransferRaw(t *testing.T, key chaincrypto.PrivateKey, tx
 	if yParity > 1 {
 		t.Fatalf("unexpected y parity %d from compact header %d", yParity, signatureBytes[0])
 	}
+	r := bytes.TrimLeft(signatureBytes[1:33], "\x00")
+	s := bytes.TrimLeft(signatureBytes[33:65], "\x00")
+	if len(r) == 0 || len(s) == 0 {
+		t.Fatal("signature contains a zero scalar")
+	}
 	signed := testRLPList(
 		testRLPUint(tx.ChainID),
 		testRLPUint(tx.Nonce),
@@ -155,8 +161,8 @@ func signedEthereumType2TransferRaw(t *testing.T, key chaincrypto.PrivateKey, tx
 		testRLPBytes(nil),
 		testRLPList(),
 		testRLPUint(yParity),
-		testRLPBytes(signatureBytes[1:33]),
-		testRLPBytes(signatureBytes[33:65]),
+		testRLPBytes(r),
+		testRLPBytes(s),
 	)
 	raw := append([]byte{0x02}, signed...)
 	return "0x" + hex.EncodeToString(raw), hash.KeccakHex(raw)

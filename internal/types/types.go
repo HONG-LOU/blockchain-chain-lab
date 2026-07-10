@@ -5,6 +5,17 @@ import (
 )
 
 const (
+	// MaxValidators bounds quorum certificates and validator-set operations.
+	MaxValidators = 4096
+	// MaxChainIDBytes bounds every consensus envelope that repeats the chain ID.
+	MaxChainIDBytes = 128
+	// MaxWASMModuleBytes is the protocol admission and snapshot bound.
+	MaxWASMModuleBytes = 512 * 1024
+	// WASMMeteringVersion identifies the only admitted version-1 WASM schedule.
+	WASMMeteringVersion = "chainlab-wasm-v1"
+)
+
+const (
 	DefaultBlockGasLimit uint64 = 30_000_000
 	InitialBaseFeePerGas uint64 = 1
 	MaxBatchOperations          = 128
@@ -94,8 +105,10 @@ func (tx Transaction) PaymasterSigningBytes() []byte {
 }
 
 func (tx Transaction) Hash() string {
-	if tx.SignatureKind == SignatureKindEthereumType2 && tx.EthereumRawHash != "" {
-		return tx.EthereumRawHash
+	if tx.SignatureKind == SignatureKindEthereumType2 {
+		if digest, err := EthereumType2TransactionHash(tx); err == nil {
+			return digest
+		}
 	}
 	return hash.MustHex(tx)
 }
@@ -113,9 +126,17 @@ type Event struct {
 	Attributes map[string]string `json:"attributes,omitempty"`
 }
 
+const (
+	ReceiptFailureExecutionReverted = "execution_reverted"
+	ReceiptFailureOutOfGas          = "out_of_gas"
+	ReceiptFailureContractTrap      = "contract_trap"
+	ReceiptFailureResourceLimit     = "resource_limit"
+)
+
 type Receipt struct {
 	TxHash            string  `json:"tx_hash"`
 	Success           bool    `json:"success"`
+	FailureCode       string  `json:"failure_code,omitempty"`
 	Error             string  `json:"error,omitempty"`
 	GasUsed           uint64  `json:"gas_used"`
 	BaseFeePerGas     uint64  `json:"base_fee_per_gas,omitempty"`
@@ -213,6 +234,9 @@ func (h BlockHeader) SigningBytes() []byte {
 }
 
 type FinalitySignature struct {
+	ChainID   string `json:"chain_id"`
+	Height    uint64 `json:"height"`
+	BlockHash string `json:"block_hash"`
 	Validator string `json:"validator"`
 	Signature string `json:"signature"`
 }
@@ -231,6 +255,43 @@ type FinalityEquivocationEvidence struct {
 	FirstSignature  string `json:"first_signature"`
 	SecondBlockHash string `json:"second_block_hash"`
 	SecondSignature string `json:"second_signature"`
+}
+
+type finalityEquivocationIdentity struct {
+	ChainID         string `json:"chain_id"`
+	Validator       string `json:"validator"`
+	Height          uint64 `json:"height"`
+	FirstBlockHash  string `json:"first_block_hash"`
+	SecondBlockHash string `json:"second_block_hash"`
+}
+
+type finalityEquivocationOffenceIdentity struct {
+	ChainID   string `json:"chain_id"`
+	Validator string `json:"validator"`
+	Height    uint64 `json:"height"`
+}
+
+func FinalityEquivocationID(chainID string, validator string, height uint64, firstBlockHash string, secondBlockHash string) string {
+	if secondBlockHash < firstBlockHash {
+		firstBlockHash, secondBlockHash = secondBlockHash, firstBlockHash
+	}
+	return hash.MustHex(finalityEquivocationIdentity{
+		ChainID:         chainID,
+		Validator:       validator,
+		Height:          height,
+		FirstBlockHash:  firstBlockHash,
+		SecondBlockHash: secondBlockHash,
+	})
+}
+
+// FinalityEquivocationOffenceID identifies the single slashable offence at a
+// validator height, independently of which pair of conflicting votes proves it.
+func FinalityEquivocationOffenceID(chainID string, validator string, height uint64) string {
+	return hash.MustHex(finalityEquivocationOffenceIdentity{
+		ChainID:   chainID,
+		Validator: validator,
+		Height:    height,
+	})
 }
 
 type finalityVotePayload struct {
@@ -259,13 +320,13 @@ func (b Block) Hash() string {
 	return hash.MustHex(b.Header)
 }
 
-func GenesisBlock(chainID string, stateRoot string) Block {
+func GenesisBlock(chainID string, stateRoot string, genesisTimeUnix int64) Block {
 	return Block{
 		Header: BlockHeader{
 			ChainID:       chainID,
 			Height:        0,
 			ParentHash:    "",
-			TimeUnix:      0,
+			TimeUnix:      genesisTimeUnix,
 			Proposer:      "genesis",
 			GasLimit:      DefaultBlockGasLimit,
 			BaseFeePerGas: InitialBaseFeePerGas,

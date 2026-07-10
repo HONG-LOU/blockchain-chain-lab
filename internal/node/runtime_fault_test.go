@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"chainlab/internal/contracts"
@@ -17,14 +18,38 @@ import (
 type faultAfterExecutor struct {
 	calls  int
 	failAt int
+	fault  error
 }
 
 func (e *faultAfterExecutor) ExecuteWithContext(*state.Store, types.Transaction, core.ExecutionContext) (types.Receipt, error) {
 	e.calls++
 	if e.calls >= e.failAt {
+		if e.fault != nil {
+			return types.Receipt{}, e.fault
+		}
 		return types.Receipt{}, fmt.Errorf("injected engine failure: %w", contracts.ErrWasmRuntimeFault)
 	}
 	return types.Receipt{}, nil
+}
+
+func TestSubmitNativeRuntimeFaultHaltsNode(t *testing.T) {
+	n := newRuntimeFaultTestNode(t)
+	fault := fmt.Errorf("injected native failure: %w", contracts.ErrNativeRuntimeFault)
+	n.executor = &faultAfterExecutor{failAt: 1, fault: fault}
+	err := n.SubmitTx(types.Transaction{
+		From:     "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Nonce:    0,
+		GasLimit: 21_000,
+	})
+	if !errors.Is(err, contracts.ErrNativeRuntimeFault) {
+		t.Fatalf("submit error = %v", err)
+	}
+	if len(n.mempool) != 0 || len(n.queued) != 0 {
+		t.Fatal("native runtime fault mutated txpool")
+	}
+	if _, err := n.ProduceBlock(); !errors.Is(err, contracts.ErrNativeRuntimeFault) {
+		t.Fatalf("sticky halt error = %v", err)
+	}
 }
 
 func TestRuntimeFaultHaltIsStickyAcrossConsensusEntryPoints(t *testing.T) {
@@ -32,9 +57,9 @@ func TestRuntimeFaultHaltIsStickyAcrossConsensusEntryPoints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	n, err := New(Config{
+	n, err := NewDevelopment(Config{
 		ChainID:     "chainlab-local",
-		ProposerKey: key,
+		ProposerKey: key, GenesisTimeUnix: DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -60,6 +85,109 @@ func TestRuntimeFaultHaltIsStickyAcrossConsensusEntryPoints(t *testing.T) {
 	head := n.Head()
 	assertRuntimeFault("import", n.ImportBlock(head))
 	assertRuntimeFault("finality vote", n.SubmitFinalityVote(types.FinalitySignature{}))
+}
+
+func TestImportRejectsInvalidBlockSignatureBeforeFatalExecution(t *testing.T) {
+	n := newRuntimeFaultTestNode(t)
+	n.executor = &faultAfterExecutor{failAt: 1, fault: fmt.Errorf("injected state fault: %w", contracts.ErrNativeRuntimeFault)}
+	block := runtimeFaultEnvelopeBlock(t, n, false)
+
+	err := n.ImportBlock(block)
+	if err == nil || !strings.Contains(err.Error(), "invalid block signature") {
+		t.Fatalf("import error = %v", err)
+	}
+	if n.haltErr != nil {
+		t.Fatalf("unauthorized block halted node: %v", n.haltErr)
+	}
+	n.executor = &faultAfterExecutor{failAt: 100}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatalf("node did not remain live: %v", err)
+	}
+}
+
+func TestImportAuthorizedBlockFatalExecutionHaltsNode(t *testing.T) {
+	n := newRuntimeFaultTestNode(t)
+	contractAddress := "0xcccccccccccccccccccccccccccccccccccccccc"
+	n.state.SetBalance(n.proposer, 1_000_000)
+	n.state.SetCodeID(contractAddress, "counter.v1")
+	if err := n.state.SetStorage(contractAddress, "count", "corrupt"); err != nil {
+		t.Fatal(err)
+	}
+	n.genesisState = n.state.Snapshot()
+	genesis := types.GenesisBlock(n.chainID, n.state.Root(), n.genesisTimeUnix)
+	genesis.Header.GasLimit = n.blockGasLimit
+	genesis.Header.BaseFeePerGas = InitialBaseFeePerGas
+	n.blocks = []types.Block{genesis}
+	n.knownBlocks = map[string]types.Block{genesis.Hash(): genesis}
+	n.finalityLock = finalityLock{Height: 0, BlockHash: genesis.Hash()}
+	tx := signRuntimeFaultTestTx(t, n.proposerKey, types.Transaction{
+		ChainID:  n.chainID,
+		Type:     types.TxCall,
+		From:     n.proposer,
+		To:       contractAddress,
+		GasLimit: 100_000,
+		GasPrice: 1,
+		Payload:  map[string]string{"method": "increment"},
+	})
+	block := runtimeFaultEnvelopeBlockForTransaction(t, n, true, tx)
+
+	err := n.ImportBlock(block)
+	if !errors.Is(err, contracts.ErrContractStateFault) {
+		t.Fatalf("import error = %v", err)
+	}
+	if !errors.Is(n.haltErr, contracts.ErrContractStateFault) {
+		t.Fatalf("authorized consensus fault did not halt node: %v", n.haltErr)
+	}
+}
+
+func runtimeFaultEnvelopeBlock(t *testing.T, n *Node, authorized bool) types.Block {
+	tx := types.Transaction{ChainID: n.chainID, Type: types.TxTransfer, From: n.proposer, To: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", GasLimit: 1}
+	return runtimeFaultEnvelopeBlockForTransaction(t, n, authorized, tx)
+}
+
+func runtimeFaultEnvelopeBlockForTransaction(t *testing.T, n *Node, authorized bool, tx types.Transaction) types.Block {
+	t.Helper()
+	parent := n.Head()
+	baseFee := NextBaseFee(parent, n.blockGasLimit)
+	receipt := types.Receipt{
+		TxHash:            tx.Hash(),
+		Success:           true,
+		GasUsed:           1,
+		BaseFeePerGas:     baseFee,
+		EffectiveGasPrice: baseFee,
+		BaseFeeBurned:     baseFee,
+	}
+	block := types.Block{
+		Header: types.BlockHeader{
+			ChainID:       n.chainID,
+			Height:        parent.Header.Height + 1,
+			ParentHash:    parent.Hash(),
+			TimeUnix:      parent.Header.TimeUnix + 1,
+			Proposer:      n.proposer,
+			GasLimit:      parent.Header.GasLimit,
+			GasUsed:       receipt.GasUsed,
+			BaseFeePerGas: baseFee,
+			TxRoot:        types.TransactionRoot([]types.Transaction{tx}),
+			ReceiptRoot:   types.ReceiptRoot([]types.Receipt{receipt}),
+			StateRoot:     n.state.Root(),
+		},
+		Transactions: []types.Transaction{tx},
+		Receipts:     []types.Receipt{receipt},
+	}
+	key := n.proposerKey
+	if !authorized {
+		var err error
+		key, err = chaincrypto.GenerateKey()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	var err error
+	block.Signature, err = chaincrypto.Sign(key, block.Header.SigningBytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return block
 }
 
 func TestProducePersistenceFailureDoesNotAdvanceCanonicalState(t *testing.T) {
@@ -88,12 +216,12 @@ func TestImportPersistenceFailureDoesNotAdvanceCanonicalState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	config := Config{ChainID: "chainlab-local", ProposerKey: key}
-	producer, err := New(config)
+	config := Config{ChainID: "chainlab-local", ProposerKey: key, GenesisTimeUnix: DeterministicDevGenesisTimeUnix}
+	producer, err := NewDevelopment(config)
 	if err != nil {
 		t.Fatal(err)
 	}
-	follower, err := New(config)
+	follower, err := NewDevelopment(config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,12 +336,12 @@ func TestImportPromotionRuntimeFaultDoesNotAdvanceCanonicalState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	config := Config{ChainID: "chainlab-local", ProposerKey: key}
-	producer, err := New(config)
+	config := Config{ChainID: "chainlab-local", ProposerKey: key, GenesisTimeUnix: DeterministicDevGenesisTimeUnix}
+	producer, err := NewDevelopment(config)
 	if err != nil {
 		t.Fatal(err)
 	}
-	follower, err := New(config)
+	follower, err := NewDevelopment(config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,13 +384,13 @@ func TestImportDropsQueuedTransactionBelowCanonicalNonce(t *testing.T) {
 	config := Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{sender: 1_000_000},
+		GenesisBalance: map[string]uint64{sender: 1_000_000}, GenesisTimeUnix: DeterministicDevGenesisTimeUnix,
 	}
-	producer, err := New(config)
+	producer, err := NewDevelopment(config)
 	if err != nil {
 		t.Fatal(err)
 	}
-	follower, err := New(config)
+	follower, err := NewDevelopment(config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,10 +437,10 @@ func TestPendingReplacementPromotesNewlyAffordableQueuedTransaction(t *testing.T
 		t.Fatal(err)
 	}
 	sender := chaincrypto.AddressFromPrivateKey(key)
-	n, err := New(Config{
+	n, err := NewDevelopment(Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{sender: 150_000},
+		GenesisBalance: map[string]uint64{sender: 150_000}, GenesisTimeUnix: DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -372,7 +500,7 @@ func newRuntimeFaultTestNode(t *testing.T) *Node {
 	if err != nil {
 		t.Fatal(err)
 	}
-	n, err := New(Config{ChainID: "chainlab-local", ProposerKey: key})
+	n, err := NewDevelopment(Config{ChainID: "chainlab-local", ProposerKey: key, GenesisTimeUnix: DeterministicDevGenesisTimeUnix})
 	if err != nil {
 		t.Fatal(err)
 	}

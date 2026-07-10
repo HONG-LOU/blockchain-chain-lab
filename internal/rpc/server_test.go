@@ -35,10 +35,10 @@ func TestRPCHealthHeadAccountAndTx(t *testing.T) {
 	}
 	alice := chaincrypto.AddressFromPrivateKey(key)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -121,10 +121,10 @@ func TestEVMCompatibleJSONRPCSubset(t *testing.T) {
 	}
 	alice := chaincrypto.AddressFromPrivateKey(key)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -200,10 +200,10 @@ func TestJSONRPCBatchRequestsPreserveOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	alice := chaincrypto.AddressFromPrivateKey(key)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -260,9 +260,9 @@ func TestJSONRPCExposesClientAndNetworkProbeMethods(t *testing.T) {
 		t.Fatal(err)
 	}
 	proposer := chaincrypto.AddressFromPrivateKey(key)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:     "chainlab-local",
-		ProposerKey: key,
+		ProposerKey: key, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -303,10 +303,10 @@ func TestWebSocketEthSubscribeNewHeadsPublishesProducedBlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	alice := chaincrypto.AddressFromPrivateKey(key)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -372,10 +372,10 @@ func TestWebSocketEthSubscribeNewPendingTransactionsPublishesAcceptedTransaction
 		t.Fatal(err)
 	}
 	bob := chaincrypto.AddressFromPrivateKey(bobKey)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -447,10 +447,10 @@ func TestWebSocketEthSubscribeLogsPublishesMatchingContractLogs(t *testing.T) {
 		t.Fatal(err)
 	}
 	alice := chaincrypto.AddressFromPrivateKey(key)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -463,7 +463,7 @@ func TestWebSocketEthSubscribeLogsPublishesMatchingContractLogs(t *testing.T) {
 		Type:     types.TxDeploy,
 		From:     alice,
 		Nonce:    0,
-		GasLimit: 80_000,
+		GasLimit: 100_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"code_id": "counter.v1",
@@ -514,7 +514,7 @@ func TestWebSocketEthSubscribeLogsPublishesMatchingContractLogs(t *testing.T) {
 		From:     alice,
 		To:       counter,
 		Nonce:    1,
-		GasLimit: 50_000,
+		GasLimit: 60_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"method": "increment",
@@ -568,10 +568,10 @@ func TestEVMBlockHashAndIndexedTransactionReads(t *testing.T) {
 	alice := chaincrypto.AddressFromPrivateKey(key)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -650,11 +650,11 @@ func TestRPCExposesFeeMarketFields(t *testing.T) {
 	alice := chaincrypto.AddressFromPrivateKey(key)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
 		GenesisBalance: map[string]uint64{alice: 1_000_000},
-		BlockGasLimit:  42_000,
+		BlockGasLimit:  42_000, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -710,11 +710,11 @@ func TestRPCExposesFeeHistory(t *testing.T) {
 	alice := chaincrypto.AddressFromPrivateKey(key)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
 		GenesisBalance: map[string]uint64{alice: 1_000_000},
-		BlockGasLimit:  42_000,
+		BlockGasLimit:  42_000, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -786,13 +786,13 @@ func TestRPCSubmitsSponsoredUserOperation(t *testing.T) {
 	user := chaincrypto.AddressFromPrivateKey(userKey)
 	paymaster := chaincrypto.AddressFromPrivateKey(paymasterKey)
 	receiver := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:     "chainlab-local",
 		ProposerKey: paymasterKey,
 		GenesisBalance: map[string]uint64{
 			user:      100,
 			paymaster: 100_000,
-		},
+		}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -846,13 +846,13 @@ func TestRPCSubmitsSponsoredBatchUserOperationAndEstimatesGas(t *testing.T) {
 	paymaster := chaincrypto.AddressFromPrivateKey(paymasterKey)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:     "chainlab-local",
 		ProposerKey: paymasterKey,
 		GenesisBalance: map[string]uint64{
 			user:      30,
 			paymaster: 500_000,
-		},
+		}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -919,10 +919,10 @@ func TestRPCExposesSmartAccountSigner(t *testing.T) {
 	}
 	owner := chaincrypto.AddressFromPrivateKey(ownerKey)
 	receiver := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    ownerKey,
-		GenesisBalance: map[string]uint64{owner: 1_000_000},
+		GenesisBalance: map[string]uint64{owner: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -935,7 +935,7 @@ func TestRPCExposesSmartAccountSigner(t *testing.T) {
 		Type:     types.TxDeploy,
 		From:     owner,
 		Nonce:    0,
-		GasLimit: 80_000,
+		GasLimit: 100_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"code_id": contracts.AccountCodeID,
@@ -1008,10 +1008,10 @@ func TestRPCExposesMultisigAuthorizationCount(t *testing.T) {
 	ownerA := chaincrypto.AddressFromPrivateKey(ownerAKey)
 	ownerB := chaincrypto.AddressFromPrivateKey(ownerBKey)
 	receiver := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    ownerAKey,
-		GenesisBalance: map[string]uint64{ownerA: 1_000_000},
+		GenesisBalance: map[string]uint64{ownerA: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1024,7 +1024,7 @@ func TestRPCExposesMultisigAuthorizationCount(t *testing.T) {
 		Type:     types.TxDeploy,
 		From:     ownerA,
 		Nonce:    0,
-		GasLimit: 80_000,
+		GasLimit: 100_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"code_id":   contracts.MultisigCodeID,
@@ -1091,11 +1091,11 @@ func TestRPCExposesValidatorSet(t *testing.T) {
 		t.Fatal(err)
 	}
 	validator := chaincrypto.AddressFromPrivateKey(key)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
 		GenesisBalance: map[string]uint64{validator: 1_000_000},
-		Validators:     []string{validator},
+		Validators:     []string{validator}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1122,16 +1122,16 @@ func TestRPCExposesValidatorSet(t *testing.T) {
 	}
 }
 
-func TestRPCExposesGovernanceProposalAndParam(t *testing.T) {
+func TestRPCRejectsGovernanceUntilSnapshotVotingExists(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
 	alice := chaincrypto.AddressFromPrivateKey(key)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1139,124 +1139,32 @@ func TestRPCExposesGovernanceProposalAndParam(t *testing.T) {
 	server := httptest.NewServer(chainrpc.NewServer(n))
 	defer server.Close()
 
-	stake := signedRPCTransaction(t, key, types.Transaction{
-		ChainID:  "chainlab-local",
-		Type:     types.TxStake,
-		From:     alice,
-		Nonce:    0,
-		Value:    500,
-		GasLimit: 30_000,
-		GasPrice: 1,
-	})
-	if err := n.SubmitTx(stake); err != nil {
-		t.Fatal(err)
+	for _, txType := range []types.TxType{types.TxProposalSubmit, types.TxVote, types.TxProposalExecute} {
+		tx := signedRPCTransaction(t, key, types.Transaction{
+			ChainID:  "chainlab-local",
+			Type:     txType,
+			From:     alice,
+			Nonce:    0,
+			GasLimit: 35_000,
+			GasPrice: 1,
+		})
+		body, err := json.Marshal(tx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, err := http.Post(server.URL+"/tx", "application/json", bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		responseBody, readErr := io.ReadAll(response.Body)
+		response.Body.Close()
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if response.StatusCode != http.StatusBadRequest || !strings.Contains(string(responseBody), "voting-power snapshots") {
+			t.Fatalf("%s response = %d %s", txType, response.StatusCode, responseBody)
+		}
 	}
-	if _, err := n.ProduceBlock(); err != nil {
-		t.Fatal(err)
-	}
-
-	submit := signedRPCTransaction(t, key, types.Transaction{
-		ChainID:  "chainlab-local",
-		Type:     types.TxProposalSubmit,
-		From:     alice,
-		Nonce:    1,
-		GasLimit: 35_000,
-		GasPrice: 1,
-		Payload: map[string]string{
-			"title":         "Set governance quorum",
-			"description":   "Use majority quorum for local governance",
-			"kind":          "param.change",
-			"param":         "governance.quorum",
-			"value":         "majority",
-			"voting_period": "2",
-		},
-	})
-	if err := n.SubmitTx(submit); err != nil {
-		t.Fatal(err)
-	}
-	submitBlock, err := n.ProduceBlock()
-	if err != nil {
-		t.Fatal(err)
-	}
-	proposalID := submitBlock.Receipts[0].ProposalID
-
-	vote := signedRPCTransaction(t, key, types.Transaction{
-		ChainID:  "chainlab-local",
-		Type:     types.TxVote,
-		From:     alice,
-		Nonce:    2,
-		GasLimit: 25_000,
-		GasPrice: 1,
-		Payload: map[string]string{
-			"proposal": proposalID,
-			"choice":   "yes",
-		},
-	})
-	if err := n.SubmitTx(vote); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := n.ProduceBlock(); err != nil {
-		t.Fatal(err)
-	}
-
-	execute := signedRPCTransaction(t, key, types.Transaction{
-		ChainID:  "chainlab-local",
-		Type:     types.TxProposalExecute,
-		From:     alice,
-		Nonce:    3,
-		GasLimit: 35_000,
-		GasPrice: 1,
-		Payload: map[string]string{
-			"proposal": proposalID,
-		},
-	})
-	if err := n.SubmitTx(execute); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := n.ProduceBlock(); err != nil {
-		t.Fatal(err)
-	}
-
-	resp, err := http.Get(server.URL + "/proposal/" + proposalID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("proposal status = %d body = %s", resp.StatusCode, string(body))
-	}
-	var proposal types.Proposal
-	if err := json.NewDecoder(resp.Body).Decode(&proposal); err != nil {
-		t.Fatal(err)
-	}
-	if proposal.Status != types.ProposalStatusExecuted || proposal.Votes["yes"] != 500 {
-		t.Fatalf("proposal = %+v", proposal)
-	}
-
-	resp, err = http.Get(server.URL + "/param/governance.quorum")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("param status = %d body = %s", resp.StatusCode, string(body))
-	}
-	var param map[string]string
-	if err := json.NewDecoder(resp.Body).Decode(&param); err != nil {
-		t.Fatal(err)
-	}
-	if param["key"] != "governance.quorum" || param["value"] != "majority" {
-		t.Fatalf("param = %+v", param)
-	}
-
-	proposalResult := callRPC(t, server.URL, "chain_proposal", []any{proposalID})
-	proposalMap, ok := proposalResult.(map[string]any)
-	if !ok || proposalMap["status"] != string(types.ProposalStatusExecuted) {
-		t.Fatalf("rpc proposal = %#v", proposalResult)
-	}
-	assertRPCResult(t, server.URL, "chain_param", []any{"governance.quorum"}, "majority")
 }
 
 func TestRPCExposesSafeAndFinalizedHeads(t *testing.T) {
@@ -1265,10 +1173,10 @@ func TestRPCExposesSafeAndFinalizedHeads(t *testing.T) {
 		t.Fatal(err)
 	}
 	validator := chaincrypto.AddressFromPrivateKey(key)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{validator: 1_000_000},
+		GenesisBalance: map[string]uint64{validator: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1310,7 +1218,7 @@ func TestRPCExposesSafeAndFinalizedHeads(t *testing.T) {
 	if finality.SafeHeight != 3 || finality.SafeHash != blocks[2].Hash() || finality.SafeDepth != 1 {
 		t.Fatalf("safe finality = %+v", finality)
 	}
-	if finality.FinalizedHeight != 2 || finality.FinalizedHash != blocks[1].Hash() || finality.FinalizedDepth != 2 {
+	if finality.FinalizedHeight != 0 || finality.FinalizedDepth != 4 {
 		t.Fatalf("finalized finality = %+v", finality)
 	}
 
@@ -1319,7 +1227,7 @@ func TestRPCExposesSafeAndFinalizedHeads(t *testing.T) {
 	if !ok {
 		t.Fatalf("rpc finality type = %T", rpcFinality)
 	}
-	if rpcMap["finalized_height"] != float64(2) || rpcMap["safe_height"] != float64(3) {
+	if rpcMap["finalized_height"] != float64(0) || rpcMap["safe_height"] != float64(3) {
 		t.Fatalf("rpc finality = %#v", rpcMap)
 	}
 
@@ -1328,7 +1236,11 @@ func TestRPCExposesSafeAndFinalizedHeads(t *testing.T) {
 	if !ok {
 		t.Fatalf("finalized block type = %T", finalizedBlock)
 	}
-	if finalizedMap["number"] != "0x2" || finalizedMap["hash"] != blocks[1].Hash() {
+	genesis, ok := n.Block(0)
+	if !ok {
+		t.Fatal("genesis block is missing")
+	}
+	if finalizedMap["number"] != "0x0" || finalizedMap["hash"] != genesis.Hash() {
 		t.Fatalf("finalized block = %#v", finalizedMap)
 	}
 	safeBlock := callRPC(t, server.URL, "eth_getBlockByNumber", []any{"safe", false})
@@ -1357,11 +1269,11 @@ func TestRPCSendFinalityVoteCertifiesBlock(t *testing.T) {
 	validatorA := chaincrypto.AddressFromPrivateKey(keyA)
 	validatorB := chaincrypto.AddressFromPrivateKey(keyB)
 	validatorC := chaincrypto.AddressFromPrivateKey(keyC)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    keyA,
 		GenesisBalance: map[string]uint64{validatorA: 1_000_000},
-		Validators:     []string{validatorA, validatorB, validatorC},
+		Validators:     []string{validatorA, validatorB, validatorC}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1420,11 +1332,11 @@ func TestRPCExposesFinalityEquivocationEvidence(t *testing.T) {
 	validatorA := chaincrypto.AddressFromPrivateKey(keyA)
 	validatorB := chaincrypto.AddressFromPrivateKey(keyB)
 	validatorC := chaincrypto.AddressFromPrivateKey(keyC)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    keyA,
 		GenesisBalance: map[string]uint64{validatorA: 1_000_000},
-		Validators:     []string{validatorA, validatorB, validatorC},
+		Validators:     []string{validatorA, validatorB, validatorC}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1469,10 +1381,10 @@ func TestRPCExposesTxPoolAndPendingNonce(t *testing.T) {
 	}
 	alice := chaincrypto.AddressFromPrivateKey(key)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1526,10 +1438,10 @@ func TestRPCExposesQueuedTxPoolAndPromotesFutureNonceTransactions(t *testing.T) 
 	alice := chaincrypto.AddressFromPrivateKey(key)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1628,10 +1540,10 @@ func TestRPCTransactionLookupIncludesPendingTransactions(t *testing.T) {
 	}
 	alice := chaincrypto.AddressFromPrivateKey(key)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1678,10 +1590,10 @@ func TestRPCSendReplacementTransactionUpdatesTxPool(t *testing.T) {
 	alice := chaincrypto.AddressFromPrivateKey(key)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1774,10 +1686,10 @@ func TestRPCGetBlockReceiptsReturnsReceiptsForBlock(t *testing.T) {
 	}
 	alice := chaincrypto.AddressFromPrivateKey(key)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1832,10 +1744,10 @@ func TestRPCDebugTraceTransactionReturnsReceiptBackedTrace(t *testing.T) {
 	}
 	alice := chaincrypto.AddressFromPrivateKey(key)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1894,10 +1806,10 @@ func TestRPCSendRawTransactionSubmitsSignedTx(t *testing.T) {
 	}
 	alice := chaincrypto.AddressFromPrivateKey(key)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1934,10 +1846,10 @@ func TestRPCSendEthereumType2RawTransactionSubmitsTransfer(t *testing.T) {
 	}
 	alice := chaincrypto.AddressFromPrivateKey(key)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "0x7a69",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1980,10 +1892,10 @@ func TestRESTRawTransactionSubmitsSignedTx(t *testing.T) {
 	}
 	alice := chaincrypto.AddressFromPrivateKey(key)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2005,7 +1917,8 @@ func TestRESTRawTransactionSubmitsSignedTx(t *testing.T) {
 		t.Fatal(err)
 	}
 	if resp.StatusCode != http.StatusAccepted {
-		t.Fatalf("raw tx status = %d", resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("raw tx status = %d: %s", resp.StatusCode, body)
 	}
 	var result struct {
 		Hash string `json:"hash"`
@@ -2025,10 +1938,10 @@ func TestRESTEthereumType2RawTransactionSubmitsTransfer(t *testing.T) {
 	}
 	alice := chaincrypto.AddressFromPrivateKey(key)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "0x7a69",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2054,7 +1967,8 @@ func TestRESTEthereumType2RawTransactionSubmitsTransfer(t *testing.T) {
 		t.Fatal(err)
 	}
 	if resp.StatusCode != http.StatusAccepted {
-		t.Fatalf("raw tx status = %d", resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("raw tx status = %d: %s", resp.StatusCode, body)
 	}
 	var result struct {
 		Hash string `json:"hash"`
@@ -2080,10 +1994,10 @@ func TestRESTFaucetRequestsFundRecipientThroughMempool(t *testing.T) {
 	}
 	proposer := chaincrypto.AddressFromPrivateKey(key)
 	recipient := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{proposer: 1_000_000},
+		GenesisBalance: map[string]uint64{proposer: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2132,10 +2046,10 @@ func TestRPCFaucetRequestsFundRecipientThroughMempool(t *testing.T) {
 	}
 	proposer := chaincrypto.AddressFromPrivateKey(key)
 	recipient := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{proposer: 1_000_000},
+		GenesisBalance: map[string]uint64{proposer: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2175,10 +2089,10 @@ func TestExplorerRendersChainOverview(t *testing.T) {
 	}
 	alice := chaincrypto.AddressFromPrivateKey(key)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2240,10 +2154,10 @@ func TestExplorerRendersDetailPages(t *testing.T) {
 	}
 	alice := chaincrypto.AddressFromPrivateKey(key)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2302,10 +2216,10 @@ func TestExplorerRendersEventPages(t *testing.T) {
 		t.Fatal(err)
 	}
 	alice := chaincrypto.AddressFromPrivateKey(key)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2315,7 +2229,7 @@ func TestExplorerRendersEventPages(t *testing.T) {
 		Type:     types.TxDeploy,
 		From:     alice,
 		Nonce:    0,
-		GasLimit: 80_000,
+		GasLimit: 100_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"code_id": "counter.v1",
@@ -2337,7 +2251,7 @@ func TestExplorerRendersEventPages(t *testing.T) {
 		From:     alice,
 		To:       counter,
 		Nonce:    1,
-		GasLimit: 50_000,
+		GasLimit: 60_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"method": "increment",
@@ -2383,10 +2297,10 @@ func TestEthGetLogsFiltersContractEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	alice := chaincrypto.AddressFromPrivateKey(key)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2399,7 +2313,7 @@ func TestEthGetLogsFiltersContractEvents(t *testing.T) {
 		Type:     types.TxDeploy,
 		From:     alice,
 		Nonce:    0,
-		GasLimit: 80_000,
+		GasLimit: 100_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"code_id": "counter.v1",
@@ -2421,7 +2335,7 @@ func TestEthGetLogsFiltersContractEvents(t *testing.T) {
 		From:     alice,
 		To:       counter,
 		Nonce:    1,
-		GasLimit: 50_000,
+		GasLimit: 60_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"method": "increment",
@@ -2518,13 +2432,13 @@ func TestEthGetLogsIndexesAccountRecoveryEventsAtRecoveredAccount(t *testing.T) 
 	owner := chaincrypto.AddressFromPrivateKey(ownerKey)
 	guardian := chaincrypto.AddressFromPrivateKey(guardianKey)
 	newOwner := chaincrypto.AddressFromPrivateKey(newOwnerKey)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:     "chainlab-local",
 		ProposerKey: ownerKey,
 		GenesisBalance: map[string]uint64{
 			owner:    2_000_000,
 			guardian: 500_000,
-		},
+		}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2537,7 +2451,7 @@ func TestEthGetLogsIndexesAccountRecoveryEventsAtRecoveredAccount(t *testing.T) 
 		Type:     types.TxDeploy,
 		From:     owner,
 		Nonce:    0,
-		GasLimit: 80_000,
+		GasLimit: 100_000,
 		GasPrice: 1,
 		Payload:  map[string]string{"code_id": contracts.AccountCodeID, "owner": owner},
 	})
@@ -2628,10 +2542,10 @@ func TestEthLogFilterTracksIncrementalChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	alice := chaincrypto.AddressFromPrivateKey(key)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2644,7 +2558,7 @@ func TestEthLogFilterTracksIncrementalChanges(t *testing.T) {
 		Type:     types.TxDeploy,
 		From:     alice,
 		Nonce:    0,
-		GasLimit: 80_000,
+		GasLimit: 100_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"code_id": "counter.v1",
@@ -2676,7 +2590,7 @@ func TestEthLogFilterTracksIncrementalChanges(t *testing.T) {
 		From:     alice,
 		To:       counter,
 		Nonce:    1,
-		GasLimit: 50_000,
+		GasLimit: 60_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"method": "increment",
@@ -2710,7 +2624,7 @@ func TestEthLogFilterTracksIncrementalChanges(t *testing.T) {
 		From:     alice,
 		To:       counter,
 		Nonce:    2,
-		GasLimit: 50_000,
+		GasLimit: 60_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"method": "increment",
@@ -2752,9 +2666,9 @@ func TestEthBlockFilterTracksNewBlockHashes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:     "chainlab-local",
-		ProposerKey: key,
+		ProposerKey: key, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2809,10 +2723,10 @@ func TestEthPendingTransactionFilterTracksNewHashes(t *testing.T) {
 	}
 	alice := chaincrypto.AddressFromPrivateKey(key)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2875,10 +2789,10 @@ func TestEthCallAndEstimateGas(t *testing.T) {
 	}
 	alice := chaincrypto.AddressFromPrivateKey(key)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2891,7 +2805,7 @@ func TestEthCallAndEstimateGas(t *testing.T) {
 		Type:     types.TxDeploy,
 		From:     alice,
 		Nonce:    0,
-		GasLimit: 80_000,
+		GasLimit: 100_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"code_id": "counter.v1",
@@ -2913,7 +2827,7 @@ func TestEthCallAndEstimateGas(t *testing.T) {
 		From:     alice,
 		To:       counter,
 		Nonce:    1,
-		GasLimit: 50_000,
+		GasLimit: 60_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"method": "increment",
@@ -2951,7 +2865,7 @@ func TestEthCallAndEstimateGas(t *testing.T) {
 		Type:     types.TxDeploy,
 		From:     alice,
 		Nonce:    2,
-		GasLimit: 80_000,
+		GasLimit: 100_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"code_id": "token.v1",
@@ -3052,10 +2966,10 @@ func TestEthGetCodeAndStorageAt(t *testing.T) {
 		t.Fatal(err)
 	}
 	alice := chaincrypto.AddressFromPrivateKey(key)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -3068,7 +2982,7 @@ func TestEthGetCodeAndStorageAt(t *testing.T) {
 		Type:     types.TxDeploy,
 		From:     alice,
 		Nonce:    0,
-		GasLimit: 80_000,
+		GasLimit: 100_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"code_id": "counter.v1",
@@ -3112,10 +3026,10 @@ func TestRPCAndExplorerExposeDelegatedEOA(t *testing.T) {
 	}
 	alice := chaincrypto.AddressFromPrivateKey(key)
 	owner := chaincrypto.AddressFromPrivateKey(ownerKey)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -3190,21 +3104,21 @@ func TestRPCBroadcastsTransactionsToPeers(t *testing.T) {
 	alice := chaincrypto.AddressFromPrivateKey(key)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	genesisBalances := map[string]uint64{alice: 1_000_000}
-	peerNode, err := node.New(node.Config{
+	peerNode, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
 		GenesisBalance: genesisBalances,
-		Validators:     []string{alice},
+		Validators:     []string{alice}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	peerServer := httptest.NewServer(chainrpc.NewServer(peerNode))
 	defer peerServer.Close()
-	localNode, err := node.New(node.Config{
+	localNode, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: genesisBalances,
+		GenesisBalance: genesisBalances, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -3289,21 +3203,21 @@ func TestRPCBroadcastsProducedBlocksToPeers(t *testing.T) {
 	alice := chaincrypto.AddressFromPrivateKey(key)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	genesisBalances := map[string]uint64{alice: 1_000_000}
-	peerNode, err := node.New(node.Config{
+	peerNode, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
 		GenesisBalance: genesisBalances,
-		Validators:     []string{alice},
+		Validators:     []string{alice}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	peerServer := httptest.NewServer(chainrpc.NewServer(peerNode))
 	defer peerServer.Close()
-	localNode, err := node.New(node.Config{
+	localNode, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: genesisBalances,
+		GenesisBalance: genesisBalances, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -3349,22 +3263,22 @@ func TestRPCBroadcastsFinalityVotesToPeers(t *testing.T) {
 	validatorC := chaincrypto.AddressFromPrivateKey(keyC)
 	validators := []string{validatorA, validatorB, validatorC}
 	genesisBalances := map[string]uint64{validatorA: 1_000_000}
-	peerNode, err := node.New(node.Config{
+	peerNode, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    keyB,
 		GenesisBalance: genesisBalances,
-		Validators:     validators,
+		Validators:     validators, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	peerServer := httptest.NewServer(chainrpc.NewServer(peerNode))
 	defer peerServer.Close()
-	localNode, err := node.New(node.Config{
+	localNode, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    keyA,
 		GenesisBalance: genesisBalances,
-		Validators:     validators,
+		Validators:     validators, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -3482,8 +3396,8 @@ func signedEthereumType2TransferRaw(t *testing.T, key chaincrypto.PrivateKey, tx
 		testRLPBytes(nil),
 		testRLPList(),
 		testRLPUint(yParity),
-		testRLPBytes(signatureBytes[1:33]),
-		testRLPBytes(signatureBytes[33:65]),
+		testRLPBytes(bytes.TrimLeft(signatureBytes[1:33], "\x00")),
+		testRLPBytes(bytes.TrimLeft(signatureBytes[33:65], "\x00")),
 	)
 	raw := append([]byte{0x02}, signed...)
 	return "0x" + hex.EncodeToString(raw), hash.KeccakHex(raw)

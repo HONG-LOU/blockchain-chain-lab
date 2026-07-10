@@ -3,6 +3,7 @@
 /tmp/
 /data/
 /config/genesis.json
+*.validator-key.json
+/config/*-key.json
 *.exe
 *.test
-

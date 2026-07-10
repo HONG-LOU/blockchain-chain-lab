@@ -22,7 +22,7 @@ admission, bounded host resources, read isolation, and atomic direct calls.
 - [x] Add direct rollback tests for write-then-trap, host out-of-gas before
   mutation, failed native deploy/call, read isolation, and low-gas transaction
   calls.
-- [ ] Add executor and batch vectors for WASM deploy/call guest traps, a later
+- [x] Add executor and batch vectors for WASM deploy/call guest traps, a later
   operation failure, and failed-transaction fee/nonce semantics.
 - [x] Pin `github.com/bytecodealliance/wasmtime-go/v46 v46.0.1`; remove wazero.
 - [x] Build a single version-1 Wasmtime engine configuration with fuel, NaN
@@ -49,10 +49,12 @@ admission, bounded host resources, read isolation, and atomic direct calls.
   status and residual release/architecture gates.
 - [x] Run focused tests after each RED/GREEN slice, then full tests, race, vet,
   build, demo, deterministic replay, formatting, and diff checks.
-- [ ] Commit Linux/amd64 golden vectors and deterministic call-depth policy;
-  Windows remains a development target and arm64/macOS validators stay
-  unsupported until matching evidence exists.
-- [ ] Version and meter native-contract work, and define charged failed-
+- [x] Implement and test a maximum-64 acyclic direct-call-depth policy that is
+  independent of the native stack layout.
+- [ ] Commit Linux/amd64 golden block-replay vectors; Windows remains a
+  development target and arm64/macOS validators stay unsupported until
+  matching evidence exists.
+- [x] Version and meter native-contract work, and define charged failed-
   transaction receipts so signed OOG/trap calls cannot be replayed for free.
 - [x] Commit the implementation in reviewable commits.
 - [x] Write the Obsidian diary and ChainLab project record, commit them, and
@@ -62,7 +64,7 @@ admission, bounded host resources, read isolation, and atomic direct calls.
 
 - CosmWasm ABI or wasmd module compatibility.
 - WASI or nondeterministic host facilities.
-- Changing failed-transaction receipt and fee semantics.
+- Claiming Ethereum-compatible failed-transaction, gas, or receipt semantics.
 - Claiming multi-architecture validator support without native artifacts and
   matching replay vectors.
 - Claiming the chain is production-ready from this runtime milestone alone.

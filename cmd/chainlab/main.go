@@ -4,15 +4,20 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"chainlab/examples"
 	"chainlab/internal/consensus"
@@ -61,18 +66,31 @@ func (s *stringListFlag) Values() []string {
 }
 
 type GenesisFile struct {
-	ChainID    string            `json:"chain_id"`
-	Proposer   string            `json:"proposer"`
-	PrivateKey string            `json:"private_key"`
-	Validators []string          `json:"validators"`
-	Balances   map[string]uint64 `json:"balances"`
+	ChainID         string            `json:"chain_id"`
+	GenesisTimeUnix int64             `json:"genesis_time_unix"`
+	Validators      []string          `json:"validators"`
+	Balances        map[string]uint64 `json:"balances"`
 }
+
+type ValidatorKeyFile struct {
+	Address    string `json:"address"`
+	PrivateKey string `json:"private_key"`
+}
+
+const (
+	maxGenesisFileBytes      int64 = 4 * 1024 * 1024
+	maxValidatorKeyFileBytes int64 = 4 * 1024
+	maxJSONArtifactDepth           = 64
+)
 
 type nodeOptions struct {
 	Listen        string
+	Role          string
 	PrivateKeyHex string
+	KeyPath       string
 	GenesisPath   string
 	DataDir       string
+	Peers         []string
 }
 
 func main() {
@@ -83,14 +101,9 @@ func main() {
 
 	switch os.Args[1] {
 	case "keygen":
-		key, err := crypto.GenerateKey()
-		if err != nil {
+		if err := runKeygenCommand(os.Args[2:], os.Stdout); err != nil {
 			log.Fatal(err)
 		}
-		write(map[string]string{
-			"address":     crypto.AddressFromPrivateKey(key),
-			"private_key": crypto.PrivateKeyToHex(key),
-		})
 	case "demo":
 		summary, err := examples.RunDemo()
 		if err != nil {
@@ -115,39 +128,83 @@ func main() {
 	}
 }
 
-func initCommand(args []string) {
-	flags := flag.NewFlagSet("init", flag.ExitOnError)
-	out := flags.String("out", "", "optional genesis output file")
+func runKeygenCommand(args []string, out io.Writer) error {
+	if err := rejectDuplicateFlags(args, "out"); err != nil {
+		return err
+	}
+	flags := flag.NewFlagSet("keygen", flag.ContinueOnError)
+	keyPath := flags.String("out", "", "validator key output file")
 	if err := flags.Parse(args); err != nil {
-		log.Fatal(err)
+		return err
 	}
-	if *out == "" {
-		key, err := crypto.GenerateKey()
-		if err != nil {
-			log.Fatal(err)
-		}
-		write(GenesisFile{
-			ChainID:    "chainlab-local",
-			Proposer:   crypto.AddressFromPrivateKey(key),
-			PrivateKey: crypto.PrivateKeyToHex(key),
-			Validators: []string{crypto.AddressFromPrivateKey(key)},
-			Balances: map[string]uint64{
-				crypto.AddressFromPrivateKey(key): 1_000_000_000,
-			},
-		})
-		return
+	if flags.NArg() != 0 {
+		return errors.New("keygen does not accept positional arguments")
 	}
-	genesis, err := createGenesisFile(*out)
+	if strings.TrimSpace(*keyPath) == "" {
+		return errors.New("keygen requires --out so validator secrets are never written to standard output")
+	}
+	key, err := crypto.GenerateKey()
 	if err != nil {
+		return err
+	}
+	keyFile := ValidatorKeyFile{
+		Address:    crypto.AddressFromPrivateKey(key),
+		PrivateKey: crypto.PrivateKeyToHex(key),
+	}
+	raw, err := marshalJSONArtifact(keyFile)
+	if err != nil {
+		return err
+	}
+	if err := requireArtifactDirectory(*keyPath); err != nil {
+		return err
+	}
+	if _, err := createExclusiveArtifact(*keyPath, raw, 0o600); err != nil {
+		return fmt.Errorf("create validator key file: %w", err)
+	}
+	return writeTo(out, map[string]string{"address": keyFile.Address, "key_file": *keyPath})
+}
+
+func initCommand(args []string) {
+	if err := runInitCommand(args, os.Stdout); err != nil {
 		log.Fatal(err)
 	}
-	write(genesis)
+}
+
+func runInitCommand(args []string, out io.Writer) error {
+	if err := rejectDuplicateFlags(args, "out", "key-out"); err != nil {
+		return err
+	}
+	flags := flag.NewFlagSet("init", flag.ContinueOnError)
+	genesisPath := flags.String("out", "", "genesis output file")
+	keyPath := flags.String("key-out", "", "validator key output file")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("init does not accept positional arguments")
+	}
+	if strings.TrimSpace(*genesisPath) == "" {
+		return errors.New("init requires --out so validator secrets are never written to standard output")
+	}
+	resolvedKeyPath := *keyPath
+	if strings.TrimSpace(resolvedKeyPath) == "" {
+		resolvedKeyPath = defaultValidatorKeyPath(*genesisPath)
+	}
+	genesis, _, err := createGenesisFiles(*genesisPath, resolvedKeyPath)
+	if err != nil {
+		return err
+	}
+	return writeTo(out, genesis)
 }
 
 func nodeCommand(args []string) {
+	if err := rejectDuplicateFlags(args, "listen", "role", "key-file", "genesis", "data-dir"); err != nil {
+		log.Fatal(err)
+	}
 	flags := flag.NewFlagSet("node", flag.ExitOnError)
 	listen := flags.String("listen", ":8547", "HTTP listen address")
-	privateKeyHex := flags.String("private-key", "", "proposer private key")
+	role := flags.String("role", string(node.RoleValidator), "node role: validator or observer")
+	keyPath := flags.String("key-file", "", "validator key file")
 	genesisPath := flags.String("genesis", "", "genesis file path")
 	dataDir := flags.String("data-dir", "", "persistent chain data directory")
 	var peers peerListFlag
@@ -155,66 +212,123 @@ func nodeCommand(args []string) {
 	if err := flags.Parse(args); err != nil {
 		log.Fatal(err)
 	}
+	if flags.NArg() != 0 {
+		log.Fatal("node does not accept positional arguments")
+	}
 	config, err := buildNodeConfig(nodeOptions{
-		Listen:        *listen,
-		PrivateKeyHex: *privateKeyHex,
-		GenesisPath:   *genesisPath,
-		DataDir:       *dataDir,
+		Listen:      *listen,
+		Role:        *role,
+		KeyPath:     *keyPath,
+		GenesisPath: *genesisPath,
+		DataDir:     *dataDir,
+		Peers:       peers.Values(),
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
-	addr := crypto.AddressFromPrivateKey(config.ProposerKey)
 	n, err := node.New(config)
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("chainlab node listening on %s proposer=%s\n", *listen, addr)
-	log.Fatal(http.ListenAndServe(*listen, chainrpc.NewServerWithPeers(n, peers.Values())))
+	if config.Role == node.RoleValidator {
+		fmt.Printf("chainlab node listening on %s role=%s proposer=%s\n", *listen, config.Role, crypto.AddressFromPrivateKey(config.ProposerKey))
+	} else {
+		fmt.Printf("chainlab node listening on %s role=%s\n", *listen, config.Role)
+	}
+	server := &http.Server{
+		Addr:              *listen,
+		Handler:           chainrpc.NewServerWithPeers(n, peers.Values()),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
+	serveErr := server.ListenAndServe()
+	if closeErr := n.Close(); closeErr != nil {
+		serveErr = errors.Join(serveErr, fmt.Errorf("close node: %w", closeErr))
+	}
+	log.Fatal(serveErr)
 }
 
 func buildNodeConfig(options nodeOptions) (node.Config, error) {
-	chainID := "chainlab-local"
-	balances := make(map[string]uint64)
-	privateKeyHex := options.PrivateKeyHex
-	var validators []string
-	if options.GenesisPath != "" {
-		genesis, err := readGenesisFile(options.GenesisPath)
-		if err != nil {
-			return node.Config{}, err
-		}
-		chainID = genesis.ChainID
-		if privateKeyHex == "" {
-			privateKeyHex = genesis.PrivateKey
-		}
-		validators = genesis.Validators
-		balances = genesis.Balances
+	role := node.NodeRole(options.Role)
+	if role == "" {
+		role = node.RoleValidator
 	}
-	var key crypto.PrivateKey
-	var err error
-	if privateKeyHex == "" {
-		key, err = crypto.GenerateKey()
-	} else {
-		key, err = crypto.PrivateKeyFromHex(privateKeyHex)
+	if role != node.RoleValidator && role != node.RoleObserver {
+		return node.Config{}, fmt.Errorf("unsupported node role %q", options.Role)
 	}
+	if options.PrivateKeyHex != "" {
+		return node.Config{}, errors.New("node validator keys must use --key-file instead of --private-key")
+	}
+	if options.GenesisPath == "" {
+		return node.Config{}, errors.New("validator and observer nodes require a shared genesis file")
+	}
+	genesis, err := readGenesisFile(options.GenesisPath)
 	if err != nil {
 		return node.Config{}, err
 	}
-	addr := crypto.AddressFromPrivateKey(key)
-	if len(balances) == 0 {
-		balances[addr] = 1_000_000_000
+	var key crypto.PrivateKey
+	switch role {
+	case node.RoleValidator:
+		if options.KeyPath == "" {
+			return node.Config{}, errors.New("validator role requires --key-file")
+		}
+		key, err = readValidatorKeyFile(options.KeyPath)
+		if err != nil {
+			return node.Config{}, err
+		}
+		addr := crypto.AddressFromPrivateKey(key)
+		if !slices.Contains(genesis.Validators, addr) {
+			return node.Config{}, fmt.Errorf("node key address %s is not in the genesis validator set", addr)
+		}
+	case node.RoleObserver:
+		if options.KeyPath != "" {
+			return node.Config{}, errors.New("observer role must not configure --key-file")
+		}
 	}
 	return node.Config{
-		ChainID:        chainID,
-		ProposerKey:    key,
-		Validators:     validators,
-		GenesisBalance: balances,
-		DataDir:        options.DataDir,
+		Role:            role,
+		ChainID:         genesis.ChainID,
+		ProposerKey:     key,
+		Validators:      genesis.Validators,
+		GenesisBalance:  genesis.Balances,
+		GenesisTimeUnix: genesis.GenesisTimeUnix,
+		DataDir:         options.DataDir,
 	}, nil
 }
 
 func usage() {
 	fmt.Println("usage: chainlab <keygen|init|demo|node|faucet|tx|query|chain>")
+}
+
+func rejectDuplicateFlags(args []string, uniqueNames ...string) error {
+	unique := make(map[string]struct{}, len(uniqueNames))
+	for _, name := range uniqueNames {
+		unique[name] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(uniqueNames))
+	for _, argument := range args {
+		if argument == "--" {
+			break
+		}
+		if !strings.HasPrefix(argument, "-") || argument == "-" {
+			continue
+		}
+		name := strings.TrimLeft(argument, "-")
+		if separator := strings.IndexByte(name, '='); separator >= 0 {
+			name = name[:separator]
+		}
+		if _, guarded := unique[name]; !guarded {
+			continue
+		}
+		if _, duplicate := seen[name]; duplicate {
+			return fmt.Errorf("flag --%s may be specified only once", name)
+		}
+		seen[name] = struct{}{}
+	}
+	return nil
 }
 
 func faucetCommand(args []string, out io.Writer) {
@@ -781,16 +895,16 @@ func stakeCommand(args []string, out io.Writer) error {
 
 func proposalSubmitCommand(args []string, out io.Writer) error {
 	flags := flag.NewFlagSet("tx proposal-submit", flag.ContinueOnError)
-	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
-	privateKeyHex := flags.String("private-key", "", "proposer private key")
+	flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
+	flags.String("private-key", "", "proposer private key")
 	title := flags.String("title", "", "proposal title")
 	description := flags.String("description", "", "proposal description")
 	kind := flags.String("kind", "param.change", "proposal kind")
 	param := flags.String("param", "", "parameter key for param.change")
 	value := flags.String("value", "", "parameter value for param.change")
 	votingPeriod := flags.Uint64("voting-period", 2, "voting period in blocks")
-	gasLimit := flags.Uint64("gas-limit", 35_000, "gas limit")
-	gasPrice := flags.Uint64("gas-price", 1, "gas price")
+	flags.Uint64("gas-limit", 35_000, "gas limit")
+	flags.Uint64("gas-price", 1, "gas price")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -803,12 +917,7 @@ func proposalSubmitCommand(args []string, out io.Writer) error {
 	if *votingPeriod == 0 {
 		return fmt.Errorf("voting period must be positive")
 	}
-	payload := map[string]string{
-		"title":         *title,
-		"description":   *description,
-		"kind":          *kind,
-		"voting_period": strconv.FormatUint(*votingPeriod, 10),
-	}
+	_ = description
 	if *kind == "param.change" {
 		if strings.TrimSpace(*param) == "" {
 			return fmt.Errorf("param is required")
@@ -816,28 +925,18 @@ func proposalSubmitCommand(args []string, out io.Writer) error {
 		if strings.TrimSpace(*value) == "" {
 			return fmt.Errorf("value is required")
 		}
-		payload["param"] = *param
-		payload["value"] = *value
 	}
-	tx, err := buildSignedTransaction(*rpcURL, *privateKeyHex, types.TxProposalSubmit, "", 0, *gasLimit, *gasPrice, payload)
-	if err != nil {
-		return err
-	}
-	response, err := submitTransaction(*rpcURL, tx)
-	if err != nil {
-		return err
-	}
-	return writeTo(out, response)
+	return core.ErrGovernanceDisabled
 }
 
 func voteCommand(args []string, out io.Writer) error {
 	flags := flag.NewFlagSet("tx vote", flag.ContinueOnError)
-	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
-	privateKeyHex := flags.String("private-key", "", "voter private key")
+	flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
+	flags.String("private-key", "", "voter private key")
 	proposal := flags.String("proposal", "", "proposal id")
 	choice := flags.String("choice", "", "vote choice: yes, no, or abstain")
-	gasLimit := flags.Uint64("gas-limit", 25_000, "gas limit")
-	gasPrice := flags.Uint64("gas-price", 1, "gas price")
+	flags.Uint64("gas-limit", 25_000, "gas limit")
+	flags.Uint64("gas-price", 1, "gas price")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -847,44 +946,23 @@ func voteCommand(args []string, out io.Writer) error {
 	if strings.TrimSpace(*choice) == "" {
 		return fmt.Errorf("choice is required")
 	}
-	payload := map[string]string{
-		"proposal": *proposal,
-		"choice":   *choice,
-	}
-	tx, err := buildSignedTransaction(*rpcURL, *privateKeyHex, types.TxVote, "", 0, *gasLimit, *gasPrice, payload)
-	if err != nil {
-		return err
-	}
-	response, err := submitTransaction(*rpcURL, tx)
-	if err != nil {
-		return err
-	}
-	return writeTo(out, response)
+	return core.ErrGovernanceDisabled
 }
 
 func proposalExecuteCommand(args []string, out io.Writer) error {
 	flags := flag.NewFlagSet("tx proposal-execute", flag.ContinueOnError)
-	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
-	privateKeyHex := flags.String("private-key", "", "executor private key")
+	flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
+	flags.String("private-key", "", "executor private key")
 	proposal := flags.String("proposal", "", "proposal id")
-	gasLimit := flags.Uint64("gas-limit", 35_000, "gas limit")
-	gasPrice := flags.Uint64("gas-price", 1, "gas price")
+	flags.Uint64("gas-limit", 35_000, "gas limit")
+	flags.Uint64("gas-price", 1, "gas price")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if strings.TrimSpace(*proposal) == "" {
 		return fmt.Errorf("proposal is required")
 	}
-	payload := map[string]string{"proposal": *proposal}
-	tx, err := buildSignedTransaction(*rpcURL, *privateKeyHex, types.TxProposalExecute, "", 0, *gasLimit, *gasPrice, payload)
-	if err != nil {
-		return err
-	}
-	response, err := submitTransaction(*rpcURL, tx)
-	if err != nil {
-		return err
-	}
-	return writeTo(out, response)
+	return core.ErrGovernanceDisabled
 }
 
 func validatorJoinCommand(args []string, out io.Writer) error {
@@ -896,15 +974,12 @@ func validatorJoinCommand(args []string, out io.Writer) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	tx, err := buildSignedTransaction(*rpcURL, *privateKeyHex, types.TxValidatorJoin, "", 0, *gasLimit, *gasPrice, nil)
-	if err != nil {
-		return err
-	}
-	response, err := submitTransaction(*rpcURL, tx)
-	if err != nil {
-		return err
-	}
-	return writeTo(out, response)
+	_ = rpcURL
+	_ = privateKeyHex
+	_ = gasLimit
+	_ = gasPrice
+	_ = out
+	return errors.New("dynamic validator joins require a certified epoch transition and are disabled")
 }
 
 func validatorLeaveCommand(args []string, out io.Writer) error {
@@ -916,15 +991,12 @@ func validatorLeaveCommand(args []string, out io.Writer) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	tx, err := buildSignedTransaction(*rpcURL, *privateKeyHex, types.TxValidatorLeave, "", 0, *gasLimit, *gasPrice, nil)
-	if err != nil {
-		return err
-	}
-	response, err := submitTransaction(*rpcURL, tx)
-	if err != nil {
-		return err
-	}
-	return writeTo(out, response)
+	_ = rpcURL
+	_ = privateKeyHex
+	_ = gasLimit
+	_ = gasPrice
+	_ = out
+	return errors.New("dynamic validator leaves require a certified epoch transition and are disabled")
 }
 
 func validatorSlashCommand(args []string, out io.Writer) error {
@@ -932,8 +1004,11 @@ func validatorSlashCommand(args []string, out io.Writer) error {
 	rpcURL := flags.String("rpc", "http://127.0.0.1:8547", "RPC base URL")
 	privateKeyHex := flags.String("private-key", "", "reporter validator private key")
 	target := flags.String("target", "", "validator address to slash")
-	amount := flags.Uint64("amount", 0, "stake amount to slash")
-	evidence := flags.String("evidence", "", "evidence reference or summary")
+	height := flags.Uint64("height", 0, "equivocation block height")
+	firstBlockHash := flags.String("first-block-hash", "", "first conflicting block hash")
+	firstSignature := flags.String("first-signature", "", "target validator signature for the first block")
+	secondBlockHash := flags.String("second-block-hash", "", "second conflicting block hash")
+	secondSignature := flags.String("second-signature", "", "target validator signature for the second block")
 	gasLimit := flags.Uint64("gas-limit", 45_000, "gas limit")
 	gasPrice := flags.Uint64("gas-price", 1, "gas price")
 	if err := flags.Parse(args); err != nil {
@@ -942,16 +1017,19 @@ func validatorSlashCommand(args []string, out io.Writer) error {
 	if *target == "" {
 		return fmt.Errorf("target validator is required")
 	}
-	if *amount == 0 {
-		return fmt.Errorf("slash amount must be positive")
+	if *height == 0 {
+		return fmt.Errorf("equivocation height must be positive")
 	}
-	if strings.TrimSpace(*evidence) == "" {
-		return fmt.Errorf("evidence is required")
+	if *firstBlockHash == "" || *firstSignature == "" || *secondBlockHash == "" || *secondSignature == "" {
+		return fmt.Errorf("both conflicting block hashes and signatures are required")
 	}
 	payload := map[string]string{
-		"target":   *target,
-		"amount":   strconv.FormatUint(*amount, 10),
-		"evidence": *evidence,
+		"target":            *target,
+		"height":            strconv.FormatUint(*height, 10),
+		"first_block_hash":  *firstBlockHash,
+		"first_signature":   *firstSignature,
+		"second_block_hash": *secondBlockHash,
+		"second_signature":  *secondSignature,
 	}
 	tx, err := buildSignedTransaction(*rpcURL, *privateKeyHex, types.TxValidatorSlash, "", 0, *gasLimit, *gasPrice, payload)
 	if err != nil {
@@ -1178,6 +1256,10 @@ func buildSignedTransactionFromSpec(rpcURL string, privateKeyHex string, spec si
 	if err != nil {
 		return types.Transaction{}, err
 	}
+	gasPrice := spec.gasPrice
+	if spec.maxFeePerGas != 0 || spec.maxPriorityFeePerGas != 0 {
+		gasPrice = 0
+	}
 	tx := types.Transaction{
 		ChainID:              chainID,
 		Type:                 spec.txType,
@@ -1187,7 +1269,7 @@ func buildSignedTransactionFromSpec(rpcURL string, privateKeyHex string, spec si
 		Nonce:                nonce,
 		Value:                spec.value,
 		GasLimit:             spec.gasLimit,
-		GasPrice:             spec.gasPrice,
+		GasPrice:             gasPrice,
 		MaxFeePerGas:         spec.maxFeePerGas,
 		MaxPriorityFeePerGas: spec.maxPriorityFeePerGas,
 		Paymaster:            paymaster,
@@ -1795,48 +1877,430 @@ func writeTo(out io.Writer, value any) error {
 	return err
 }
 
-func createGenesisFile(path string) (GenesisFile, error) {
+type createdArtifact struct {
+	path string
+	info os.FileInfo
+}
+
+var errArtifactCommitUncertain = errors.New("artifact creation commit is uncertain")
+
+var genesisJSONFields = map[string]struct{}{
+	"chain_id":          {},
+	"genesis_time_unix": {},
+	"validators":        {},
+	"balances":          {},
+}
+
+var validatorKeyJSONFields = map[string]struct{}{
+	"address":     {},
+	"private_key": {},
+}
+
+func defaultValidatorKeyPath(genesisPath string) string {
+	extension := filepath.Ext(genesisPath)
+	if extension == "" {
+		return genesisPath + ".validator-key.json"
+	}
+	return strings.TrimSuffix(genesisPath, extension) + ".validator-key" + extension
+}
+
+func createGenesisFiles(genesisPath string, keyPath string) (GenesisFile, ValidatorKeyFile, error) {
+	return createGenesisFilesWithArtifactCreator(genesisPath, keyPath, createExclusiveArtifact)
+}
+
+func createGenesisFilesWithArtifactCreator(
+	genesisPath string,
+	keyPath string,
+	createArtifact func(string, []byte, os.FileMode) (createdArtifact, error),
+) (GenesisFile, ValidatorKeyFile, error) {
+	if strings.TrimSpace(genesisPath) == "" || strings.TrimSpace(keyPath) == "" {
+		return GenesisFile{}, ValidatorKeyFile{}, errors.New("genesis and validator key output paths are required")
+	}
+	same, err := sameArtifactPath(genesisPath, keyPath)
+	if err != nil {
+		return GenesisFile{}, ValidatorKeyFile{}, err
+	}
+	if same {
+		return GenesisFile{}, ValidatorKeyFile{}, errors.New("genesis and validator key output paths must differ")
+	}
+
 	key, err := crypto.GenerateKey()
 	if err != nil {
-		return GenesisFile{}, err
+		return GenesisFile{}, ValidatorKeyFile{}, err
 	}
-	proposer := crypto.AddressFromPrivateKey(key)
+	validator := crypto.AddressFromPrivateKey(key)
 	genesis := GenesisFile{
-		ChainID:    "chainlab-local",
-		Proposer:   proposer,
+		ChainID:         "chainlab-local",
+		GenesisTimeUnix: time.Now().Unix(),
+		Validators:      []string{validator},
+		Balances:        map[string]uint64{validator: 1_000_000_000},
+	}
+	validatorKey := ValidatorKeyFile{
+		Address:    validator,
 		PrivateKey: crypto.PrivateKeyToHex(key),
-		Validators: []string{proposer},
-		Balances:   map[string]uint64{proposer: 1_000_000_000},
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return GenesisFile{}, err
-	}
-	raw, err := json.MarshalIndent(genesis, "", "  ")
+	genesisRaw, err := marshalJSONArtifact(genesis)
 	if err != nil {
-		return GenesisFile{}, err
+		return GenesisFile{}, ValidatorKeyFile{}, err
 	}
-	if err := os.WriteFile(path, append(raw, '\n'), 0o600); err != nil {
-		return GenesisFile{}, err
+	keyRaw, err := marshalJSONArtifact(validatorKey)
+	if err != nil {
+		return GenesisFile{}, ValidatorKeyFile{}, err
 	}
-	return genesis, nil
+	for _, path := range []string{genesisPath, keyPath} {
+		if err := requireArtifactDirectory(path); err != nil {
+			return GenesisFile{}, ValidatorKeyFile{}, err
+		}
+	}
+	keyArtifact, err := createArtifact(keyPath, keyRaw, 0o600)
+	if err != nil {
+		return GenesisFile{}, ValidatorKeyFile{}, fmt.Errorf("create validator key file: %w", err)
+	}
+	if _, err := createArtifact(genesisPath, genesisRaw, 0o600); err != nil {
+		if errors.Is(err, errArtifactCommitUncertain) {
+			return GenesisFile{}, ValidatorKeyFile{}, fmt.Errorf("create genesis file: %w", err)
+		}
+		cleanupErr := removeCreatedArtifact(keyArtifact)
+		return GenesisFile{}, ValidatorKeyFile{}, errors.Join(
+			fmt.Errorf("create genesis file: %w", err),
+			cleanupErr,
+		)
+	}
+	return genesis, validatorKey, nil
 }
 
 func readGenesisFile(path string) (GenesisFile, error) {
-	raw, err := os.ReadFile(path)
+	raw, _, err := readBoundedArtifact(path, "genesis file", maxGenesisFileBytes, false)
 	if err != nil {
 		return GenesisFile{}, err
 	}
 	var genesis GenesisFile
-	if err := json.Unmarshal(raw, &genesis); err != nil {
+	if err := decodeStrictJSONObject(raw, "genesis file", genesisJSONFields, &genesis); err != nil {
 		return GenesisFile{}, err
 	}
-	if genesis.ChainID == "" || genesis.PrivateKey == "" {
-		return GenesisFile{}, fmt.Errorf("genesis requires chain_id and private_key")
+	if err := types.ValidateChainID(genesis.ChainID); err != nil {
+		return GenesisFile{}, fmt.Errorf("genesis chain id: %w", err)
+	}
+	if genesis.GenesisTimeUnix <= 0 {
+		return GenesisFile{}, errors.New("genesis requires a positive genesis_time_unix")
+	}
+	if genesis.GenesisTimeUnix > math.MaxInt64-consensus.MaxBlockTimeStepSeconds {
+		return GenesisFile{}, errors.New("genesis_time_unix leaves no valid block-time domain")
 	}
 	if genesis.Balances == nil {
-		genesis.Balances = make(map[string]uint64)
+		return GenesisFile{}, errors.New("genesis balances must be an object")
+	}
+	if len(genesis.Validators) == 0 {
+		return GenesisFile{}, errors.New("genesis requires a non-empty validators array")
+	}
+	if err := consensus.ValidateValidatorSet(genesis.Validators); err != nil {
+		return GenesisFile{}, fmt.Errorf("genesis validators: %w", err)
+	}
+	for address := range genesis.Balances {
+		normalized, err := crypto.NormalizeAddress(address)
+		if err != nil || normalized != address {
+			return GenesisFile{}, fmt.Errorf("genesis balance address %q is not canonically encoded", address)
+		}
 	}
 	return genesis, nil
+}
+
+func readValidatorKeyFile(path string) (crypto.PrivateKey, error) {
+	raw, _, err := readBoundedArtifact(path, "validator key file", maxValidatorKeyFileBytes, true)
+	if err != nil {
+		return nil, err
+	}
+	var keyFile ValidatorKeyFile
+	if err := decodeStrictJSONObject(raw, "validator key file", validatorKeyJSONFields, &keyFile); err != nil {
+		return nil, err
+	}
+	key, err := crypto.PrivateKeyFromHex(keyFile.PrivateKey)
+	if err != nil {
+		return nil, fmt.Errorf("validator key file contains an invalid private key: %w", err)
+	}
+	if keyFile.PrivateKey != crypto.PrivateKeyToHex(key) {
+		return nil, errors.New("validator key file private_key is not canonically encoded")
+	}
+	if isZeroPrivateKey(key) {
+		return nil, errors.New("validator key file private_key must not be zero")
+	}
+	normalized, err := crypto.NormalizeAddress(keyFile.Address)
+	if err != nil || normalized != keyFile.Address {
+		return nil, errors.New("validator key file address is not canonically encoded")
+	}
+	if derived := crypto.AddressFromPrivateKey(key); derived != keyFile.Address {
+		return nil, errors.New("validator key file address does not match private_key")
+	}
+	return key, nil
+}
+
+func readBoundedArtifact(path string, label string, maxBytes int64, private bool) ([]byte, os.FileInfo, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, nil, fmt.Errorf("%s path must be a regular file", label)
+	}
+	if private && runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+		return nil, nil, fmt.Errorf("%s permissions must not allow group or world access", label)
+	}
+	if info.Size() < 0 || info.Size() > maxBytes {
+		return nil, nil, fmt.Errorf("%s exceeds %d bytes", label, maxBytes)
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		return nil, nil, err
+	}
+	if int64(len(raw)) > maxBytes {
+		return nil, nil, fmt.Errorf("%s exceeds %d bytes", label, maxBytes)
+	}
+	return raw, info, nil
+}
+
+func isZeroPrivateKey(key crypto.PrivateKey) bool {
+	for _, value := range key.Serialize() {
+		if value != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func marshalJSONArtifact(value any) ([]byte, error) {
+	raw, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(raw, '\n'), nil
+}
+
+func sameArtifactPath(first string, second string) (bool, error) {
+	firstAbsolute, err := filepath.Abs(first)
+	if err != nil {
+		return false, err
+	}
+	secondAbsolute, err := filepath.Abs(second)
+	if err != nil {
+		return false, err
+	}
+	return strings.EqualFold(filepath.Clean(firstAbsolute), filepath.Clean(secondAbsolute)), nil
+}
+
+func requireArtifactDirectory(path string) error {
+	directory := filepath.Dir(path)
+	info, err := os.Stat(directory)
+	if err != nil {
+		return fmt.Errorf("artifact output directory %s must already exist: %w", directory, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("artifact output directory %s is not a directory", directory)
+	}
+	return nil
+}
+
+func createExclusiveArtifact(path string, raw []byte, mode os.FileMode) (createdArtifact, error) {
+	return createExclusiveArtifactWithDirectorySync(path, raw, mode, syncArtifactDirectory)
+}
+
+func createExclusiveArtifactWithDirectorySync(
+	path string,
+	raw []byte,
+	mode os.FileMode,
+	directorySync func(string) error,
+) (createdArtifact, error) {
+	directory := filepath.Dir(path)
+	file, err := os.CreateTemp(directory, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return createdArtifact{}, err
+	}
+	stagingPath := file.Name()
+	info, statErr := file.Stat()
+	if statErr != nil {
+		closeErr := file.Close()
+		removeErr := removeStagedArtifact(stagingPath, directory, directorySync)
+		return createdArtifact{}, errors.Join(statErr, closeErr, removeErr)
+	}
+	artifact := createdArtifact{path: path, info: info}
+	fail := func(cause error) (createdArtifact, error) {
+		closeErr := file.Close()
+		removeErr := removeStagedArtifact(stagingPath, directory, directorySync)
+		return createdArtifact{}, errors.Join(cause, closeErr, removeErr)
+	}
+	if err := file.Chmod(mode); err != nil {
+		return fail(err)
+	}
+	written, err := file.Write(raw)
+	if err != nil {
+		return fail(err)
+	}
+	if written != len(raw) {
+		return fail(io.ErrShortWrite)
+	}
+	if err := file.Sync(); err != nil {
+		return fail(err)
+	}
+	if err := file.Close(); err != nil {
+		removeErr := removeStagedArtifact(stagingPath, directory, directorySync)
+		return createdArtifact{}, errors.Join(err, removeErr)
+	}
+	if err := os.Link(stagingPath, path); err != nil {
+		removeErr := removeStagedArtifact(stagingPath, directory, directorySync)
+		return createdArtifact{}, errors.Join(err, removeErr)
+	}
+	if err := os.Remove(stagingPath); err != nil {
+		syncErr := directorySync(directory)
+		return artifact, errors.Join(
+			fmt.Errorf("%w after publishing %s: staging cleanup failed", errArtifactCommitUncertain, filepath.Base(path)),
+			err,
+			syncErr,
+		)
+	}
+	if err := directorySync(directory); err != nil {
+		return artifact, fmt.Errorf("%w after creating %s: %v", errArtifactCommitUncertain, filepath.Base(path), err)
+	}
+	return artifact, nil
+}
+
+func removeStagedArtifact(path string, directory string, directorySync func(string) error) error {
+	removeErr := os.Remove(path)
+	if errors.Is(removeErr, os.ErrNotExist) {
+		return nil
+	}
+	if removeErr != nil {
+		return removeErr
+	}
+	return directorySync(directory)
+}
+
+func removeCreatedArtifact(artifact createdArtifact) error {
+	return removeCreatedArtifactWithDirectorySync(artifact, syncArtifactDirectory)
+}
+
+func removeCreatedArtifactWithDirectorySync(artifact createdArtifact, directorySync func(string) error) error {
+	current, err := os.Stat(artifact.path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(artifact.info, current) {
+		return fmt.Errorf("refusing to remove replaced artifact %s", artifact.path)
+	}
+	if err := os.Remove(artifact.path); err != nil {
+		return err
+	}
+	if err := directorySync(filepath.Dir(artifact.path)); err != nil {
+		return fmt.Errorf("%w after removing %s: %v", errArtifactCommitUncertain, filepath.Base(artifact.path), err)
+	}
+	return nil
+}
+
+func decodeStrictJSONObject(raw []byte, label string, fields map[string]struct{}, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	seen := make(map[string]struct{}, len(fields))
+	if err := consumeStrictJSONValue(decoder, label, fields, seen, true, 0); err != nil {
+		return err
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return fmt.Errorf("%s must contain exactly one JSON value", label)
+		}
+		return fmt.Errorf("decode trailing %s data: %w", label, err)
+	}
+	for field := range fields {
+		if _, ok := seen[field]; !ok {
+			return fmt.Errorf("%s is missing required field %q", label, field)
+		}
+	}
+	typedDecoder := json.NewDecoder(bytes.NewReader(raw))
+	typedDecoder.DisallowUnknownFields()
+	if err := typedDecoder.Decode(target); err != nil {
+		return fmt.Errorf("decode %s: %w", label, err)
+	}
+	return nil
+}
+
+func consumeStrictJSONValue(
+	decoder *json.Decoder,
+	label string,
+	rootFields map[string]struct{},
+	rootSeen map[string]struct{},
+	isRoot bool,
+	depth int,
+) error {
+	if depth > maxJSONArtifactDepth {
+		return fmt.Errorf("%s exceeds maximum JSON depth %d", label, maxJSONArtifactDepth)
+	}
+	token, err := decoder.Token()
+	if err != nil {
+		return fmt.Errorf("decode %s: %w", label, err)
+	}
+	delimiter, isDelimiter := token.(json.Delim)
+	if isRoot && (!isDelimiter || delimiter != '{') {
+		return fmt.Errorf("%s must contain a JSON object", label)
+	}
+	if !isDelimiter {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		seen := make(map[string]struct{})
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return fmt.Errorf("decode %s object key: %w", label, err)
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return fmt.Errorf("%s object key must be a string", label)
+			}
+			if _, duplicate := seen[key]; duplicate {
+				return fmt.Errorf("%s contains duplicate key %q", label, key)
+			}
+			seen[key] = struct{}{}
+			if isRoot {
+				if _, allowed := rootFields[key]; !allowed {
+					return fmt.Errorf("%s contains unknown or non-canonical field %q", label, key)
+				}
+				rootSeen[key] = struct{}{}
+			}
+			if err := consumeStrictJSONValue(decoder, label, rootFields, rootSeen, false, depth+1); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil {
+			return fmt.Errorf("decode %s object: %w", label, err)
+		}
+		if closing != json.Delim('}') {
+			return fmt.Errorf("decode %s object: expected closing brace", label)
+		}
+	case '[':
+		for decoder.More() {
+			if err := consumeStrictJSONValue(decoder, label, rootFields, rootSeen, false, depth+1); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil {
+			return fmt.Errorf("decode %s array: %w", label, err)
+		}
+		if closing != json.Delim(']') {
+			return fmt.Errorf("decode %s array: expected closing bracket", label)
+		}
+	default:
+		return fmt.Errorf("decode %s: unexpected delimiter %q", label, delimiter)
+	}
+	return nil
 }
 
 func write(value any) {

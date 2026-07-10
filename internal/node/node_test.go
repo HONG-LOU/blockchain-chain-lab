@@ -24,14 +24,15 @@ func TestNodeSubmitsTxAndProducesBlock(t *testing.T) {
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 	n, err := node.New(node.Config{
+		Role:           node.RoleValidator,
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		Validators:     []string{alice},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	tx := types.Transaction{
 		ChainID:  "chainlab-local",
 		Type:     types.TxTransfer,
@@ -74,10 +75,10 @@ func TestNodeProducesSmartAccountTransaction(t *testing.T) {
 	}
 	owner := chaincrypto.AddressFromPrivateKey(ownerKey)
 	receiver := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    ownerKey,
-		GenesisBalance: map[string]uint64{owner: 1_000_000},
+		GenesisBalance: map[string]uint64{owner: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -88,7 +89,7 @@ func TestNodeProducesSmartAccountTransaction(t *testing.T) {
 		Type:     types.TxDeploy,
 		From:     owner,
 		Nonce:    0,
-		GasLimit: 80_000,
+		GasLimit: 100_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"code_id": contracts.AccountCodeID,
@@ -167,10 +168,10 @@ func TestNodeProducesMultisigAccountTransaction(t *testing.T) {
 	ownerA := chaincrypto.AddressFromPrivateKey(ownerAKey)
 	ownerB := chaincrypto.AddressFromPrivateKey(ownerBKey)
 	receiver := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    ownerAKey,
-		GenesisBalance: map[string]uint64{ownerA: 1_000_000},
+		GenesisBalance: map[string]uint64{ownerA: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -181,7 +182,7 @@ func TestNodeProducesMultisigAccountTransaction(t *testing.T) {
 		Type:     types.TxDeploy,
 		From:     ownerA,
 		Nonce:    0,
-		GasLimit: 80_000,
+		GasLimit: 100_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"code_id":   contracts.MultisigCodeID,
@@ -257,11 +258,11 @@ func TestNodeFeeMarketAdjustsBaseFeeAndRecordsGasUsed(t *testing.T) {
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
 
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
 		GenesisBalance: map[string]uint64{alice: 1_000_000},
-		BlockGasLimit:  42_000,
+		BlockGasLimit:  42_000, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -322,11 +323,11 @@ func TestNodeRejectsTransactionGasLimitAboveBlockLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	alice := chaincrypto.AddressFromPrivateKey(key)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
 		GenesisBalance: map[string]uint64{alice: 1_000_000},
-		BlockGasLimit:  42_000,
+		BlockGasLimit:  42_000, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -355,10 +356,10 @@ func TestNodeBoundsTransactionSizeAndQueuedNonceGap(t *testing.T) {
 		t.Fatal(err)
 	}
 	alice := chaincrypto.AddressFromPrivateKey(key)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -391,19 +392,18 @@ func TestNodeReadAPIsReturnDeepCopies(t *testing.T) {
 		t.Fatal(err)
 	}
 	alice := chaincrypto.AddressFromPrivateKey(key)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	tx := signedNodeTx(t, key, types.Transaction{
-		ChainID: "chainlab-local", Type: types.TxTransfer, From: alice,
-		To: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Nonce: 0,
-		Value: 1, GasLimit: 21_000, GasPrice: 1,
-		Payload: map[string]string{"marker": "original"},
+		ChainID: "chainlab-local", Type: types.TxDeploy, From: alice, Nonce: 0,
+		GasLimit: 100_000, GasPrice: 1,
+		Payload: map[string]string{"code_id": "counter.v1", "initial": "0", "marker": "original"},
 	})
 	if err := n.SubmitTx(tx); err != nil {
 		t.Fatal(err)
@@ -423,9 +423,9 @@ func TestNodeReadAPIsReturnDeepCopies(t *testing.T) {
 	}
 	txHash := produced.Transactions[0].Hash()
 	produced.Transactions[0].Payload["marker"] = "block-mutated"
-	produced.Receipts[0].Events[0].Attributes["from"] = "receipt-mutated"
+	produced.Receipts[0].Events[1].Attributes["count"] = "receipt-mutated"
 	head := n.Head()
-	if head.Transactions[0].Payload["marker"] != "original" || head.Receipts[0].Events[0].Attributes["from"] != alice {
+	if head.Transactions[0].Payload["marker"] != "original" || head.Receipts[0].Events[1].Attributes["count"] != "0" {
 		t.Fatalf("internal head was mutated through return value: %+v", head)
 	}
 	byHeight, ok := n.Block(head.Header.Height)
@@ -442,9 +442,9 @@ func TestNodeReadAPIsReturnDeepCopies(t *testing.T) {
 		t.Fatal("transaction record not found")
 	}
 	record.Transaction.Payload["marker"] = "record-mutated"
-	record.Receipt.Events[0].Attributes["from"] = "record-receipt-mutated"
+	record.Receipt.Events[1].Attributes["count"] = "record-receipt-mutated"
 	again, _ := n.Transaction(txHash)
-	if again.Transaction.Payload["marker"] != "original" || again.Receipt.Events[0].Attributes["from"] != alice {
+	if again.Transaction.Payload["marker"] != "original" || again.Receipt.Events[1].Attributes["count"] != "0" {
 		t.Fatalf("transaction record shared mutable data: %+v", again)
 	}
 }
@@ -457,11 +457,11 @@ func TestNodeProducesFittingMempoolPrefixAndRetainsRemainder(t *testing.T) {
 	alice := chaincrypto.AddressFromPrivateKey(key)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
 		GenesisBalance: map[string]uint64{alice: 1_000_000},
-		BlockGasLimit:  30_000,
+		BlockGasLimit:  30_000, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -512,11 +512,11 @@ func TestNodeDropsUnderpricedSuffixAfterBaseFeeRise(t *testing.T) {
 		t.Fatal(err)
 	}
 	alice := chaincrypto.AddressFromPrivateKey(key)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
 		GenesisBalance: map[string]uint64{alice: 1_000_000},
-		BlockGasLimit:  30_000,
+		BlockGasLimit:  30_000, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -569,13 +569,13 @@ func TestImportBlockRevalidatesConflictingPendingNonce(t *testing.T) {
 	config := node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	}
-	producer, err := node.New(config)
+	producer, err := node.NewDevelopment(config)
 	if err != nil {
 		t.Fatal(err)
 	}
-	observer, err := node.New(config)
+	observer, err := node.NewDevelopment(config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -625,13 +625,13 @@ func TestImportBlockRejectsProposerGasLimitOverride(t *testing.T) {
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
 		GenesisBalance: map[string]uint64{alice: 1_000_000},
-		BlockGasLimit:  42_000,
+		BlockGasLimit:  42_000, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	}
-	producer, err := node.New(config)
+	producer, err := node.NewDevelopment(config)
 	if err != nil {
 		t.Fatal(err)
 	}
-	observer, err := node.New(config)
+	observer, err := node.NewDevelopment(config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -658,13 +658,13 @@ func TestImportBlockRejectsTransactionGasLimitAboveBlockLimit(t *testing.T) {
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
 		GenesisBalance: map[string]uint64{alice: 1_000_000},
-		BlockGasLimit:  42_000,
+		BlockGasLimit:  42_000, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	}
-	producer, err := node.New(config)
+	producer, err := node.NewDevelopment(config)
 	if err != nil {
 		t.Fatal(err)
 	}
-	observer, err := node.New(config)
+	observer, err := node.NewDevelopment(config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -686,6 +686,8 @@ func TestImportBlockRejectsTransactionGasLimitAboveBlockLimit(t *testing.T) {
 	oversized = signedNodeTx(t, key, oversized)
 	block.Transactions[0] = oversized
 	block.Header.TxRoot = types.TransactionRoot(block.Transactions)
+	block.Receipts[0].TxHash = oversized.Hash()
+	block.Header.ReceiptRoot = types.ReceiptRoot(block.Receipts)
 	if err := consensus.SignBlock(key, &block); err != nil {
 		t.Fatal(err)
 	}
@@ -706,13 +708,13 @@ func TestNodeSponsoredTransferUsesPaymasterInBlock(t *testing.T) {
 	user := chaincrypto.AddressFromPrivateKey(userKey)
 	paymaster := chaincrypto.AddressFromPrivateKey(paymasterKey)
 	receiver := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:     "chainlab-local",
 		ProposerKey: paymasterKey,
 		GenesisBalance: map[string]uint64{
 			user:      100,
 			paymaster: 100_000,
-		},
+		}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -756,10 +758,10 @@ func TestNodeRejectsFeeCollectorDifferentFromProposer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = node.New(node.Config{
+	_, err = node.NewDevelopment(node.Config{
 		ChainID:      "chainlab-local",
 		ProposerKey:  key,
-		FeeCollector: "0xfee0000000000000000000000000000000000000",
+		FeeCollector: "0xfee0000000000000000000000000000000000000", GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err == nil || !strings.Contains(err.Error(), "must equal the block proposer") {
 		t.Fatalf("divergent fee collector error = %v", err)
@@ -774,10 +776,10 @@ func TestNodeBatchTransactionProducesSingleIndexedReceipt(t *testing.T) {
 	alice := chaincrypto.AddressFromPrivateKey(key)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -834,14 +836,17 @@ func TestNodePersistsChainStateAndTransactionIndex(t *testing.T) {
 	dataDir := t.TempDir()
 
 	first, err := node.New(node.Config{
+		Role:           node.RoleValidator,
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
+		Validators:     []string{alice},
 		GenesisBalance: map[string]uint64{alice: 1_000_000},
-		DataDir:        dataDir,
+		DataDir:        dataDir, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	registerTestNodeClose(t, first)
 
 	tx := types.Transaction{
 		ChainID:  "chainlab-local",
@@ -866,15 +871,19 @@ func TestNodePersistsChainStateAndTransactionIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	closeTestNode(t, first)
 	reloaded, err := node.New(node.Config{
+		Role:           node.RoleValidator,
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
+		Validators:     []string{alice},
 		GenesisBalance: map[string]uint64{alice: 1_000_000},
-		DataDir:        dataDir,
+		DataDir:        dataDir, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	registerTestNodeClose(t, reloaded)
 
 	if reloaded.Head().Hash() != block.Hash() {
 		t.Fatal("reloaded node should keep the committed head")
@@ -918,21 +927,24 @@ func TestNodePersistsAndExecutesPendingAccountRecoveryAfterRestart(t *testing.T)
 	genesisBalances := map[string]uint64{owner: 2_000_000, guardianA: 500_000, guardianB: 500_000}
 	dataDir := t.TempDir()
 	first, err := node.New(node.Config{
+		Role:           node.RoleValidator,
 		ChainID:        "chainlab-local",
 		ProposerKey:    ownerKey,
+		Validators:     []string{owner},
 		GenesisBalance: genesisBalances,
-		DataDir:        dataDir,
+		DataDir:        dataDir, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	registerTestNodeClose(t, first)
 
 	deploy := signedNodeTx(t, ownerKey, types.Transaction{
 		ChainID:  "chainlab-local",
 		Type:     types.TxDeploy,
 		From:     owner,
 		Nonce:    0,
-		GasLimit: 80_000,
+		GasLimit: 100_000,
 		GasPrice: 1,
 		Payload:  map[string]string{"code_id": contracts.AccountCodeID, "owner": owner},
 	})
@@ -984,15 +996,19 @@ func TestNodePersistsAndExecutesPendingAccountRecoveryAfterRestart(t *testing.T)
 	}
 	executeAfter := thresholdBlock.Header.Height + 2
 
+	closeTestNode(t, first)
 	reloaded, err := node.New(node.Config{
+		Role:           node.RoleValidator,
 		ChainID:        "chainlab-local",
 		ProposerKey:    ownerKey,
+		Validators:     []string{owner},
 		GenesisBalance: genesisBalances,
-		DataDir:        dataDir,
+		DataDir:        dataDir, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	registerTestNodeClose(t, reloaded)
 	recoveredAccount := reloaded.Account(account)
 	if recoveredAccount.Storage["recovery:pending_owner"] != newOwner || recoveredAccount.Storage["recovery:execute_after"] != strconv.FormatUint(executeAfter, 10) {
 		t.Fatalf("reloaded recovery state = %#v", recoveredAccount.Storage)
@@ -1031,21 +1047,24 @@ func TestNodeRebuildsEventIndexFromPersistedBlocks(t *testing.T) {
 	dataDir := t.TempDir()
 
 	first, err := node.New(node.Config{
+		Role:           node.RoleValidator,
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
+		Validators:     []string{alice},
 		GenesisBalance: map[string]uint64{alice: 1_000_000},
-		DataDir:        dataDir,
+		DataDir:        dataDir, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	registerTestNodeClose(t, first)
 
 	deploy := signedNodeTx(t, key, types.Transaction{
 		ChainID:  "chainlab-local",
 		Type:     types.TxDeploy,
 		From:     alice,
 		Nonce:    0,
-		GasLimit: 80_000,
+		GasLimit: 100_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"code_id": "counter.v1",
@@ -1067,7 +1086,7 @@ func TestNodeRebuildsEventIndexFromPersistedBlocks(t *testing.T) {
 		From:     alice,
 		To:       contract,
 		Nonce:    1,
-		GasLimit: 80_000,
+		GasLimit: 100_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"method": "increment",
@@ -1082,15 +1101,19 @@ func TestNodeRebuildsEventIndexFromPersistedBlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	closeTestNode(t, first)
 	reloaded, err := node.New(node.Config{
+		Role:           node.RoleValidator,
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
+		Validators:     []string{alice},
 		GenesisBalance: map[string]uint64{alice: 1_000_000},
-		DataDir:        dataDir,
+		DataDir:        dataDir, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	registerTestNodeClose(t, reloaded)
 
 	topic := hash.KeccakHex([]byte("counter.incremented"))
 	events := reloaded.Events(node.EventFilter{
@@ -1123,7 +1146,7 @@ func TestNodeRebuildsEventIndexFromPersistedBlocks(t *testing.T) {
 	}
 }
 
-func TestNodePersistsGovernanceProposalAndParam(t *testing.T) {
+func TestNodeRejectsGovernanceUntilSnapshotVotingExists(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
@@ -1131,111 +1154,50 @@ func TestNodePersistsGovernanceProposalAndParam(t *testing.T) {
 	alice := chaincrypto.AddressFromPrivateKey(key)
 	dataDir := t.TempDir()
 
-	first, err := node.New(node.Config{
+	config := node.Config{
+		Role:           node.RoleValidator,
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
+		Validators:     []string{alice},
 		GenesisBalance: map[string]uint64{alice: 1_000_000},
-		DataDir:        dataDir,
-	})
+		DataDir:        dataDir, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
+	}
+	first, err := node.New(config)
 	if err != nil {
 		t.Fatal(err)
 	}
+	registerTestNodeClose(t, first)
 
-	stake := signedNodeTx(t, key, types.Transaction{
-		ChainID:  "chainlab-local",
-		Type:     types.TxStake,
-		From:     alice,
-		Nonce:    0,
-		Value:    500,
-		GasLimit: 30_000,
-		GasPrice: 1,
-	})
-	if err := first.SubmitTx(stake); err != nil {
-		t.Fatal(err)
+	rootBefore := first.StateRoot()
+	headBefore := first.Head().Hash()
+	for _, txType := range []types.TxType{types.TxProposalSubmit, types.TxVote, types.TxProposalExecute} {
+		tx := signedNodeTx(t, key, types.Transaction{
+			ChainID:  "chainlab-local",
+			Type:     txType,
+			From:     alice,
+			Nonce:    0,
+			GasLimit: 35_000,
+			GasPrice: 1,
+		})
+		if err := first.SubmitTx(tx); err == nil || !strings.Contains(err.Error(), "voting-power snapshots") {
+			t.Fatalf("%s admission error = %v", txType, err)
+		}
 	}
-	if _, err := first.ProduceBlock(); err != nil {
-		t.Fatal(err)
+	if first.StateRoot() != rootBefore || first.Head().Hash() != headBefore {
+		t.Fatal("disabled governance transaction changed canonical state")
+	}
+	if pool := first.TxPool(); pool.PendingCount != 0 || pool.QueuedCount != 0 {
+		t.Fatalf("disabled governance entered txpool: %+v", pool)
 	}
 
-	submit := signedNodeTx(t, key, types.Transaction{
-		ChainID:  "chainlab-local",
-		Type:     types.TxProposalSubmit,
-		From:     alice,
-		Nonce:    1,
-		GasLimit: 35_000,
-		GasPrice: 1,
-		Payload: map[string]string{
-			"title":         "Enable majority quorum",
-			"kind":          "param.change",
-			"param":         "governance.quorum",
-			"value":         "majority",
-			"voting_period": "2",
-		},
-	})
-	if err := first.SubmitTx(submit); err != nil {
-		t.Fatal(err)
-	}
-	submitBlock, err := first.ProduceBlock()
+	closeTestNode(t, first)
+	reloaded, err := node.New(config)
 	if err != nil {
 		t.Fatal(err)
 	}
-	proposalID := submitBlock.Receipts[0].ProposalID
-	if proposalID == "" {
-		t.Fatalf("submit receipt = %+v", submitBlock.Receipts[0])
-	}
-
-	vote := signedNodeTx(t, key, types.Transaction{
-		ChainID:  "chainlab-local",
-		Type:     types.TxVote,
-		From:     alice,
-		Nonce:    2,
-		GasLimit: 25_000,
-		GasPrice: 1,
-		Payload: map[string]string{
-			"proposal": proposalID,
-			"choice":   "yes",
-		},
-	})
-	if err := first.SubmitTx(vote); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := first.ProduceBlock(); err != nil {
-		t.Fatal(err)
-	}
-
-	execute := signedNodeTx(t, key, types.Transaction{
-		ChainID:  "chainlab-local",
-		Type:     types.TxProposalExecute,
-		From:     alice,
-		Nonce:    3,
-		GasLimit: 35_000,
-		GasPrice: 1,
-		Payload: map[string]string{
-			"proposal": proposalID,
-		},
-	})
-	if err := first.SubmitTx(execute); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := first.ProduceBlock(); err != nil {
-		t.Fatal(err)
-	}
-
-	reloaded, err := node.New(node.Config{
-		ChainID:        "chainlab-local",
-		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
-		DataDir:        dataDir,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	proposal := reloaded.Proposal(proposalID)
-	if proposal.Status != types.ProposalStatusExecuted {
-		t.Fatalf("reloaded proposal = %+v", proposal)
-	}
-	if got := reloaded.Param("governance.quorum"); got != "majority" {
-		t.Fatalf("reloaded param = %q", got)
+	registerTestNodeClose(t, reloaded)
+	if reloaded.StateRoot() != rootBefore || reloaded.Head().Hash() != headBefore {
+		t.Fatal("restart changed state after rejected governance transactions")
 	}
 }
 
@@ -1248,14 +1210,17 @@ func TestNodePersistsUploadedWASMCode(t *testing.T) {
 	dataDir := t.TempDir()
 
 	first, err := node.New(node.Config{
+		Role:           node.RoleValidator,
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
+		Validators:     []string{alice},
 		GenesisBalance: map[string]uint64{alice: 1_000_000},
-		DataDir:        dataDir,
+		DataDir:        dataDir, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	registerTestNodeClose(t, first)
 
 	bytecode := contracts.WasmEchoCode()
 	upload := signedNodeTx(t, key, types.Transaction{
@@ -1302,15 +1267,19 @@ func TestNodePersistsUploadedWASMCode(t *testing.T) {
 	}
 	contract := deployBlock.Receipts[0].ContractAddress
 
+	closeTestNode(t, first)
 	reloaded, err := node.New(node.Config{
+		Role:           node.RoleValidator,
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
+		Validators:     []string{alice},
 		GenesisBalance: map[string]uint64{alice: 1_000_000},
-		DataDir:        dataDir,
+		DataDir:        dataDir, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	registerTestNodeClose(t, reloaded)
 	value, err := reloaded.ReadContract(alice, contract, "get", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1329,19 +1298,19 @@ func TestNodeImportsValidatedBlockFromPeer(t *testing.T) {
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	genesisBalances := map[string]uint64{alice: 1_000_000}
 
-	producer, err := node.New(node.Config{
+	producer, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: genesisBalances,
+		GenesisBalance: genesisBalances, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	follower, err := node.New(node.Config{
+	follower, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
 		GenesisBalance: genesisBalances,
-		Validators:     []string{alice},
+		Validators:     []string{alice}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1391,29 +1360,29 @@ func TestNodeReorgsToLongerImportedBranch(t *testing.T) {
 	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
 	genesisBalances := map[string]uint64{alice: 1_000_000}
 
-	branchA, err := node.New(node.Config{
+	branchA, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
 		GenesisBalance: genesisBalances,
-		Validators:     []string{alice},
+		Validators:     []string{alice}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	branchB, err := node.New(node.Config{
+	branchB, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
 		GenesisBalance: genesisBalances,
-		Validators:     []string{alice},
+		Validators:     []string{alice}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	follower, err := node.New(node.Config{
+	follower, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
 		GenesisBalance: genesisBalances,
-		Validators:     []string{alice},
+		Validators:     []string{alice}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1516,20 +1485,20 @@ func TestNodeProducesOnlyWhenLocalValidatorIsScheduled(t *testing.T) {
 	genesisBalances := map[string]uint64{validatorA: 1_000_000}
 	validators := []string{validatorA, validatorB}
 
-	nodeA, err := node.New(node.Config{
+	nodeA, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    keyA,
 		GenesisBalance: genesisBalances,
-		Validators:     validators,
+		Validators:     validators, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	nodeB, err := node.New(node.Config{
+	nodeB, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    keyB,
 		GenesisBalance: genesisBalances,
-		Validators:     validators,
+		Validators:     validators, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1561,7 +1530,7 @@ func TestNodeProducesOnlyWhenLocalValidatorIsScheduled(t *testing.T) {
 	}
 }
 
-func TestValidatorJoinUpdatesNextBlockScheduleAndPersists(t *testing.T) {
+func TestValidatorJoinAndLeaveAreRejectedAndFixedSetPersists(t *testing.T) {
 	keyA, err := chaincrypto.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
@@ -1570,82 +1539,95 @@ func TestValidatorJoinUpdatesNextBlockScheduleAndPersists(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	keyC, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
 	validatorA := chaincrypto.AddressFromPrivateKey(keyA)
 	validatorB := chaincrypto.AddressFromPrivateKey(keyB)
+	candidateC := chaincrypto.AddressFromPrivateKey(keyC)
 	genesisBalances := map[string]uint64{
 		validatorA: 1_000_000,
 		validatorB: 1_000_000,
+		candidateC: 1_000_000,
 	}
-	dataDirA := t.TempDir()
-	dataDirB := t.TempDir()
+	validators := []string{validatorA, validatorB}
+	dataDir := t.TempDir()
 
-	nodeA, err := node.New(node.Config{
+	n, err := node.New(node.Config{
+		Role:           node.RoleValidator,
 		ChainID:        "chainlab-local",
 		ProposerKey:    keyA,
 		GenesisBalance: genesisBalances,
-		Validators:     []string{validatorA},
-		DataDir:        dataDirA,
+		Validators:     validators,
+		DataDir:        dataDir, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	nodeB, err := node.New(node.Config{
-		ChainID:        "chainlab-local",
-		ProposerKey:    keyB,
-		GenesisBalance: genesisBalances,
-		Validators:     []string{validatorA},
-		DataDir:        dataDirB,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	registerTestNodeClose(t, n)
 
-	stake := signedNodeTx(t, keyB, types.Transaction{
-		ChainID:  "chainlab-local",
-		Type:     types.TxStake,
-		From:     validatorB,
-		Nonce:    0,
-		Value:    500,
-		GasLimit: 30_000,
-		GasPrice: 1,
-	})
-	join := signedNodeTx(t, keyB, types.Transaction{
+	join := signedNodeTx(t, keyC, types.Transaction{
 		ChainID:  "chainlab-local",
 		Type:     types.TxValidatorJoin,
-		From:     validatorB,
-		Nonce:    1,
+		From:     candidateC,
+		Nonce:    0,
 		GasLimit: 40_000,
 		GasPrice: 1,
 	})
-	if err := nodeA.SubmitTx(stake); err != nil {
-		t.Fatal(err)
+	leave := signedNodeTx(t, keyB, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxValidatorLeave,
+		From:     validatorB,
+		Nonce:    0,
+		GasLimit: 40_000,
+		GasPrice: 1,
+	})
+	rootBefore := n.StateRoot()
+	for name, tx := range map[string]types.Transaction{"join": join, "leave": leave} {
+		t.Run(name, func(t *testing.T) {
+			if err := n.SubmitTx(tx); err == nil || !strings.Contains(err.Error(), "certified epoch transition") {
+				t.Fatalf("validator %s admission error = %v", name, err)
+			}
+			pool := n.TxPool()
+			if pool.PendingCount != 0 || pool.QueuedCount != 0 {
+				t.Fatalf("rejected validator %s entered tx pool: %+v", name, pool)
+			}
+			if n.StateRoot() != rootBefore {
+				t.Fatalf("rejected validator %s changed state", name)
+			}
+		})
 	}
-	if err := nodeA.SubmitTx(join); err != nil {
-		t.Fatal(err)
-	}
-	block1, err := nodeA.ProduceBlock()
+
+	block1, err := n.ProduceBlock()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if block1.Header.Proposer != validatorA {
-		t.Fatalf("height 1 proposer = %q", block1.Header.Proposer)
+	if block1.Header.Proposer != validatorA || len(block1.Transactions) != 0 {
+		t.Fatalf("height 1 block = %+v", block1)
 	}
-	if _, err := nodeA.ProduceBlock(); err == nil {
-		t.Fatal("validator A should not produce height 2 after validator B joins")
+	if got := strings.Join(n.Validators(), ","); got != strings.Join(validators, ",") {
+		t.Fatalf("fixed validators before restart = %q", got)
 	}
 
-	if err := nodeB.ImportBlock(block1); err != nil {
-		t.Fatal(err)
-	}
+	closeTestNode(t, n)
 	reloadedB, err := node.New(node.Config{
+		Role:           node.RoleValidator,
 		ChainID:        "chainlab-local",
 		ProposerKey:    keyB,
 		GenesisBalance: genesisBalances,
-		Validators:     []string{validatorA},
-		DataDir:        dataDirB,
+		Validators:     validators,
+		DataDir:        dataDir, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	registerTestNodeClose(t, reloadedB)
+	if got := strings.Join(reloadedB.Validators(), ","); got != strings.Join(validators, ",") {
+		t.Fatalf("fixed validators after restart = %q", got)
+	}
+	if reloadedB.Account(candidateC).Nonce != 0 || reloadedB.Account(validatorB).Nonce != 0 {
+		t.Fatal("rejected validator membership transaction changed nonce across restart")
 	}
 	block2, err := reloadedB.ProduceBlock()
 	if err != nil {
@@ -1656,7 +1638,7 @@ func TestValidatorJoinUpdatesNextBlockScheduleAndPersists(t *testing.T) {
 	}
 }
 
-func TestValidatorLeaveUpdatesNextBlockScheduleAndPersists(t *testing.T) {
+func TestValidatorSlashClearsStakeWithoutChangingFixedSetAcrossRestart(t *testing.T) {
 	keyA, err := chaincrypto.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
@@ -1671,112 +1653,21 @@ func TestValidatorLeaveUpdatesNextBlockScheduleAndPersists(t *testing.T) {
 		validatorA: 1_000_000,
 		validatorB: 1_000_000,
 	}
-	dataDirA := t.TempDir()
-	dataDirB := t.TempDir()
+	validators := []string{validatorA, validatorB}
+	dataDir := t.TempDir()
 
-	nodeA, err := node.New(node.Config{
+	n, err := node.New(node.Config{
+		Role:           node.RoleValidator,
 		ChainID:        "chainlab-local",
 		ProposerKey:    keyA,
 		GenesisBalance: genesisBalances,
-		Validators:     []string{validatorA, validatorB},
-		DataDir:        dataDirA,
+		Validators:     validators,
+		DataDir:        dataDir, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	nodeB, err := node.New(node.Config{
-		ChainID:        "chainlab-local",
-		ProposerKey:    keyB,
-		GenesisBalance: genesisBalances,
-		Validators:     []string{validatorA, validatorB},
-		DataDir:        dataDirB,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	leave := signedNodeTx(t, keyB, types.Transaction{
-		ChainID:  "chainlab-local",
-		Type:     types.TxValidatorLeave,
-		From:     validatorB,
-		Nonce:    0,
-		GasLimit: 40_000,
-		GasPrice: 1,
-	})
-	if err := nodeA.SubmitTx(leave); err != nil {
-		t.Fatal(err)
-	}
-	block1, err := nodeA.ProduceBlock()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if block1.Header.Proposer != validatorA {
-		t.Fatalf("height 1 proposer = %q", block1.Header.Proposer)
-	}
-	if err := nodeB.ImportBlock(block1); err != nil {
-		t.Fatal(err)
-	}
-
-	reloadedA, err := node.New(node.Config{
-		ChainID:        "chainlab-local",
-		ProposerKey:    keyA,
-		GenesisBalance: genesisBalances,
-		Validators:     []string{validatorA, validatorB},
-		DataDir:        dataDirA,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	block2, err := reloadedA.ProduceBlock()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if block2.Header.Height != 2 || block2.Header.Proposer != validatorA {
-		t.Fatalf("height 2 block = %+v", block2.Header)
-	}
-	if _, err := nodeB.ProduceBlock(); err == nil {
-		t.Fatal("validator B should not produce after leaving")
-	}
-}
-
-func TestValidatorSlashUpdatesNextBlockScheduleAndPersists(t *testing.T) {
-	keyA, err := chaincrypto.GenerateKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	keyB, err := chaincrypto.GenerateKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	validatorA := chaincrypto.AddressFromPrivateKey(keyA)
-	validatorB := chaincrypto.AddressFromPrivateKey(keyB)
-	genesisBalances := map[string]uint64{
-		validatorA: 1_000_000,
-		validatorB: 1_000_000,
-	}
-	dataDirA := t.TempDir()
-	dataDirB := t.TempDir()
-
-	nodeA, err := node.New(node.Config{
-		ChainID:        "chainlab-local",
-		ProposerKey:    keyA,
-		GenesisBalance: genesisBalances,
-		Validators:     []string{validatorA, validatorB},
-		DataDir:        dataDirA,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	nodeB, err := node.New(node.Config{
-		ChainID:        "chainlab-local",
-		ProposerKey:    keyB,
-		GenesisBalance: genesisBalances,
-		Validators:     []string{validatorA, validatorB},
-		DataDir:        dataDirB,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	registerTestNodeClose(t, n)
 
 	stakeB := signedNodeTx(t, keyB, types.Transaction{
 		ChainID:  "chainlab-local",
@@ -1787,6 +1678,17 @@ func TestValidatorSlashUpdatesNextBlockScheduleAndPersists(t *testing.T) {
 		GasLimit: 30_000,
 		GasPrice: 1,
 	})
+	const evidenceHeight = uint64(4)
+	firstBlockHash := "0x" + strings.Repeat("55", 32)
+	secondBlockHash := "0x" + strings.Repeat("66", 32)
+	firstSignature, err := chaincrypto.Sign(keyB, types.FinalityVoteSigningBytes("chainlab-local", evidenceHeight, firstBlockHash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondSignature, err := chaincrypto.Sign(keyB, types.FinalityVoteSigningBytes("chainlab-local", evidenceHeight, secondBlockHash))
+	if err != nil {
+		t.Fatal(err)
+	}
 	slashB := signedNodeTx(t, keyA, types.Transaction{
 		ChainID:  "chainlab-local",
 		Type:     types.TxValidatorSlash,
@@ -1795,50 +1697,63 @@ func TestValidatorSlashUpdatesNextBlockScheduleAndPersists(t *testing.T) {
 		GasLimit: 45_000,
 		GasPrice: 1,
 		Payload: map[string]string{
-			"target":   validatorB,
-			"amount":   "500",
-			"evidence": "double-sign-height-4",
+			"target":            validatorB,
+			"height":            strconv.FormatUint(evidenceHeight, 10),
+			"first_block_hash":  firstBlockHash,
+			"first_signature":   firstSignature,
+			"second_block_hash": secondBlockHash,
+			"second_signature":  secondSignature,
 		},
 	})
-	if err := nodeA.SubmitTx(stakeB); err != nil {
+	if err := n.SubmitTx(stakeB); err != nil {
 		t.Fatal(err)
 	}
-	if err := nodeA.SubmitTx(slashB); err != nil {
+	if err := n.SubmitTx(slashB); err != nil {
 		t.Fatal(err)
 	}
-	block1, err := nodeA.ProduceBlock()
+	block1, err := n.ProduceBlock()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if block1.Header.Proposer != validatorA {
-		t.Fatalf("height 1 proposer = %q", block1.Header.Proposer)
+	if block1.Header.Proposer != validatorA || len(block1.Receipts) != 2 {
+		t.Fatalf("height 1 slash block = %+v", block1)
 	}
-	if err := nodeB.ImportBlock(block1); err != nil {
-		t.Fatal(err)
+	slashReceipt := block1.Receipts[1]
+	if !slashReceipt.Success || len(slashReceipt.Events) != 1 || slashReceipt.Events[0].Type != "validator.slashed" || slashReceipt.Events[0].Attributes["amount"] != "500" {
+		t.Fatalf("slash receipt = %+v", slashReceipt)
+	}
+	if got := n.StakeOf(validatorB); got != 0 {
+		t.Fatalf("validator B stake after slash = %d", got)
+	}
+	if got := strings.Join(n.Validators(), ","); got != strings.Join(validators, ",") {
+		t.Fatalf("slash changed fixed validator set before restart: %q", got)
 	}
 
-	reloadedA, err := node.New(node.Config{
+	closeTestNode(t, n)
+	reloadedB, err := node.New(node.Config{
+		Role:           node.RoleValidator,
 		ChainID:        "chainlab-local",
-		ProposerKey:    keyA,
+		ProposerKey:    keyB,
 		GenesisBalance: genesisBalances,
-		Validators:     []string{validatorA, validatorB},
-		DataDir:        dataDirA,
+		Validators:     validators,
+		DataDir:        dataDir, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if validators := reloadedA.Validators(); len(validators) != 1 || validators[0] != validatorA {
-		t.Fatalf("validators = %#v", validators)
+	registerTestNodeClose(t, reloadedB)
+	if got := reloadedB.StakeOf(validatorB); got != 0 {
+		t.Fatalf("validator B stake after restart = %d", got)
 	}
-	block2, err := reloadedA.ProduceBlock()
+	if got := strings.Join(reloadedB.Validators(), ","); got != strings.Join(validators, ",") {
+		t.Fatalf("slash changed fixed validator set after restart: %q", got)
+	}
+	block2, err := reloadedB.ProduceBlock()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if block2.Header.Height != 2 || block2.Header.Proposer != validatorA {
+	if block2.Header.Height != 2 || block2.Header.Proposer != validatorB {
 		t.Fatalf("height 2 block = %+v", block2.Header)
-	}
-	if _, err := nodeB.ProduceBlock(); err == nil {
-		t.Fatal("validator B should not produce after slashing removed it")
 	}
 }
 
@@ -1849,9 +1764,11 @@ func TestNodeImportKnownCanonicalBlockIsIdempotent(t *testing.T) {
 	}
 	validator := chaincrypto.AddressFromPrivateKey(key)
 	n, err := node.New(node.Config{
+		Role:           node.RoleValidator,
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{validator: 1_000_000},
+		Validators:     []string{validator},
+		GenesisBalance: map[string]uint64{validator: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1879,10 +1796,10 @@ func TestNodeFinalityUsesConservativeBlockDepths(t *testing.T) {
 		t.Fatal(err)
 	}
 	validator := chaincrypto.AddressFromPrivateKey(key)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{validator: 1_000_000},
+		GenesisBalance: map[string]uint64{validator: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1913,10 +1830,10 @@ func TestNodeFinalityUsesConservativeBlockDepths(t *testing.T) {
 	if finality.SafeHeight != 3 || finality.SafeHash != blocks[2].Hash() {
 		t.Fatalf("safe finality = %+v, want height 3 hash %s", finality, blocks[2].Hash())
 	}
-	if finality.FinalizedHeight != 2 || finality.FinalizedHash != blocks[1].Hash() {
-		t.Fatalf("finalized finality = %+v, want height 2 hash %s", finality, blocks[1].Hash())
+	if finality.FinalizedHeight != 0 || finality.FinalizedHash != genesis.Hash() {
+		t.Fatalf("uncertified finality = %+v", finality)
 	}
-	if finality.SafeDepth != 1 || finality.FinalizedDepth != 2 {
+	if finality.SafeDepth != 1 || finality.FinalizedDepth != 4 {
 		t.Fatalf("depths = safe %d finalized %d", finality.SafeDepth, finality.FinalizedDepth)
 	}
 }
@@ -1940,22 +1857,24 @@ func TestNodeFinalityUsesBFTCertificateWhenQuorumVotesCommitBlock(t *testing.T) 
 	validators := []string{validatorA, validatorB, validatorC}
 	dataDir := t.TempDir()
 	n, err := node.New(node.Config{
+		Role:           node.RoleValidator,
 		ChainID:        "chainlab-local",
 		ProposerKey:    keyA,
 		GenesisBalance: map[string]uint64{validatorA: 1_000_000},
 		Validators:     validators,
-		DataDir:        dataDir,
+		DataDir:        dataDir, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	registerTestNodeClose(t, n)
 
 	block, err := n.ProduceBlock()
 	if err != nil {
 		t.Fatal(err)
 	}
 	before := n.Finality()
-	if before.CertifiedHeight != 0 || before.FinalizedSource != "depth_fallback" {
+	if before.CertifiedHeight != 0 || before.FinalizedSource != "genesis_without_certificate" {
 		t.Fatalf("finality before votes = %+v", before)
 	}
 
@@ -1990,16 +1909,19 @@ func TestNodeFinalityUsesBFTCertificateWhenQuorumVotesCommitBlock(t *testing.T) 
 		t.Fatalf("certificate summary = %+v", finality)
 	}
 
+	closeTestNode(t, n)
 	reloaded, err := node.New(node.Config{
+		Role:           node.RoleValidator,
 		ChainID:        "chainlab-local",
 		ProposerKey:    keyA,
 		GenesisBalance: map[string]uint64{validatorA: 1_000_000},
 		Validators:     validators,
-		DataDir:        dataDir,
+		DataDir:        dataDir, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	registerTestNodeClose(t, reloaded)
 	reloadedFinality := reloaded.Finality()
 	if reloadedFinality.FinalizedHeight != block.Header.Height || reloadedFinality.FinalizedSource != "bft_certificate" {
 		t.Fatalf("reloaded finality = %+v", reloadedFinality)
@@ -2025,15 +1947,17 @@ func TestNodeRecordsFinalityEquivocationEvidence(t *testing.T) {
 	validators := []string{validatorA, validatorB, validatorC}
 	dataDir := t.TempDir()
 	n, err := node.New(node.Config{
+		Role:           node.RoleValidator,
 		ChainID:        "chainlab-local",
 		ProposerKey:    keyA,
 		GenesisBalance: map[string]uint64{validatorA: 1_000_000},
 		Validators:     validators,
-		DataDir:        dataDir,
+		DataDir:        dataDir, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	registerTestNodeClose(t, n)
 
 	blockA1, err := n.ProduceBlock()
 	if err != nil {
@@ -2086,16 +2010,19 @@ func TestNodeRecordsFinalityEquivocationEvidence(t *testing.T) {
 		t.Fatalf("evidence signatures = %+v", got)
 	}
 
+	closeTestNode(t, n)
 	reloaded, err := node.New(node.Config{
+		Role:           node.RoleValidator,
 		ChainID:        "chainlab-local",
 		ProposerKey:    keyA,
 		GenesisBalance: map[string]uint64{validatorA: 1_000_000},
 		Validators:     validators,
-		DataDir:        dataDir,
+		DataDir:        dataDir, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	registerTestNodeClose(t, reloaded)
 	if reloadedEvidence := reloaded.FinalityEvidence(); len(reloadedEvidence) != 1 || reloadedEvidence[0].SecondBlockHash != blockB1.Hash() {
 		t.Fatalf("reloaded evidence = %+v", reloadedEvidence)
 	}
@@ -2121,24 +2048,28 @@ func TestNodeAutoSlashesFinalityEquivocationEvidence(t *testing.T) {
 		validatorB: 1_000_000,
 	}
 
-	producerA, err := node.New(node.Config{
+	producerA, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    keyA,
 		GenesisBalance: genesisBalances,
-		Validators:     validators,
+		Validators:     validators, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	observerB, err := node.New(node.Config{
+	observerConfig := node.Config{
+		Role:           node.RoleValidator,
 		ChainID:        "chainlab-local",
 		ProposerKey:    keyB,
 		GenesisBalance: genesisBalances,
 		Validators:     validators,
-	})
+		DataDir:        t.TempDir(), GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
+	}
+	observerB, err := node.New(observerConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
+	registerTestNodeClose(t, observerB)
 
 	stakeA := signedNodeTx(t, keyA, types.Transaction{
 		ChainID:  "chainlab-local",
@@ -2203,11 +2134,27 @@ func TestNodeAutoSlashesFinalityEquivocationEvidence(t *testing.T) {
 	if slashTx.Type != types.TxValidatorSlash || slashTx.From != validatorB {
 		t.Fatalf("auto slash tx = %+v", slashTx)
 	}
-	if slashTx.Payload["target"] != validatorA || slashTx.Payload["amount"] != "500" || !strings.Contains(slashTx.Payload["evidence"], blockB2.Hash()) {
+	if slashTx.Payload["target"] != validatorA ||
+		slashTx.Payload["height"] != "2" ||
+		slashTx.Payload["first_block_hash"] != blockA2.Hash() ||
+		slashTx.Payload["first_signature"] != voteA2.Signature ||
+		slashTx.Payload["second_block_hash"] != blockB2.Hash() ||
+		slashTx.Payload["second_signature"] != voteB2.Signature {
 		t.Fatalf("auto slash payload = %+v", slashTx.Payload)
 	}
 	if !chaincrypto.Verify(validatorB, slashTx.SigningBytes(), slashTx.Signature) {
 		t.Fatal("auto slash tx should be signed by local validator")
+	}
+
+	closeTestNode(t, observerB)
+	observerB, err = node.New(observerConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registerTestNodeClose(t, observerB)
+	reloadedPool := observerB.Mempool()
+	if len(reloadedPool) != 1 || reloadedPool[0].Type != types.TxValidatorSlash {
+		t.Fatalf("reloaded auto slash mempool = %#v", reloadedPool)
 	}
 
 	slashBlock, err := observerB.ProduceBlock()
@@ -2220,7 +2167,7 @@ func TestNodeAutoSlashesFinalityEquivocationEvidence(t *testing.T) {
 	if got := observerB.StakeOf(validatorA); got != 0 {
 		t.Fatalf("validator A stake after auto slash = %d", got)
 	}
-	if validators := observerB.Validators(); len(validators) != 1 || validators[0] != validatorB {
+	if validators := observerB.Validators(); len(validators) != 2 || validators[0] != validatorA || validators[1] != validatorB {
 		t.Fatalf("validators after auto slash = %#v", validators)
 	}
 }
@@ -2232,10 +2179,10 @@ func TestNodePendingAccountIncludesMempoolTransactions(t *testing.T) {
 	}
 	alice := chaincrypto.AddressFromPrivateKey(key)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2280,10 +2227,10 @@ func TestNodeQueuesFutureNonceTransactionsAndPromotesWhenGapFills(t *testing.T) 
 	alice := chaincrypto.AddressFromPrivateKey(key)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2365,10 +2312,10 @@ func TestNodeReplacesQueuedTransactionWithHigherFeeSameNonce(t *testing.T) {
 	alice := chaincrypto.AddressFromPrivateKey(key)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2430,18 +2377,18 @@ func TestNodePromotesQueuedTransactionsAfterImportedBlockAdvancesNonce(t *testin
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
 	genesis := map[string]uint64{alice: 1_000_000}
-	producer, err := node.New(node.Config{
+	producer, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: genesis,
+		GenesisBalance: genesis, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	follower, err := node.New(node.Config{
+	follower, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: genesis,
+		GenesisBalance: genesis, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2507,10 +2454,10 @@ func TestNodeReplacesPendingTransactionWithHigherFeeSameNonce(t *testing.T) {
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
 	dave := "0xdddddddddddddddddddddddddddddddddddddddd"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2598,10 +2545,10 @@ func TestNodeRejectsUnderpricedPendingReplacement(t *testing.T) {
 	alice := chaincrypto.AddressFromPrivateKey(key)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2649,10 +2596,10 @@ func TestNodeEIP1559ReplacementRequiresBothFeeCapsBumped(t *testing.T) {
 	alice := chaincrypto.AddressFromPrivateKey(key)
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	carol := "0xcccccccccccccccccccccccccccccccccccccccc"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{alice: 1_000_000},
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2715,10 +2662,10 @@ func TestNodeFaucetRequestsSignedTransferThroughMempool(t *testing.T) {
 	}
 	proposer := chaincrypto.AddressFromPrivateKey(key)
 	recipient := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: map[string]uint64{proposer: 1_000_000},
+		GenesisBalance: map[string]uint64{proposer: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2775,14 +2722,14 @@ func TestNodeRejectsCrossGuardianRecoveryReplacement(t *testing.T) {
 	guardianA := chaincrypto.AddressFromPrivateKey(guardianAKey)
 	guardianB := chaincrypto.AddressFromPrivateKey(guardianBKey)
 	newOwner := chaincrypto.AddressFromPrivateKey(newOwnerKey)
-	n, err := node.New(node.Config{
+	n, err := node.NewDevelopment(node.Config{
 		ChainID:     "chainlab-local",
 		ProposerKey: ownerKey,
 		GenesisBalance: map[string]uint64{
 			owner:     2_000_000,
 			guardianA: 500_000,
 			guardianB: 500_000,
-		},
+		}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2793,7 +2740,7 @@ func TestNodeRejectsCrossGuardianRecoveryReplacement(t *testing.T) {
 		Type:     types.TxDeploy,
 		From:     owner,
 		Nonce:    0,
-		GasLimit: 80_000,
+		GasLimit: 100_000,
 		GasPrice: 1,
 		Payload:  map[string]string{"code_id": contracts.AccountCodeID, "owner": owner},
 	})
@@ -2944,19 +2891,19 @@ func TestNodeRejectsImportedBlockWithBadStateRoot(t *testing.T) {
 	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	genesisBalances := map[string]uint64{alice: 1_000_000}
 
-	producer, err := node.New(node.Config{
+	producer, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
-		GenesisBalance: genesisBalances,
+		GenesisBalance: genesisBalances, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	follower, err := node.New(node.Config{
+	follower, err := node.NewDevelopment(node.Config{
 		ChainID:        "chainlab-local",
 		ProposerKey:    key,
 		GenesisBalance: genesisBalances,
-		Validators:     []string{alice},
+		Validators:     []string{alice}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
 	})
 	if err != nil {
 		t.Fatal(err)

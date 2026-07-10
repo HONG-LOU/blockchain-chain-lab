@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -23,37 +22,57 @@ import (
 )
 
 type Config struct {
-	ChainID        string
-	ProposerKey    chaincrypto.PrivateKey
-	Validators     []string
-	GenesisBalance map[string]uint64
-	FeeCollector   string
-	DataDir        string
-	BlockGasLimit  uint64
+	Role            NodeRole
+	ChainID         string
+	ProposerKey     chaincrypto.PrivateKey
+	Validators      []string
+	GenesisBalance  map[string]uint64
+	GenesisTimeUnix int64
+	FeeCollector    string
+	DataDir         string
+	BlockGasLimit   uint64
 }
 
+type NodeRole string
+
+const (
+	RoleValidator NodeRole = "validator"
+	RoleObserver  NodeRole = "observer"
+)
+
 type Node struct {
-	mu                sync.Mutex
-	chainID           string
-	proposerKey       chaincrypto.PrivateKey
-	proposer          string
-	state             *state.Store
-	runtime           *contracts.Runtime
-	executor          transactionExecutor
-	consensus         *consensus.POA
-	blocks            []types.Block
-	genesisState      state.Snapshot
-	knownBlocks       map[string]types.Block
-	finalityVotes     map[string]map[string]types.FinalitySignature
-	finalityVoteIndex map[uint64]map[string]finalityVoteRecord
-	finalityEvidence  map[string]types.FinalityEquivocationEvidence
-	mempool           []types.Transaction
-	queued            []types.Transaction
-	txIndex           map[string]types.TransactionRecord
-	eventIndex        []types.EventRecord
-	dataDir           string
-	blockGasLimit     uint64
-	haltErr           error
+	mu          sync.Mutex
+	role        NodeRole
+	chainID     string
+	proposerKey chaincrypto.PrivateKey
+	proposer    string
+	// state is immutable after publication. Canonical commits replace the
+	// pointer so concurrent read snapshots never observe in-place mutation.
+	state              *state.Store
+	runtime            *contracts.Runtime
+	executor           transactionExecutor
+	consensus          *consensus.POA
+	blocks             []types.Block
+	genesisState       state.Snapshot
+	knownBlocks        map[string]types.Block
+	knownBlockHeights  map[uint64]int
+	finalityVotes      map[string]map[string]types.FinalitySignature
+	finalityVoteIndex  map[uint64]map[string]finalityVoteRecord
+	finalityEvidence   map[string]types.FinalityEquivocationEvidence
+	finalityLock       finalityLock
+	mempool            []types.Transaction
+	txPoolRevision     uint64
+	queued             []types.Transaction
+	txIndex            map[string]types.TransactionRecord
+	eventIndex         []types.EventRecord
+	dataDir            string
+	dataDirLock        *dataDirLock
+	blockGasLimit      uint64
+	genesisTimeUnix    int64
+	snapshotGeneration uint64
+	haltErr            error
+	closed             bool
+	closeErr           error
 }
 
 type transactionExecutor interface {
@@ -65,24 +84,32 @@ type finalityVoteRecord struct {
 	Signature string
 }
 
+type finalityLock struct {
+	Height    uint64 `json:"height"`
+	BlockHash string `json:"block_hash"`
+}
+
 const (
 	SafeBlockDepth              uint64 = 1
-	FinalizedBlockDepth         uint64 = 2
 	DefaultBlockGasLimit        uint64 = 30_000_000
 	InitialBaseFeePerGas        uint64 = 1
 	DefaultMaxPriorityFeePerGas uint64 = 1
-	baseFeeChangeDenominator    uint64 = 8
-	txpoolReplacementPriceBump  uint64 = 10
-	maxTransactionBytes                = 2 * 1024 * 1024
-	maxTxPoolBytes                     = 128 * 1024 * 1024
-	maxTxPoolTransactions              = 4096
-	maxQueuedTransactions              = 2048
-	maxTransactionsPerSender           = 64
-	maxQueuedNonceGap           uint64 = 64
+	// DeterministicDevGenesisTimeUnix is a stable timestamp for tests and
+	// isolated examples. Real networks must choose and distribute their own.
+	DeterministicDevGenesisTimeUnix int64  = 1_700_000_000
+	baseFeeChangeDenominator        uint64 = 8
+	txpoolReplacementPriceBump      uint64 = 10
+	maxTxPoolBytes                         = 128 * 1024 * 1024
+	maxTxPoolTransactions                  = MaxTransactionsPerBlock
+	maxQueuedTransactions                  = 2048
+	maxTransactionsPerSender               = 64
+	maxQueuedNonceGap               uint64 = 64
 )
 
 var errReplacementTransactionUnderpriced = errors.New("replacement transaction underpriced")
 var errReplacementAuthorizationMismatch = errors.New("replacement transaction authorization differs")
+var ErrFinalitySafetyViolation = errors.New("finality safety violation")
+var ErrLocalSigningDisabled = errors.New("local signing is disabled for observer nodes")
 
 type FinalityCheckpoint struct {
 	HeadHeight       uint64 `json:"head_height"`
@@ -118,47 +145,110 @@ type FeeMarketSnapshot struct {
 }
 
 type EventFilter struct {
-	FromBlock  uint64
-	ToBlock    uint64
-	HasToBlock bool
-	Address    string
-	Topic0     string
-	Limit      int
-	Descending bool
+	FromBlock      uint64
+	ToBlock        uint64
+	HasToBlock     bool
+	Address        string
+	Addresses      []string
+	RequireAddress bool
+	Topic0         string
+	Topic0s        []string
+	Limit          int
+	Descending     bool
 }
 
 type diskSnapshot struct {
+	Version          uint64                               `json:"version"`
+	Generation       uint64                               `json:"generation"`
+	Checksum         string                               `json:"checksum"`
 	ChainID          string                               `json:"chain_id"`
-	GenesisState     state.Snapshot                       `json:"genesis_state,omitempty"`
+	GenesisState     state.Snapshot                       `json:"genesis_state"`
 	State            state.Snapshot                       `json:"state"`
 	Blocks           []types.Block                        `json:"blocks"`
 	KnownBlocks      []types.Block                        `json:"known_blocks,omitempty"`
+	FinalityLock     finalityLock                         `json:"finality_lock"`
+	FinalityVotes    []types.FinalitySignature            `json:"finality_votes,omitempty"`
 	FinalityEvidence []types.FinalityEquivocationEvidence `json:"finality_evidence,omitempty"`
 }
 
-func New(config Config) (*Node, error) {
-	if config.ChainID == "" {
-		return nil, errors.New("chain id is required")
+func New(config Config) (result *Node, err error) {
+	if err := types.ValidateChainID(config.ChainID); err != nil {
+		return nil, err
 	}
-	if config.ProposerKey == nil {
-		return nil, errors.New("proposer key is required")
+	if config.GenesisTimeUnix <= 0 {
+		return nil, errors.New("genesis time unix must be positive")
 	}
-	proposer := chaincrypto.AddressFromPrivateKey(config.ProposerKey)
+	if config.GenesisTimeUnix > math.MaxInt64-consensus.MaxBlockTimeStepSeconds {
+		return nil, errors.New("genesis time unix leaves no valid block-time domain")
+	}
 	validators := config.Validators
 	if len(validators) == 0 {
-		validators = []string{proposer}
+		return nil, errors.New("explicit genesis validator set is required")
+	}
+	if err := consensus.ValidateValidatorSet(validators); err != nil {
+		return nil, fmt.Errorf("invalid validator set: %w", err)
+	}
+	var proposer string
+	switch config.Role {
+	case RoleValidator:
+		if config.ProposerKey == nil {
+			return nil, errors.New("validator role requires a proposer key")
+		}
+		proposer = chaincrypto.AddressFromPrivateKey(config.ProposerKey)
+		if !validatorSetContains(validators, proposer) {
+			return nil, errors.New("validator proposer key is not in the genesis validator set")
+		}
+	case RoleObserver:
+		if config.ProposerKey != nil {
+			return nil, errors.New("observer role must not configure a proposer key")
+		}
+		if config.FeeCollector != "" {
+			return nil, errors.New("observer role must not configure a fee collector")
+		}
+	default:
+		return nil, fmt.Errorf("unsupported node role %q", config.Role)
+	}
+	for address := range config.GenesisBalance {
+		normalized, err := chaincrypto.NormalizeAddress(address)
+		if err != nil || normalized != address {
+			return nil, fmt.Errorf("genesis balance address %q is not canonically encoded", address)
+		}
 	}
 	blockGasLimit := config.BlockGasLimit
 	if blockGasLimit == 0 {
 		blockGasLimit = DefaultBlockGasLimit
 	}
-	if configured := normalizedAddress(config.FeeCollector); configured != "" && configured != proposer {
-		return nil, errors.New("fee collector must equal the block proposer")
+	if config.FeeCollector != "" {
+		configured, err := chaincrypto.NormalizeAddress(config.FeeCollector)
+		if err != nil || configured != config.FeeCollector {
+			return nil, errors.New("fee collector is not canonically encoded")
+		}
+		if configured != proposer {
+			return nil, errors.New("fee collector must equal the block proposer")
+		}
 	}
 	feeCollector := proposer
+	var directoryLock *dataDirLock
+	if config.DataDir != "" {
+		preparedDataDir, prepareErr := prepareDataDirectory(config.DataDir)
+		if prepareErr != nil {
+			return nil, prepareErr
+		}
+		config.DataDir = preparedDataDir
+		directoryLock, err = acquireDataDirLock(config.DataDir)
+		if err != nil {
+			return nil, err
+		}
+		defer func() {
+			if err != nil {
+				err = errors.Join(err, directoryLock.Close())
+			}
+		}()
+	}
 
 	runtime := contracts.NewRuntimeWithDefaults()
 	n := &Node{
+		role:              config.Role,
 		chainID:           config.ChainID,
 		proposerKey:       config.ProposerKey,
 		proposer:          proposer,
@@ -166,60 +256,56 @@ func New(config Config) (*Node, error) {
 		executor:          core.NewExecutor(config.ChainID, feeCollector, runtime),
 		consensus:         consensus.NewPOA(validators),
 		knownBlocks:       make(map[string]types.Block),
+		knownBlockHeights: make(map[uint64]int),
 		finalityVotes:     make(map[string]map[string]types.FinalitySignature),
 		finalityVoteIndex: make(map[uint64]map[string]finalityVoteRecord),
 		finalityEvidence:  make(map[string]types.FinalityEquivocationEvidence),
 		txIndex:           make(map[string]types.TransactionRecord),
 		dataDir:           config.DataDir,
+		dataDirLock:       directoryLock,
 		blockGasLimit:     blockGasLimit,
+		genesisTimeUnix:   config.GenesisTimeUnix,
 	}
 	genesisStore := newGenesisStore(config.GenesisBalance, validators)
 	genesisState := genesisStore.Snapshot()
 
 	if config.DataDir != "" {
+		manifest, err := loadDataManifest(config.DataDir)
+		if err != nil {
+			return nil, err
+		}
 		loaded, err := loadDiskSnapshot(config.DataDir)
 		if err != nil {
 			return nil, err
 		}
+		if manifest != nil && loaded == nil {
+			return nil, errors.New("initialized data directory is missing chain.json")
+		}
+		if manifest == nil && loaded != nil {
+			return nil, errors.New("persisted chain is missing manifest.json; explicit migration is required")
+		}
 		if loaded != nil {
-			if loaded.ChainID != config.ChainID {
-				return nil, errors.New("persisted chain id does not match config")
+			if manifest.ChainID != loaded.ChainID || len(loaded.Blocks) == 0 || manifest.GenesisHash != loaded.Blocks[0].Hash() {
+				return nil, errors.New("data manifest does not match persisted chain")
 			}
-			n.genesisState = loaded.GenesisState
-			if snapshotIsEmpty(n.genesisState) {
-				n.genesisState = genesisState
+			if err := n.restoreDiskSnapshot(loaded, genesisStore); err != nil {
+				return nil, err
 			}
-			n.state = state.NewStoreFromSnapshot(loaded.State)
-			if len(n.state.Validators()) == 0 {
-				n.state.SetValidators(validators)
+			if err := n.restorePersistentHalt(); err != nil {
+				return nil, err
 			}
-			n.refreshConsensusLocked()
-			n.blocks = append([]types.Block(nil), loaded.Blocks...)
-			if len(n.blocks) == 0 {
-				return nil, errors.New("persisted chain has no blocks")
-			}
-			for _, block := range n.blocks {
-				if block.Header.GasLimit != blockGasLimit {
-					return nil, errors.New("persisted block gas limit does not match config")
+			if n.haltErr == nil && n.role == RoleValidator {
+				if err := n.requeuePersistedFinalitySlashesLocked(); err != nil {
+					n.recordRuntimeFaultLocked(err)
+					return nil, err
 				}
 			}
-			for _, block := range loaded.KnownBlocks {
-				n.knownBlocks[block.Hash()] = block
-			}
-			for _, block := range n.blocks {
-				n.knownBlocks[block.Hash()] = block
-			}
-			for _, evidence := range loaded.FinalityEvidence {
-				n.finalityEvidence[finalityEvidenceKey(evidence.Height, evidence.Validator)] = evidence
-			}
-			n.rebuildFinalityVoteIndex()
-			n.rebuildTxIndex()
 			return n, nil
 		}
 	}
 
 	store := genesisStore
-	genesis := types.GenesisBlock(config.ChainID, store.Root())
+	genesis := types.GenesisBlock(config.ChainID, store.Root(), config.GenesisTimeUnix)
 	genesis.Header.GasLimit = blockGasLimit
 	genesis.Header.BaseFeePerGas = InitialBaseFeePerGas
 	n.genesisState = genesisState
@@ -227,10 +313,46 @@ func New(config Config) (*Node, error) {
 	n.refreshConsensusLocked()
 	n.blocks = []types.Block{genesis}
 	n.knownBlocks[genesis.Hash()] = genesis
+	n.knownBlockHeights[0] = 1
+	n.finalityLock = finalityLock{Height: 0, BlockHash: genesis.Hash()}
 	if err := n.persistLocked(); err != nil {
 		return nil, err
 	}
+	if err := n.restorePersistentHalt(); err != nil {
+		return nil, err
+	}
 	return n, nil
+}
+
+// NewDevelopment creates the implicit single-validator configuration used by
+// isolated tests and demos. Persistent or peered nodes must use New with an
+// explicit shared genesis validator set.
+func NewDevelopment(config Config) (*Node, error) {
+	if config.DataDir != "" {
+		return nil, errors.New("development nodes do not support persistent data directories")
+	}
+	if config.Role == "" {
+		config.Role = RoleValidator
+	}
+	if config.Role != RoleValidator {
+		return nil, errors.New("development nodes support only the validator role")
+	}
+	if len(config.Validators) == 0 && config.ProposerKey != nil {
+		config.Validators = []string{chaincrypto.AddressFromPrivateKey(config.ProposerKey)}
+	}
+	return New(config)
+}
+
+func (n *Node) Close() error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.closed {
+		return n.closeErr
+	}
+	n.closed = true
+	n.closeErr = n.dataDirLock.Close()
+	n.dataDirLock = nil
+	return n.closeErr
 }
 
 func newGenesisStore(balances map[string]uint64, validators []string) *state.Store {
@@ -238,12 +360,10 @@ func newGenesisStore(balances map[string]uint64, validators []string) *state.Sto
 	for address, balance := range balances {
 		store.SetBalance(address, balance)
 	}
-	store.SetValidators(validators)
+	if err := store.SetValidators(validators); err != nil {
+		panic(err)
+	}
 	return store
-}
-
-func snapshotIsEmpty(snapshot state.Snapshot) bool {
-	return len(snapshot.Accounts) == 0 && len(snapshot.Stakes) == 0 && len(snapshot.Proposals) == 0 && len(snapshot.Params) == 0 && len(snapshot.Validators) == 0
 }
 
 func (n *Node) SubmitTx(tx types.Transaction) error {
@@ -256,8 +376,14 @@ func (n *Node) SubmitTx(tx types.Transaction) error {
 func (n *Node) RequestFaucet(to string, amount uint64) (types.Transaction, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	if err := n.requireOpenLocked(); err != nil {
+		return types.Transaction{}, err
+	}
 	if n.haltErr != nil {
-		return types.Transaction{}, fmt.Errorf("node halted after runtime fault: %w", n.haltErr)
+		return types.Transaction{}, fmt.Errorf("node halted: %w", n.haltErr)
+	}
+	if err := n.requireLocalSigningLocked("faucet request"); err != nil {
+		return types.Transaction{}, err
 	}
 
 	to = strings.TrimSpace(to)
@@ -296,17 +422,20 @@ func (n *Node) RequestFaucet(to string, amount uint64) (types.Transaction, error
 }
 
 func (n *Node) submitTxLocked(tx types.Transaction) (err error) {
+	if err := n.requireOpenLocked(); err != nil {
+		return err
+	}
 	if n.haltErr != nil {
-		return fmt.Errorf("node halted after runtime fault: %w", n.haltErr)
+		return fmt.Errorf("node halted: %w", n.haltErr)
 	}
 	defer func() {
 		n.recordRuntimeFaultLocked(err)
 	}()
-	tx = cloneTransaction(tx)
-	txSize := uint64(len(hash.MustCanonicalBytes(tx)))
-	if txSize > maxTransactionBytes {
-		return fmt.Errorf("transaction exceeds %d bytes", maxTransactionBytes)
+	txSize, err := canonicalTransactionSize(tx)
+	if err != nil {
+		return err
 	}
+	tx = cloneTransaction(tx)
 	if tx.GasLimit > n.blockGasLimit {
 		return fmt.Errorf("transaction gas limit exceeds block gas limit %d", n.blockGasLimit)
 	}
@@ -333,7 +462,7 @@ func (n *Node) submitTxLocked(tx types.Transaction) (err error) {
 		if err != nil {
 			return err
 		}
-		n.mempool = nextMempool
+		n.setMempoolLocked(nextMempool)
 		n.queued = nextQueued
 		return nil
 	}
@@ -391,9 +520,17 @@ func (n *Node) submitTxLocked(tx types.Transaction) (err error) {
 	if err != nil {
 		return err
 	}
-	n.mempool = nextMempool
+	n.setMempoolLocked(nextMempool)
 	n.queued = nextQueued
 	return nil
+}
+
+func (n *Node) setMempoolLocked(mempool []types.Transaction) {
+	if n.txPoolRevision == math.MaxUint64 {
+		panic("transaction pool revision exhausted")
+	}
+	n.mempool = mempool
+	n.txPoolRevision++
 }
 
 func (n *Node) validateNewTxPoolCapacityLocked(tx types.Transaction, txSize uint64) error {
@@ -449,8 +586,14 @@ func (n *Node) txPoolBytesLocked() uint64 {
 func (n *Node) ProduceBlock() (types.Block, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	if err := n.requireOpenLocked(); err != nil {
+		return types.Block{}, err
+	}
 	if n.haltErr != nil {
-		return types.Block{}, fmt.Errorf("node halted after runtime fault: %w", n.haltErr)
+		return types.Block{}, fmt.Errorf("node halted: %w", n.haltErr)
+	}
+	if err := n.requireLocalSigningLocked("block production"); err != nil {
+		return types.Block{}, err
 	}
 
 	working := n.state.Clone()
@@ -460,17 +603,37 @@ func (n *Node) ProduceBlock() (types.Block, error) {
 	parent := n.blocks[len(n.blocks)-1]
 	blockHeight := parent.Header.Height + 1
 	baseFee := n.nextBaseFeeLocked()
+	blockTime := time.Now().Unix()
+	if parent.Header.TimeUnix > math.MaxInt64-consensus.MaxBlockTimeStepSeconds {
+		return types.Block{}, errors.New("block time domain exhausted")
+	}
+	maxBlockTime := parent.Header.TimeUnix + consensus.MaxBlockTimeStepSeconds/2
+	if blockTime > maxBlockTime {
+		blockTime = maxBlockTime
+	}
+	if blockTime <= parent.Header.TimeUnix {
+		blockTime = parent.Header.TimeUnix + 1
+	}
 	var gasUsed uint64
+	var blockComponentBytes uint64
 	blockFull := false
 	for index, tx := range n.mempool {
 		if blockFull {
 			remaining = append(remaining, n.mempool[index:]...)
 			break
 		}
+		if len(included) >= MaxTransactionsPerBlock {
+			remaining = append(remaining, n.mempool[index:]...)
+			break
+		}
+		txSize, err := canonicalTransactionSize(tx)
+		if err != nil {
+			return types.Block{}, fmt.Errorf("mempool transaction %d: %w", index, err)
+		}
 		candidate := working.Clone()
 		receipt, err := n.executor.ExecuteWithContext(candidate, tx, core.ExecutionContext{BlockHeight: blockHeight, BaseFeePerGas: baseFee})
 		if err != nil {
-			if errors.Is(err, contracts.ErrWasmRuntimeFault) {
+			if core.IsFatalExecutionError(err) {
 				n.recordRuntimeFaultLocked(err)
 				return types.Block{}, err
 			}
@@ -486,8 +649,26 @@ func (n *Node) ProduceBlock() (types.Block, error) {
 			blockFull = true
 			continue
 		}
+		receiptBytes, err := hash.CanonicalBytes(receipt)
+		if err != nil {
+			return types.Block{}, fmt.Errorf("encode produced receipt: %w", err)
+		}
+		nextBlockBytes, err := checkedSizeAdd(blockComponentBytes, txSize)
+		if err != nil {
+			return types.Block{}, err
+		}
+		nextBlockBytes, err = checkedSizeAdd(nextBlockBytes, uint64(len(receiptBytes)))
+		if err != nil {
+			return types.Block{}, err
+		}
+		if nextBlockBytes > MaxUncertifiedBlockBytes-maxProducedBlockEnvelopeBytes {
+			remaining = append(remaining, tx)
+			blockFull = true
+			continue
+		}
 		working = candidate
 		gasUsed = nextGasUsed
+		blockComponentBytes = nextBlockBytes
 		included = append(included, tx)
 		receipts = append(receipts, receipt)
 	}
@@ -497,7 +678,7 @@ func (n *Node) ProduceBlock() (types.Block, error) {
 			ChainID:       n.chainID,
 			Height:        blockHeight,
 			ParentHash:    parent.Hash(),
-			TimeUnix:      time.Now().Unix(),
+			TimeUnix:      blockTime,
 			Proposer:      n.proposer,
 			GasLimit:      n.blockGasLimit,
 			GasUsed:       gasUsed,
@@ -546,6 +727,9 @@ func (n *Node) ProduceBlock() (types.Block, error) {
 	if err := consensus.SignBlock(n.proposerKey, &block); err != nil {
 		return types.Block{}, err
 	}
+	if err := validateBlockSize(block); err != nil {
+		return types.Block{}, fmt.Errorf("produced block violates size limits: %w", err)
+	}
 	if err := n.consensus.ValidateBlock(parent, block); err != nil {
 		return types.Block{}, err
 	}
@@ -554,15 +738,20 @@ func (n *Node) ProduceBlock() (types.Block, error) {
 	candidateBlocks := append([]types.Block(nil), n.blocks...)
 	candidateBlocks = append(candidateBlocks, block)
 	n.knownBlocks[blockHash] = block
+	n.knownBlockHeights[block.Header.Height]++
 	if err := n.persistCandidateLocked(working, candidateBlocks); err != nil {
 		delete(n.knownBlocks, blockHash)
+		n.knownBlockHeights[block.Header.Height]--
+		if n.knownBlockHeights[block.Header.Height] == 0 {
+			delete(n.knownBlockHeights, block.Header.Height)
+		}
 		return types.Block{}, err
 	}
-	n.state.ReplaceWith(working)
+	n.state = working
 	n.refreshConsensusLocked()
 	n.blocks = candidateBlocks
 	n.indexBlock(block)
-	n.mempool = nextMempool
+	n.setMempoolLocked(nextMempool)
 	n.queued = candidateQueued
 	return cloneBlock(block), nil
 }
@@ -581,7 +770,7 @@ func (n *Node) revalidateMempoolForState(base *state.Store, txs []types.Transact
 			continue
 		}
 		if _, err := n.executor.ExecuteWithContext(working, tx, core.ExecutionContext{BlockHeight: blockHeight, BaseFeePerGas: baseFee}); err != nil {
-			if errors.Is(err, contracts.ErrWasmRuntimeFault) {
+			if core.IsFatalExecutionError(err) {
 				return nil, nil, err
 			}
 			continue
@@ -634,7 +823,7 @@ func (n *Node) revalidateQueuedForState(base *state.Store, mempool []types.Trans
 			check.SetNonce(tx.From, tx.Nonce)
 		}
 		if _, err := n.executor.ExecuteWithContext(check, tx, core.ExecutionContext{BlockHeight: blockHeight, BaseFeePerGas: baseFee}); err != nil {
-			if errors.Is(err, contracts.ErrWasmRuntimeFault) {
+			if core.IsFatalExecutionError(err) {
 				return nil, err
 			}
 			continue
@@ -650,21 +839,52 @@ func (n *Node) revalidateQueuedForState(base *state.Store, mempool []types.Trans
 func (n *Node) ImportBlock(block types.Block) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if n.haltErr != nil {
-		return fmt.Errorf("node halted after runtime fault: %w", n.haltErr)
+	if err := n.requireOpenLocked(); err != nil {
+		return err
 	}
-	block = cloneBlock(block)
-
+	if n.haltErr != nil {
+		return fmt.Errorf("node halted: %w", n.haltErr)
+	}
 	if block.Header.ChainID != n.chainID {
 		return errors.New("imported block chain id does not match node")
 	}
+	if err := validateBlockCheapBounds(block); err != nil {
+		return fmt.Errorf("imported block violates size limits: %w", err)
+	}
+	if err := consensus.ValidateBlockSignature(block); err != nil {
+		return err
+	}
+	if err := validateBlockSize(block); err != nil {
+		return fmt.Errorf("imported block violates size limits: %w", err)
+	}
+	block = cloneBlock(block)
 	blockHash := block.Hash()
-	if _, ok := n.knownBlocks[blockHash]; ok {
+	existing, alreadyKnown := n.knownBlocks[blockHash]
+	if alreadyKnown && block.FinalityCertificate == nil {
+		if !n.blockCompatibleWithFinalityLockLocked(blockHash) {
+			return errors.New("imported block conflicts with the finality lock")
+		}
 		return nil
 	}
 	parent, ok := n.knownBlocks[block.Header.ParentHash]
 	if !ok {
 		return errors.New("imported block parent is unknown")
+	}
+	if !alreadyKnown && block.FinalityCertificate == nil {
+		if n.knownBlockHeights[block.Header.Height] >= MaxKnownBlocksPerHeight {
+			return fmt.Errorf("known block count at height %d exceeds %d", block.Header.Height, MaxKnownBlocksPerHeight)
+		}
+		canonicalCountAfter := uint64(len(n.blocks))
+		if block.Header.Height > n.blocks[len(n.blocks)-1].Header.Height {
+			canonicalCountAfter = block.Header.Height + 1
+		}
+		knownCountAfter := uint64(len(n.knownBlocks) + 1)
+		if knownCountAfter > canonicalCountAfter && knownCountAfter-canonicalCountAfter > MaxKnownSideBlocks {
+			return fmt.Errorf("known side block count exceeds %d", MaxKnownSideBlocks)
+		}
+	}
+	if block.FinalityCertificate == nil && !n.prospectiveBlockCompatibleWithFinalityLockLocked(blockHash, block.Header.Height, parent.Hash()) {
+		return errors.New("imported block conflicts with the finality lock")
 	}
 	parentState, err := n.replayStateLocked(parent.Hash())
 	if err != nil {
@@ -675,58 +895,102 @@ func (n *Node) ImportBlock(block types.Block) error {
 		n.recordRuntimeFaultLocked(err)
 		return err
 	}
+	if alreadyKnown {
+		equal, err := blocksEqualIgnoringFinalityCertificate(existing, block)
+		if err != nil {
+			return err
+		}
+		if !equal {
+			return errors.New("imported finality certificate conflicts with the known block envelope")
+		}
+		if existing.FinalityCertificate != nil {
+			merged, changed := mergeFinalityCertificates(existing.FinalityCertificate, block.FinalityCertificate)
+			if !changed {
+				return nil
+			}
+			block.FinalityCertificate = merged
+			if err := validateBlockSize(block); err != nil {
+				return fmt.Errorf("merged certified block violates size limits: %w", err)
+			}
+			if err := consensus.NewPOA(parentState.Validators()).ValidateBlock(parent, block); err != nil {
+				return err
+			}
+		}
+	}
 
+	previousKnown, hadPreviousKnown := n.knownBlocks[blockHash]
+	previousLock := n.finalityLock
+	previousVotes := cloneFinalityVotes(n.finalityVotes)
+	previousVoteIndex := cloneFinalityVoteIndex(n.finalityVoteIndex)
+	previousEvidence := cloneFinalityEvidence(n.finalityEvidence)
+	previousMempool := append([]types.Transaction(nil), n.mempool...)
+	previousQueued := append([]types.Transaction(nil), n.queued...)
 	n.knownBlocks[blockHash] = block
+	if !hadPreviousKnown {
+		n.knownBlockHeights[block.Header.Height]++
+	}
+	rollbackKnownAndLock := func() {
+		if hadPreviousKnown {
+			n.knownBlocks[blockHash] = previousKnown
+		} else {
+			delete(n.knownBlocks, blockHash)
+			n.knownBlockHeights[block.Header.Height]--
+			if n.knownBlockHeights[block.Header.Height] == 0 {
+				delete(n.knownBlockHeights, block.Header.Height)
+			}
+		}
+		n.finalityLock = previousLock
+		n.finalityVotes = previousVotes
+		n.finalityVoteIndex = previousVoteIndex
+		n.finalityEvidence = previousEvidence
+		n.setMempoolLocked(previousMempool)
+		n.queued = previousQueued
+	}
+	if !n.blockCompatibleWithFinalityLockLocked(blockHash) {
+		rollbackKnownAndLock()
+		if block.FinalityCertificate != nil {
+			safetyErr := fmt.Errorf("%w: certified block %s at height %d conflicts with locked block %s at height %d",
+				ErrFinalitySafetyViolation,
+				blockHash,
+				block.Header.Height,
+				previousLock.BlockHash,
+				previousLock.Height,
+			)
+			n.setPersistentHaltLocked("finality_safety", safetyErr)
+			return n.haltErr
+		}
+		return errors.New("imported block conflicts with the finality lock")
+	}
+	lockAdvanced := false
+	if block.FinalityCertificate != nil && block.Header.Height > n.finalityLock.Height {
+		n.finalityLock = finalityLock{Height: block.Header.Height, BlockHash: blockHash}
+		lockAdvanced = true
+	}
+	if block.FinalityCertificate != nil {
+		if err := n.recordAcceptedFinalityCertificateLocked(block); err != nil {
+			rollbackKnownAndLock()
+			n.recordRuntimeFaultLocked(err)
+			return err
+		}
+	}
+
 	candidateState := n.state
 	candidateBlocks := n.blocks
 	nextMempool := n.mempool
 	nextQueued := n.queued
 	canonicalChange := false
-	if block.Header.Height > n.blocks[len(n.blocks)-1].Header.Height {
-		chain, working, err := n.replayKnownChainLocked(blockHash)
+	canonicalEnvelopeChange := alreadyKnown && block.Header.Height < uint64(len(n.blocks)) && n.blocks[block.Header.Height].Hash() == blockHash
+	desiredHeadHash := ""
+	if lockAdvanced && !canonicalBlocksContainLock(n.blocks, n.finalityLock) {
+		desiredHeadHash = n.highestKnownDescendantLocked(n.finalityLock)
+	} else if block.Header.Height > n.blocks[len(n.blocks)-1].Header.Height {
+		desiredHeadHash = blockHash
+	}
+	if desiredHeadHash != "" && desiredHeadHash != n.blocks[len(n.blocks)-1].Hash() {
+		chain, working, candidateMempool, candidateQueued, err := n.prepareCanonicalChainLocked(desiredHeadHash)
 		if err != nil {
 			n.recordRuntimeFaultLocked(err)
-			delete(n.knownBlocks, blockHash)
-			return err
-		}
-		included := transactionHashSet(transactionsInBlocks(chain))
-		candidateMempool := filterTransactionsByHash(n.mempool, included)
-		candidateQueued := filterTransactionsByHash(n.queued, included)
-		head := chain[len(chain)-1]
-		candidateMempool, demoted, err := n.revalidateMempoolForState(
-			working,
-			candidateMempool,
-			head.Header.Height+1,
-			NextBaseFee(head, n.blockGasLimit),
-		)
-		if err != nil {
-			n.recordRuntimeFaultLocked(err)
-			delete(n.knownBlocks, blockHash)
-			return err
-		}
-		candidateQueued = append(candidateQueued, demoted...)
-		candidateQueued, err = n.revalidateQueuedForState(
-			working,
-			candidateMempool,
-			candidateQueued,
-			head.Header.Height+1,
-			NextBaseFee(head, n.blockGasLimit),
-		)
-		if err != nil {
-			n.recordRuntimeFaultLocked(err)
-			delete(n.knownBlocks, blockHash)
-			return err
-		}
-		candidateMempool, candidateQueued, err = n.promoteQueuedForState(
-			working,
-			candidateMempool,
-			candidateQueued,
-			head.Header.Height+1,
-			NextBaseFee(head, n.blockGasLimit),
-		)
-		if err != nil {
-			n.recordRuntimeFaultLocked(err)
-			delete(n.knownBlocks, blockHash)
+			rollbackKnownAndLock()
 			return err
 		}
 		candidateState = working
@@ -734,18 +998,176 @@ func (n *Node) ImportBlock(block types.Block) error {
 		nextMempool = candidateMempool
 		nextQueued = candidateQueued
 		canonicalChange = true
+	} else if canonicalEnvelopeChange {
+		candidateBlocks = append([]types.Block(nil), n.blocks...)
+		candidateBlocks[block.Header.Height] = block
 	}
 	if err := n.persistCandidateLocked(candidateState, candidateBlocks); err != nil {
-		delete(n.knownBlocks, blockHash)
+		rollbackKnownAndLock()
 		return err
 	}
 	if canonicalChange {
 		n.blocks = candidateBlocks
-		n.state.ReplaceWith(candidateState)
+		n.state = candidateState
 		n.refreshConsensusLocked()
 		n.rebuildTxIndex()
-		n.mempool = nextMempool
+		n.setMempoolLocked(nextMempool)
 		n.queued = nextQueued
+	} else if canonicalEnvelopeChange {
+		n.blocks = candidateBlocks
+	}
+	return nil
+}
+
+func (n *Node) prepareCanonicalChainLocked(blockHash string) ([]types.Block, *state.Store, []types.Transaction, []types.Transaction, error) {
+	chain, working, err := n.replayKnownChainLocked(blockHash)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	included := transactionHashSet(transactionsInBlocks(chain))
+	candidateMempool := filterTransactionsByHash(n.mempool, included)
+	candidateQueued := filterTransactionsByHash(n.queued, included)
+	head := chain[len(chain)-1]
+	candidateMempool, demoted, err := n.revalidateMempoolForState(
+		working,
+		candidateMempool,
+		head.Header.Height+1,
+		NextBaseFee(head, n.blockGasLimit),
+	)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	candidateQueued = append(candidateQueued, demoted...)
+	candidateQueued, err = n.revalidateQueuedForState(
+		working,
+		candidateMempool,
+		candidateQueued,
+		head.Header.Height+1,
+		NextBaseFee(head, n.blockGasLimit),
+	)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	candidateMempool, candidateQueued, err = n.promoteQueuedForState(
+		working,
+		candidateMempool,
+		candidateQueued,
+		head.Header.Height+1,
+		NextBaseFee(head, n.blockGasLimit),
+	)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	return chain, working, candidateMempool, candidateQueued, nil
+}
+
+func (n *Node) blockCompatibleWithFinalityLockLocked(blockHash string) bool {
+	block, ok := n.knownBlocks[blockHash]
+	if !ok {
+		return false
+	}
+	if block.Header.Height >= n.finalityLock.Height {
+		return knownBlockDescendsFrom(n.knownBlocks, blockHash, n.finalityLock)
+	}
+	return knownBlockDescendsFrom(n.knownBlocks, n.finalityLock.BlockHash, finalityLock{
+		Height:    block.Header.Height,
+		BlockHash: blockHash,
+	})
+}
+
+func (n *Node) prospectiveBlockCompatibleWithFinalityLockLocked(blockHash string, height uint64, parentHash string) bool {
+	if height == n.finalityLock.Height {
+		return blockHash == n.finalityLock.BlockHash
+	}
+	if height > n.finalityLock.Height {
+		if height == n.finalityLock.Height+1 {
+			return parentHash == n.finalityLock.BlockHash
+		}
+		return knownBlockDescendsFrom(n.knownBlocks, parentHash, n.finalityLock)
+	}
+	return knownBlockDescendsFrom(n.knownBlocks, n.finalityLock.BlockHash, finalityLock{
+		Height:    height,
+		BlockHash: blockHash,
+	})
+}
+
+func canonicalBlocksContainLock(blocks []types.Block, lock finalityLock) bool {
+	return lock.Height < uint64(len(blocks)) && blocks[lock.Height].Hash() == lock.BlockHash
+}
+
+func (n *Node) highestKnownDescendantLocked(lock finalityLock) string {
+	bestHash := lock.BlockHash
+	bestHeight := lock.Height
+	currentHeadHash := n.blocks[len(n.blocks)-1].Hash()
+	if knownBlockDescendsFrom(n.knownBlocks, currentHeadHash, lock) {
+		bestHash = currentHeadHash
+		bestHeight = n.blocks[len(n.blocks)-1].Header.Height
+	}
+	for blockHash, block := range n.knownBlocks {
+		if !knownBlockDescendsFrom(n.knownBlocks, blockHash, lock) {
+			continue
+		}
+		if block.Header.Height > bestHeight || (block.Header.Height == bestHeight && bestHash != currentHeadHash && blockHash < bestHash) {
+			bestHash = blockHash
+			bestHeight = block.Header.Height
+		}
+	}
+	return bestHash
+}
+
+func blocksEqualIgnoringFinalityCertificate(left types.Block, right types.Block) (bool, error) {
+	left.FinalityCertificate = nil
+	right.FinalityCertificate = nil
+	return canonicalBlocksEqual(left, right)
+}
+
+func mergeFinalityCertificates(existing *types.FinalityCertificate, incoming *types.FinalityCertificate) (*types.FinalityCertificate, bool) {
+	if existing == nil {
+		return incoming, incoming != nil
+	}
+	if incoming == nil {
+		return existing, false
+	}
+	votes := make(map[string]types.FinalitySignature, len(existing.Signatures)+len(incoming.Signatures))
+	for _, vote := range existing.Signatures {
+		votes[vote.Validator] = vote
+	}
+	changed := false
+	for _, vote := range incoming.Signatures {
+		if _, ok := votes[vote.Validator]; !ok {
+			votes[vote.Validator] = vote
+			changed = true
+		}
+	}
+	if !changed {
+		return existing, false
+	}
+	return &types.FinalityCertificate{
+		ChainID:    existing.ChainID,
+		Height:     existing.Height,
+		BlockHash:  existing.BlockHash,
+		Signatures: sortedFinalitySignatures(votes),
+	}, true
+}
+
+func (n *Node) recordAcceptedFinalityCertificateLocked(block types.Block) error {
+	if block.FinalityCertificate == nil {
+		return nil
+	}
+	if n.finalityVotes == nil {
+		n.finalityVotes = make(map[string]map[string]types.FinalitySignature)
+	}
+	blockHash := block.Hash()
+	blockVotes := n.finalityVotes[blockHash]
+	if blockVotes == nil {
+		blockVotes = make(map[string]types.FinalitySignature)
+		n.finalityVotes[blockHash] = blockVotes
+	}
+	for _, vote := range block.FinalityCertificate.Signatures {
+		if err := n.recordFinalityVoteLocked(block, vote); core.IsFatalExecutionError(err) {
+			return err
+		}
+		blockVotes[vote.Validator] = vote
 	}
 	return nil
 }
@@ -775,24 +1197,53 @@ func (n *Node) BlockByHash(hash string) (types.Block, bool) {
 func (n *Node) SubmitFinalityVote(vote types.FinalitySignature) (err error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	if err := n.requireOpenLocked(); err != nil {
+		return err
+	}
 	if n.haltErr != nil {
-		return fmt.Errorf("node halted after runtime fault: %w", n.haltErr)
+		return fmt.Errorf("node halted: %w", n.haltErr)
 	}
 	defer func() {
 		n.recordRuntimeFaultLocked(err)
 	}()
 
-	vote.Validator = strings.ToLower(strings.TrimSpace(vote.Validator))
-	if vote.Validator == "" {
-		return errors.New("finality vote validator is required")
+	validator, normalizeErr := chaincrypto.NormalizeAddress(vote.Validator)
+	if normalizeErr != nil || validator != vote.Validator {
+		return errors.New("finality vote validator is not canonically encoded")
+	}
+	if err := types.ValidateCanonicalHash("finality vote block hash", vote.BlockHash); err != nil {
+		return err
+	}
+	if err := types.ValidateCanonicalSignature("finality vote signature", vote.Signature); err != nil {
+		return err
 	}
 	block, validators, err := n.matchFinalityVoteLocked(vote)
 	if err != nil {
 		return err
 	}
 	blockHash := block.Hash()
-	if err := n.recordFinalityVoteLocked(block, vote); err != nil {
-		return err
+	previousVotes := cloneFinalityVotes(n.finalityVotes)
+	previousVoteIndex := cloneFinalityVoteIndex(n.finalityVoteIndex)
+	previousEvidence := cloneFinalityEvidence(n.finalityEvidence)
+	previousMempool := append([]types.Transaction(nil), n.mempool...)
+	previousQueued := append([]types.Transaction(nil), n.queued...)
+	previousLock := n.finalityLock
+	previousKnown := n.knownBlocks[blockHash]
+	rollback := func() {
+		n.finalityVotes = previousVotes
+		n.finalityVoteIndex = previousVoteIndex
+		n.finalityEvidence = previousEvidence
+		n.setMempoolLocked(previousMempool)
+		n.queued = previousQueued
+		n.finalityLock = previousLock
+		n.knownBlocks[blockHash] = previousKnown
+	}
+	if equivocationErr := n.recordFinalityVoteLocked(block, vote); equivocationErr != nil {
+		if persistErr := n.persistLocked(); persistErr != nil {
+			rollback()
+			return errors.Join(persistErr, equivocationErr)
+		}
+		return equivocationErr
 	}
 	if n.finalityVotes == nil {
 		n.finalityVotes = make(map[string]map[string]types.FinalitySignature)
@@ -804,7 +1255,7 @@ func (n *Node) SubmitFinalityVote(vote types.FinalitySignature) (err error) {
 			for _, signature := range block.FinalityCertificate.Signatures {
 				validator := strings.ToLower(strings.TrimSpace(signature.Validator))
 				if validator != "" {
-					votes[validator] = types.FinalitySignature{Validator: validator, Signature: signature.Signature}
+					votes[validator] = signature
 				}
 			}
 		}
@@ -812,6 +1263,10 @@ func (n *Node) SubmitFinalityVote(vote types.FinalitySignature) (err error) {
 	}
 	votes[vote.Validator] = vote
 	if len(votes) < consensus.FinalityQuorumSize(len(validators)) {
+		if err := n.persistLocked(); err != nil {
+			rollback()
+			return err
+		}
 		return nil
 	}
 	certified := block
@@ -821,17 +1276,28 @@ func (n *Node) SubmitFinalityVote(vote types.FinalitySignature) (err error) {
 		BlockHash:  blockHash,
 		Signatures: sortedFinalitySignatures(votes),
 	}
+	if err := validateBlockSize(certified); err != nil {
+		rollback()
+		return fmt.Errorf("certified block violates size limits: %w", err)
+	}
 	parent := n.blocks[certified.Header.Height-1]
 	engine := consensus.NewPOA(validators)
 	if err := engine.ValidateBlock(parent, certified); err != nil {
+		rollback()
 		return err
+	}
+	if !n.blockCompatibleWithFinalityLockLocked(blockHash) {
+		rollback()
+		return fmt.Errorf("%w: canonical certificate conflicts with the current lock", ErrFinalitySafetyViolation)
 	}
 	candidateBlocks := append([]types.Block(nil), n.blocks...)
 	candidateBlocks[certified.Header.Height] = certified
-	previousKnown := n.knownBlocks[blockHash]
 	n.knownBlocks[blockHash] = certified
+	if certified.Header.Height > n.finalityLock.Height {
+		n.finalityLock = finalityLock{Height: certified.Header.Height, BlockHash: blockHash}
+	}
 	if err := n.persistCandidateLocked(n.state, candidateBlocks); err != nil {
-		n.knownBlocks[blockHash] = previousKnown
+		rollback()
 		return err
 	}
 	n.blocks = candidateBlocks
@@ -881,18 +1347,17 @@ func (n *Node) Finality() FinalityCheckpoint {
 		}
 	}
 	safe := n.blockAtDepthLocked(SafeBlockDepth)
-	finalized := n.blockAtDepthLocked(FinalizedBlockDepth)
 	return FinalityCheckpoint{
 		HeadHeight:      head.Header.Height,
 		HeadHash:        head.Hash(),
 		SafeHeight:      safe.Header.Height,
 		SafeHash:        safe.Hash(),
 		SafeDepth:       SafeBlockDepth,
-		SafeSource:      "depth_fallback",
-		FinalizedHeight: finalized.Header.Height,
-		FinalizedHash:   finalized.Hash(),
-		FinalizedDepth:  FinalizedBlockDepth,
-		FinalizedSource: "depth_fallback",
+		SafeSource:      "depth_confirmation",
+		FinalizedHeight: 0,
+		FinalizedHash:   n.blocks[0].Hash(),
+		FinalizedDepth:  head.Header.Height,
+		FinalizedSource: "genesis_without_certificate",
 	}
 }
 
@@ -914,34 +1379,44 @@ func (n *Node) Events(filter EventFilter) []types.EventRecord {
 	if toBlock < filter.FromBlock {
 		return []types.EventRecord{}
 	}
-	address := strings.ToLower(filter.Address)
-	topic0 := strings.ToLower(filter.Topic0)
-	events := make([]types.EventRecord, 0)
+	addresses := eventFilterValues(filter.Address, filter.Addresses)
+	topics := eventFilterValues(filter.Topic0, filter.Topic0s)
+	start := sort.Search(len(n.eventIndex), func(index int) bool {
+		return n.eventIndex[index].BlockHeight >= filter.FromBlock
+	})
+	end := sort.Search(len(n.eventIndex), func(index int) bool {
+		return n.eventIndex[index].BlockHeight > toBlock
+	})
+	capacity := end - start
+	if filter.Limit > 0 && capacity > filter.Limit {
+		capacity = filter.Limit
+	}
+	events := make([]types.EventRecord, 0, capacity)
 	add := func(record types.EventRecord) bool {
-		if !eventMatchesFilter(record, filter.FromBlock, toBlock, address, topic0) {
+		if !eventMatchesFilter(record, filter.FromBlock, toBlock, addresses, topics, filter.RequireAddress) {
 			return false
 		}
 		events = append(events, cloneEventRecord(record))
 		return filter.Limit > 0 && len(events) == filter.Limit
 	}
 	if filter.Descending {
-		for i := len(n.eventIndex) - 1; i >= 0; {
+		for i := end - 1; i >= start; {
 			height := n.eventIndex[i].BlockHeight
-			start := i
-			for start >= 0 && n.eventIndex[start].BlockHeight == height {
-				start--
+			groupStart := i
+			for groupStart >= start && n.eventIndex[groupStart].BlockHeight == height {
+				groupStart--
 			}
-			for j := start + 1; j <= i; j++ {
+			for j := groupStart + 1; j <= i; j++ {
 				if add(n.eventIndex[j]) {
 					return events
 				}
 			}
-			i = start
+			i = groupStart
 		}
 		return events
 	}
-	for _, record := range n.eventIndex {
-		if add(record) {
+	for index := start; index < end; index++ {
+		if add(n.eventIndex[index]) {
 			return events
 		}
 	}
@@ -952,6 +1427,18 @@ func (n *Node) ChainID() string {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return n.chainID
+}
+
+func (n *Node) Role() NodeRole {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.role
+}
+
+func (n *Node) HaltError() error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.haltErr
 }
 
 func (n *Node) Proposer() string {
@@ -975,6 +1462,30 @@ func (n *Node) PendingAccount(address string) (types.Account, error) {
 		return types.Account{}, err
 	}
 	return working.GetAccount(address), nil
+}
+
+// PendingNonce avoids replaying the entire mempool for the public nonce query.
+// The pending pool already contains only executable, contiguous transactions.
+func (n *Node) PendingNonce(address string) uint64 {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	address = normalizedAddress(address)
+	nonce := n.state.GetAccount(address).Nonce
+	pending := make(map[uint64]struct{})
+	for _, tx := range n.mempool {
+		if normalizedAddress(tx.From) == address {
+			pending[tx.Nonce] = struct{}{}
+		}
+	}
+	for {
+		if _, ok := pending[nonce]; !ok {
+			return nonce
+		}
+		if nonce == math.MaxUint64 {
+			return nonce
+		}
+		nonce++
+	}
 }
 
 func (n *Node) StateRoot() string {
@@ -1015,6 +1526,82 @@ func (n *Node) TxPool() MempoolSnapshot {
 	}
 }
 
+func (n *Node) TxPoolBounded(maxBytes uint64) (MempoolSnapshot, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	var total uint64
+	for _, txs := range [][]types.Transaction{n.mempool, n.queued} {
+		for _, tx := range txs {
+			size, err := canonicalTransactionSize(tx)
+			if err != nil {
+				return MempoolSnapshot{}, err
+			}
+			if total > maxBytes || size > maxBytes-total {
+				return MempoolSnapshot{}, fmt.Errorf("transaction pool query exceeds %d bytes", maxBytes)
+			}
+			total += size
+		}
+	}
+	pending := cloneTransactions(n.mempool)
+	queued := cloneTransactions(n.queued)
+	return MempoolSnapshot{
+		Pending:      pending,
+		Queued:       queued,
+		PendingCount: len(pending),
+		QueuedCount:  len(queued),
+	}, nil
+}
+
+func (n *Node) TxPoolCounts() (pending int, queued int) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return len(n.mempool), len(n.queued)
+}
+
+func (n *Node) PendingTransaction(hashValue string) (types.Transaction, bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	hashValue = strings.ToLower(strings.TrimSpace(hashValue))
+	for _, txs := range [][]types.Transaction{n.mempool, n.queued} {
+		for _, tx := range txs {
+			if tx.Hash() == hashValue {
+				return cloneTransaction(tx), true
+			}
+		}
+	}
+	return types.Transaction{}, false
+}
+
+func (n *Node) PendingTransactionHashes() []string {
+	_, hashes := n.PendingTransactionHashesSnapshot()
+	return hashes
+}
+
+func (n *Node) TxPoolRevision() uint64 {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.txPoolRevision
+}
+
+func (n *Node) PendingTransactionHashesSnapshot() (uint64, []string) {
+	return n.pendingTransactionHashesSnapshot(func(tx types.Transaction) string {
+		return tx.Hash()
+	})
+}
+
+func (n *Node) pendingTransactionHashesSnapshot(hashTransaction func(types.Transaction) string) (uint64, []string) {
+	n.mu.Lock()
+	revision := n.txPoolRevision
+	pending := append([]types.Transaction(nil), n.mempool...)
+	n.mu.Unlock()
+	hashes := make([]string, len(pending))
+	for index, tx := range pending {
+		hashes[index] = hashTransaction(tx)
+	}
+	return revision, hashes
+}
+
 func (n *Node) FeeMarket() FeeMarketSnapshot {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -1031,9 +1618,9 @@ func (n *Node) FeeMarket() FeeMarketSnapshot {
 
 func (n *Node) ReadContract(from string, to string, method string, args map[string]string) (string, error) {
 	n.mu.Lock()
-	working := n.state.Clone()
+	snapshot := n.state.ReadView()
 	n.mu.Unlock()
-	return n.runtime.Read(working, to, from, method, args)
+	return n.runtime.ReadImmutableSnapshot(snapshot, to, from, method, args)
 }
 
 func (n *Node) Proposal(id string) types.Proposal {
@@ -1067,21 +1654,27 @@ func (n *Node) highestCertifiedBlockLocked() (types.Block, bool) {
 }
 
 func (n *Node) matchFinalityVoteLocked(vote types.FinalitySignature) (types.Block, []string, error) {
-	for i := len(n.blocks) - 1; i >= 1; i-- {
-		block := n.blocks[i]
-		if !consensus.VerifyFinalityVote(block, vote) {
-			continue
-		}
-		validators, err := n.validatorsForBlockLocked(block)
-		if err != nil {
-			return types.Block{}, nil, err
-		}
-		if !validatorSetContains(validators, vote.Validator) {
-			return types.Block{}, nil, errors.New("finality vote signer is not a validator for block")
-		}
-		return block, validators, nil
+	if vote.ChainID != n.chainID {
+		return types.Block{}, nil, errors.New("finality vote chain id mismatch")
 	}
-	return types.Block{}, nil, errors.New("finality vote does not match a canonical block")
+	if vote.Height == 0 || vote.Height >= uint64(len(n.blocks)) {
+		return types.Block{}, nil, errors.New("finality vote height is not canonical")
+	}
+	block := n.blocks[vote.Height]
+	if block.Hash() != vote.BlockHash {
+		return types.Block{}, nil, errors.New("finality vote block hash is not canonical")
+	}
+	if !consensus.VerifyFinalityVote(block, vote) {
+		return types.Block{}, nil, errors.New("invalid finality vote signature")
+	}
+	validators, err := n.validatorsForBlockLocked(block)
+	if err != nil {
+		return types.Block{}, nil, err
+	}
+	if !validatorSetContains(validators, vote.Validator) {
+		return types.Block{}, nil, errors.New("finality vote signer is not a validator for block")
+	}
+	return block, validators, nil
 }
 
 func (n *Node) validatorsForBlockOrCurrentLocked(block types.Block) []string {
@@ -1139,10 +1732,7 @@ func (n *Node) rebuildFinalityVoteIndex() {
 			continue
 		}
 		for _, vote := range block.FinalityCertificate.Signatures {
-			n.recordFinalityVoteInIndex(block, types.FinalitySignature{
-				Validator: strings.ToLower(strings.TrimSpace(vote.Validator)),
-				Signature: vote.Signature,
-			})
+			n.recordFinalityVoteInIndex(block, vote)
 		}
 	}
 	for _, evidence := range n.finalityEvidence {
@@ -1196,13 +1786,42 @@ func (n *Node) recordFinalityVoteLocked(block types.Block, vote types.FinalitySi
 		n.finalityEvidence[evidenceKey] = evidence
 		slashErr = n.enqueueFinalityEvidenceSlashLocked(evidence)
 	}
-	if err := n.persistLocked(); err != nil {
-		return err
-	}
 	if slashErr != nil {
 		return fmt.Errorf("finality equivocation: validator %s signed height %d for %s and %s; automatic slash skipped: %w", vote.Validator, block.Header.Height, existing.BlockHash, blockHash, slashErr)
 	}
 	return fmt.Errorf("finality equivocation: validator %s signed height %d for %s and %s", vote.Validator, block.Header.Height, existing.BlockHash, blockHash)
+}
+
+func cloneFinalityVotes(source map[string]map[string]types.FinalitySignature) map[string]map[string]types.FinalitySignature {
+	cloned := make(map[string]map[string]types.FinalitySignature, len(source))
+	for blockHash, votes := range source {
+		clonedVotes := make(map[string]types.FinalitySignature, len(votes))
+		for validator, vote := range votes {
+			clonedVotes[validator] = vote
+		}
+		cloned[blockHash] = clonedVotes
+	}
+	return cloned
+}
+
+func cloneFinalityVoteIndex(source map[uint64]map[string]finalityVoteRecord) map[uint64]map[string]finalityVoteRecord {
+	cloned := make(map[uint64]map[string]finalityVoteRecord, len(source))
+	for height, votes := range source {
+		clonedVotes := make(map[string]finalityVoteRecord, len(votes))
+		for validator, vote := range votes {
+			clonedVotes[validator] = vote
+		}
+		cloned[height] = clonedVotes
+	}
+	return cloned
+}
+
+func cloneFinalityEvidence(source map[string]types.FinalityEquivocationEvidence) map[string]types.FinalityEquivocationEvidence {
+	cloned := make(map[string]types.FinalityEquivocationEvidence, len(source))
+	for key, evidence := range source {
+		cloned[key] = evidence
+	}
+	return cloned
 }
 
 func (n *Node) recordFinalityVoteInIndex(block types.Block, vote types.FinalitySignature) {
@@ -1224,6 +1843,9 @@ func finalityEvidenceKey(height uint64, validator string) string {
 }
 
 func (n *Node) enqueueFinalityEvidenceSlashLocked(evidence types.FinalityEquivocationEvidence) error {
+	if err := n.requireLocalSigningLocked("automatic finality slash"); err != nil {
+		return err
+	}
 	target := strings.ToLower(strings.TrimSpace(evidence.Validator))
 	if target == "" {
 		return errors.New("slash evidence validator is required")
@@ -1250,9 +1872,12 @@ func (n *Node) enqueueFinalityEvidenceSlashLocked(evidence types.FinalityEquivoc
 		GasLimit: gasLimit,
 		GasPrice: n.suggestedGasPriceLocked(),
 		Payload: map[string]string{
-			"target":   target,
-			"amount":   strconv.FormatUint(amount, 10),
-			"evidence": finalityEvidenceReference(evidence),
+			"target":            target,
+			"height":            strconv.FormatUint(evidence.Height, 10),
+			"first_block_hash":  evidence.FirstBlockHash,
+			"first_signature":   evidence.FirstSignature,
+			"second_block_hash": evidence.SecondBlockHash,
+			"second_signature":  evidence.SecondSignature,
 		},
 	}
 	signature, err := chaincrypto.Sign(n.proposerKey, tx.SigningBytes())
@@ -1263,13 +1888,18 @@ func (n *Node) enqueueFinalityEvidenceSlashLocked(evidence types.FinalityEquivoc
 	return n.submitTxLocked(tx)
 }
 
-func finalityEvidenceReference(evidence types.FinalityEquivocationEvidence) string {
-	return fmt.Sprintf("finality-equivocation:%d:%s:%s:%s",
-		evidence.Height,
-		strings.ToLower(strings.TrimSpace(evidence.Validator)),
-		evidence.FirstBlockHash,
-		evidence.SecondBlockHash,
-	)
+func (n *Node) requireLocalSigningLocked(action string) error {
+	if n.role != RoleValidator || n.proposerKey == nil {
+		return fmt.Errorf("%w: %s", ErrLocalSigningDisabled, action)
+	}
+	return nil
+}
+
+func (n *Node) requireOpenLocked() error {
+	if n.closed {
+		return ErrNodeClosed
+	}
+	return nil
 }
 
 func (n *Node) pendingStateLocked() (*state.Store, error) {
@@ -1316,7 +1946,7 @@ func (n *Node) submitQueuedReplacementLocked(index int, replacement types.Transa
 		if err != nil {
 			return err
 		}
-		n.mempool = nextMempool
+		n.setMempoolLocked(nextMempool)
 		n.queued = nextQueued
 		return nil
 	}
@@ -1380,7 +2010,7 @@ func (n *Node) promoteQueuedForState(
 			}
 			candidate := working.Clone()
 			if _, err := n.executor.ExecuteWithContext(candidate, tx, core.ExecutionContext{BlockHeight: blockHeight, BaseFeePerGas: baseFee}); err != nil {
-				if errors.Is(err, contracts.ErrWasmRuntimeFault) {
+				if core.IsFatalExecutionError(err) {
 					return nil, nil, err
 				}
 				continue
@@ -1398,12 +2028,10 @@ func (n *Node) promoteQueuedForState(
 }
 
 func (n *Node) recordRuntimeFaultLocked(err error) bool {
-	if !errors.Is(err, contracts.ErrWasmRuntimeFault) {
+	if !core.IsFatalExecutionError(err) {
 		return false
 	}
-	if n.haltErr == nil {
-		n.haltErr = err
-	}
+	n.setPersistentHaltLocked("runtime_fault", err)
 	return true
 }
 
@@ -1424,7 +2052,10 @@ func (n *Node) replayKnownChainLocked(blockHash string) ([]types.Block, *state.S
 	if len(chain) == 0 {
 		return nil, nil, errors.New("known chain is empty")
 	}
-	working := state.NewStoreFromSnapshot(n.genesisState)
+	working, err := state.NewStoreFromSnapshot(n.genesisState)
+	if err != nil {
+		return nil, nil, fmt.Errorf("restore genesis state: %w", err)
+	}
 	if chain[0].Header.Height != 0 || chain[0].Header.StateRoot != working.Root() {
 		return nil, nil, errors.New("genesis state root mismatch")
 	}
@@ -1460,6 +2091,13 @@ func (n *Node) knownChainLocked(blockHash string) ([]types.Block, error) {
 }
 
 func (n *Node) validateBlockOnStateLocked(parent types.Block, parentState *state.Store, block types.Block) (*state.Store, error) {
+	if err := validateBlockSize(block); err != nil {
+		return nil, fmt.Errorf("block violates size limits: %w", err)
+	}
+	engine := consensus.NewPOA(parentState.Validators())
+	if err := engine.ValidateBlock(parent, block); err != nil {
+		return nil, err
+	}
 	working := parentState.Clone()
 	executor := core.NewExecutor(n.chainID, block.Header.Proposer, n.runtime)
 	receipts := make([]types.Receipt, 0, len(block.Transactions))
@@ -1499,10 +2137,6 @@ func (n *Node) validateBlockOnStateLocked(parent types.Block, parentState *state
 	if working.Root() != block.Header.StateRoot {
 		return nil, errors.New("imported block state root mismatch")
 	}
-	engine := consensus.NewPOA(parentState.Validators())
-	if err := engine.ValidateBlock(parent, block); err != nil {
-		return nil, err
-	}
 	return working, nil
 }
 
@@ -1536,7 +2170,7 @@ func NextBaseFee(parent types.Block, fallbackGasLimit uint64) uint64 {
 	}
 	if parent.Header.GasUsed > target {
 		delta := parent.Header.GasUsed - target
-		increase := parentBaseFee * delta / target / baseFeeChangeDenominator
+		increase := baseFeeChange(parentBaseFee, delta, target, baseFeeChangeDenominator)
 		if increase == 0 {
 			increase = 1
 		}
@@ -1546,7 +2180,7 @@ func NextBaseFee(parent types.Block, fallbackGasLimit uint64) uint64 {
 		return parentBaseFee + increase
 	}
 	delta := target - parent.Header.GasUsed
-	decrease := parentBaseFee * delta / target / baseFeeChangeDenominator
+	decrease := baseFeeChange(parentBaseFee, delta, target, baseFeeChangeDenominator)
 	if decrease >= parentBaseFee {
 		return InitialBaseFeePerGas
 	}
@@ -1690,14 +2324,37 @@ func (n *Node) indexBlock(block types.Block) {
 	}
 }
 
-func eventMatchesFilter(record types.EventRecord, fromBlock uint64, toBlock uint64, address string, topic0 string) bool {
+func eventFilterValues(single string, multiple []string) map[string]struct{} {
+	values := make(map[string]struct{}, len(multiple)+1)
+	if single != "" {
+		values[strings.ToLower(single)] = struct{}{}
+	}
+	for _, value := range multiple {
+		values[strings.ToLower(value)] = struct{}{}
+	}
+	if len(values) == 0 {
+		return nil
+	}
+	return values
+}
+
+func eventMatchesFilter(record types.EventRecord, fromBlock uint64, toBlock uint64, addresses map[string]struct{}, topics map[string]struct{}, requireAddress bool) bool {
 	if record.BlockHeight < fromBlock || record.BlockHeight > toBlock {
 		return false
 	}
-	if address != "" && record.Address != address {
+	if requireAddress && record.Address == "" {
 		return false
 	}
-	return topic0 == "" || strings.ToLower(record.Topic0) == topic0
+	if len(addresses) > 0 {
+		if _, ok := addresses[strings.ToLower(record.Address)]; !ok {
+			return false
+		}
+	}
+	if len(topics) > 0 {
+		_, ok := topics[strings.ToLower(record.Topic0)]
+		return ok
+	}
+	return true
 }
 
 func eventTopic0(event types.Event) string {
@@ -1816,30 +2473,63 @@ func (n *Node) persistLocked() error {
 }
 
 func (n *Node) persistCandidateLocked(candidateState *state.Store, candidateBlocks []types.Block) error {
+	if err := n.requireOpenLocked(); err != nil {
+		return err
+	}
 	if n.dataDir == "" {
 		return nil
 	}
-	if err := os.MkdirAll(n.dataDir, 0o755); err != nil {
-		return err
+	if n.dataDirLock == nil {
+		return errors.New("persistent node does not hold its data directory lock")
+	}
+	if n.snapshotGeneration == math.MaxUint64 {
+		return errors.New("persisted snapshot generation overflow")
+	}
+	if len(candidateBlocks) == 0 {
+		return errors.New("cannot persist an empty canonical chain")
+	}
+	if err := ensureDataManifest(n.dataDir, n.chainID, candidateBlocks[0].Hash()); err != nil {
+		return n.handlePersistenceErrorLocked(err)
 	}
 	snapshot := diskSnapshot{
+		Version:          diskSnapshotVersion,
+		Generation:       n.snapshotGeneration + 1,
 		ChainID:          n.chainID,
 		GenesisState:     n.genesisState,
 		State:            candidateState.Snapshot(),
 		Blocks:           candidateBlocks,
 		KnownBlocks:      n.knownBlockListLocked(),
+		FinalityLock:     n.finalityLock,
+		FinalityVotes:    n.finalityVoteListLocked(),
 		FinalityEvidence: n.finalityEvidenceListLocked(),
 	}
+	checksum, err := diskSnapshotChecksum(snapshot)
+	if err != nil {
+		return err
+	}
+	snapshot.Checksum = checksum
 	raw, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
 		return err
 	}
 	path := chainPath(n.dataDir)
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, append(raw, '\n'), 0o600); err != nil {
+	contents := append(raw, '\n')
+	if err := validateDiskSnapshotEncodedSize(len(contents)); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := writeFileAtomically(path, contents, 0o600); err != nil {
+		return n.handlePersistenceErrorLocked(err)
+	}
+	n.snapshotGeneration = snapshot.Generation
+	return nil
+}
+
+func (n *Node) handlePersistenceErrorLocked(err error) error {
+	if !errors.Is(err, ErrAtomicCommitUncertain) {
+		return err
+	}
+	n.setPersistentHaltLocked("storage_commit_uncertain", err)
+	return n.haltErr
 }
 
 func (n *Node) knownBlockListLocked() []types.Block {
@@ -1870,20 +2560,28 @@ func (n *Node) finalityEvidenceListLocked() []types.FinalityEquivocationEvidence
 	return evidence
 }
 
-func loadDiskSnapshot(dataDir string) (*diskSnapshot, error) {
-	path := chainPath(dataDir)
-	raw, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
+func (n *Node) finalityVoteListLocked() []types.FinalitySignature {
+	unique := make(map[string]types.FinalitySignature)
+	for _, votes := range n.finalityVotes {
+		for _, vote := range votes {
+			key := fmt.Sprintf("%d:%s:%s", vote.Height, vote.Validator, vote.BlockHash)
+			unique[key] = vote
+		}
 	}
-	if err != nil {
-		return nil, err
+	votes := make([]types.FinalitySignature, 0, len(unique))
+	for _, vote := range unique {
+		votes = append(votes, vote)
 	}
-	var snapshot diskSnapshot
-	if err := json.Unmarshal(raw, &snapshot); err != nil {
-		return nil, err
-	}
-	return &snapshot, nil
+	sort.Slice(votes, func(i int, j int) bool {
+		if votes[i].Height != votes[j].Height {
+			return votes[i].Height < votes[j].Height
+		}
+		if votes[i].Validator != votes[j].Validator {
+			return votes[i].Validator < votes[j].Validator
+		}
+		return votes[i].BlockHash < votes[j].BlockHash
+	})
+	return votes
 }
 
 func chainPath(dataDir string) string {

@@ -2,6 +2,9 @@ package core_test
 
 import (
 	"encoding/hex"
+	"errors"
+	"maps"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -238,6 +241,35 @@ func TestFeeAdmissionReservesSignedMaxFeeCap(t *testing.T) {
 	}
 }
 
+func TestFeeAdmissionRejectsUnstakeSettlementOverflow(t *testing.T) {
+	store, executor, key, alice, _ := newExecutorFixture(t)
+	const gasLimit = uint64(31_000)
+	store.SetBalance(alice, gasLimit)
+	if err := store.AddStake(alice, ^uint64(0)); err != nil {
+		t.Fatal(err)
+	}
+	tx := signedTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxUnstake,
+		From:     alice,
+		Nonce:    0,
+		Value:    ^uint64(0),
+		GasLimit: gasLimit,
+		GasPrice: 1,
+	})
+	rootBefore := store.Root()
+	_, err := executor.ExecuteWithContext(store, tx, core.ExecutionContext{BaseFeePerGas: 1})
+	if err == nil || err.Error() != "recipient balance overflow" {
+		t.Fatalf("unstake settlement overflow error = %v", err)
+	}
+	if core.IsFatalExecutionError(err) {
+		t.Fatalf("unstake settlement overflow was classified fatal: %v", err)
+	}
+	if store.Root() != rootBefore {
+		t.Fatal("rejected unstake settlement overflow changed state")
+	}
+}
+
 func TestExecuteTransfer(t *testing.T) {
 	store, executor, key, alice, bob := newExecutorFixture(t)
 	tx := signedTx(t, key, types.Transaction{
@@ -343,6 +375,10 @@ func TestExecutorAcceptsEthereumType2TransferSignature(t *testing.T) {
 		t.Fatal(err)
 	}
 	tx.Signature = signature
+	tx.EthereumRawHash, err = types.EthereumType2TransactionHash(tx)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	executor := core.NewExecutor("chainlab-local", alice, nil)
 	receipt, err := executor.ExecuteWithContext(store, tx, core.ExecutionContext{BlockHeight: 1, BaseFeePerGas: 1})
@@ -596,7 +632,7 @@ func TestBatchCallUpdatesContractState(t *testing.T) {
 		Type:     types.TxDeploy,
 		From:     alice,
 		Nonce:    0,
-		GasLimit: 80_000,
+		GasLimit: 100_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"code_id": "counter.v1",
@@ -613,7 +649,7 @@ func TestBatchCallUpdatesContractState(t *testing.T) {
 		Type:     types.TxBatch,
 		From:     alice,
 		Nonce:    1,
-		GasLimit: 92_000,
+		GasLimit: 100_000,
 		GasPrice: 1,
 		Batch: []types.BatchOperation{
 			{
@@ -631,7 +667,7 @@ func TestBatchCallUpdatesContractState(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if receipt.GasUsed != 92_000 {
+	if receipt.GasUsed != 93_453 {
 		t.Fatalf("gas used = %d", receipt.GasUsed)
 	}
 	if got := store.GetAccount(deployReceipt.ContractAddress).Storage["count"]; got != "4" {
@@ -1086,7 +1122,7 @@ func TestAccountSessionKeyCanCallAllowedContractMethod(t *testing.T) {
 		Type:     types.TxDeploy,
 		From:     owner,
 		Nonce:    0,
-		GasLimit: 80_000,
+		GasLimit: 100_000,
 		GasPrice: 1,
 		Payload: map[string]string{
 			"code_id": "counter.v1",
@@ -1397,6 +1433,59 @@ func TestAccountSessionKeyRejectsInvalidPolicyUseAndRevocation(t *testing.T) {
 	}
 }
 
+const recoveryFeeCollector = "0xfee0000000000000000000000000000000000000"
+
+func requireRecoveryExecutionRevert(
+	t *testing.T,
+	fixture recoveryFixture,
+	tx types.Transaction,
+	context core.ExecutionContext,
+) types.Receipt {
+	t.Helper()
+	before := fixture.store.Clone()
+	receipt, err := fixture.executor.ExecuteWithContext(fixture.store, tx, context)
+	if err != nil {
+		t.Fatalf("included recovery failure returned error: %v", err)
+	}
+	if receipt.Success || receipt.FailureCode != types.ReceiptFailureExecutionReverted || receipt.Error != "" {
+		t.Fatalf("recovery failure receipt = %+v", receipt)
+	}
+	if receipt.GasUsed == 0 {
+		t.Fatal("reverted recovery did not consume gas")
+	}
+
+	expected := before.Clone()
+	if err := expected.IncrementNonce(tx.From); err != nil {
+		t.Fatal(err)
+	}
+	feePayer := strings.ToLower(strings.TrimSpace(tx.From))
+	action := strings.ToLower(strings.TrimSpace(tx.Payload["action"]))
+	if action == "approve" || action == "execute" {
+		feePayer = strings.ToLower(strings.TrimSpace(tx.Signer))
+	}
+	wantReceiptFeePayer := ""
+	if feePayer != strings.ToLower(strings.TrimSpace(tx.From)) {
+		wantReceiptFeePayer = feePayer
+	}
+	if receipt.FeePayer != wantReceiptFeePayer {
+		t.Fatalf("recovery failure fee payer = %q, want %q", receipt.FeePayer, wantReceiptFeePayer)
+	}
+	fee, err := core.CalculateFee(tx, receipt.GasUsed, context.BaseFeePerGas)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := expected.SubBalance(feePayer, fee.TotalFee); err != nil {
+		t.Fatal(err)
+	}
+	if err := expected.AddBalance(recoveryFeeCollector, fee.PriorityFee); err != nil {
+		t.Fatal(err)
+	}
+	if fixture.store.Root() != expected.Root() {
+		t.Fatal("reverted recovery changed state beyond nonce and fee settlement")
+	}
+	return receipt
+}
+
 func TestAccountRecoveryRotatesOwnerAfterThresholdAndDelay(t *testing.T) {
 	fixture := newRecoveryFixture(t, false)
 	store := fixture.store
@@ -1442,19 +1531,13 @@ func TestAccountRecoveryRotatesOwnerAfterThresholdAndDelay(t *testing.T) {
 		t.Fatalf("guardian nonce = %d", got)
 	}
 
-	beforeRejected := store.Root()
 	earlyThreshold := recoveryTx(t, fixture.guardianAKey, fixture.account, 2, map[string]string{
 		"action":    "execute",
 		"new_owner": fixture.newOwner,
 	})
-	if _, err := executor.ExecuteWithContext(store, earlyThreshold, core.ExecutionContext{BlockHeight: 14}); err == nil || err.Error() != "recovery approval threshold not met" {
-		t.Fatalf("threshold error = %v", err)
-	}
-	if store.Root() != beforeRejected || store.GetAccount(fixture.account).Nonce != 2 {
-		t.Fatal("failed threshold check mutated recovery account")
-	}
+	requireRecoveryExecutionRevert(t, fixture, earlyThreshold, core.ExecutionContext{BlockHeight: 14})
 
-	approveB := recoveryTx(t, fixture.guardianBKey, fixture.account, 2, map[string]string{
+	approveB := recoveryTx(t, fixture.guardianBKey, fixture.account, 3, map[string]string{
 		"action":    "approve",
 		"new_owner": fixture.newOwner,
 	})
@@ -1468,19 +1551,13 @@ func TestAccountRecoveryRotatesOwnerAfterThresholdAndDelay(t *testing.T) {
 	if got := store.GetStorage(fixture.account, "recovery:execute_after"); got != "15" {
 		t.Fatalf("execute_after after threshold = %q", got)
 	}
-	beforeDelay := store.Root()
-	earlyDelay := recoveryTx(t, fixture.guardianAKey, fixture.account, 3, map[string]string{
+	earlyDelay := recoveryTx(t, fixture.guardianAKey, fixture.account, 4, map[string]string{
 		"action":    "execute",
 		"new_owner": fixture.newOwner,
 	})
-	if _, err := executor.ExecuteWithContext(store, earlyDelay, core.ExecutionContext{BlockHeight: 13}); err == nil || err.Error() != "recovery delay has not elapsed" {
-		t.Fatalf("delay error = %v", err)
-	}
-	if store.Root() != beforeDelay || store.GetAccount(fixture.account).Nonce != 3 {
-		t.Fatal("failed delay check mutated recovery account")
-	}
+	requireRecoveryExecutionRevert(t, fixture, earlyDelay, core.ExecutionContext{BlockHeight: 13})
 
-	execute := recoveryTx(t, fixture.guardianBKey, fixture.account, 3, map[string]string{
+	execute := recoveryTx(t, fixture.guardianBKey, fixture.account, 5, map[string]string{
 		"action":    "execute",
 		"new_owner": fixture.newOwner,
 	})
@@ -1512,7 +1589,7 @@ func TestAccountRecoveryRotatesOwnerAfterThresholdAndDelay(t *testing.T) {
 		From:     fixture.account,
 		Signer:   fixture.owner,
 		To:       fixture.receiver,
-		Nonce:    4,
+		Nonce:    6,
 		Value:    1,
 		GasLimit: 21_000,
 		GasPrice: 1,
@@ -1526,7 +1603,7 @@ func TestAccountRecoveryRotatesOwnerAfterThresholdAndDelay(t *testing.T) {
 		From:     fixture.account,
 		Signer:   fixture.guardianA,
 		To:       fixture.receiver,
-		Nonce:    4,
+		Nonce:    6,
 		Value:    1,
 		GasLimit: 21_000,
 		GasPrice: 1,
@@ -1540,7 +1617,7 @@ func TestAccountRecoveryRotatesOwnerAfterThresholdAndDelay(t *testing.T) {
 		From:     fixture.account,
 		Signer:   fixture.guardianA,
 		To:       "0xcccccccccccccccccccccccccccccccccccccccc",
-		Nonce:    4,
+		Nonce:    6,
 		GasLimit: 50_000,
 		GasPrice: 1,
 		Payload:  map[string]string{"method": "increment"},
@@ -1554,7 +1631,7 @@ func TestAccountRecoveryRotatesOwnerAfterThresholdAndDelay(t *testing.T) {
 		From:     fixture.account,
 		Signer:   fixture.newOwner,
 		To:       fixture.receiver,
-		Nonce:    4,
+		Nonce:    6,
 		Value:    10,
 		GasLimit: 21_000,
 		GasPrice: 1,
@@ -1568,7 +1645,7 @@ func TestAccountRecoveryRotatesOwnerAfterThresholdAndDelay(t *testing.T) {
 	if got := store.GetAccount(fixture.account).Balance; got != 1_923_990 {
 		t.Fatalf("recovered account balance = %d", got)
 	}
-	if got := store.GetAccount(fixture.guardianA).Balance; got != 445_000 {
+	if got := store.GetAccount(fixture.guardianA).Balance; got != 335_000 {
 		t.Fatalf("guardian A balance = %d", got)
 	}
 	if got := store.GetAccount(fixture.guardianB).Balance; got != 390_000 {
@@ -1577,7 +1654,7 @@ func TestAccountRecoveryRotatesOwnerAfterThresholdAndDelay(t *testing.T) {
 	if got := store.GetAccount(fixture.guardianB).Nonce; got != 0 {
 		t.Fatalf("guardian B nonce = %d", got)
 	}
-	if got := store.GetAccount("0xfee0000000000000000000000000000000000000").Balance; got != 241_000 {
+	if got := store.GetAccount(recoveryFeeCollector).Balance; got != 351_000 {
 		t.Fatalf("fee collector balance = %d", got)
 	}
 }
@@ -1630,6 +1707,7 @@ func TestDelegatedEOARecoveryCancelClearAndRoleIsolation(t *testing.T) {
 		t.Fatal("guardian recovery authority must not authorize transfers")
 	}
 
+	rejectedRoleRoot := store.Root()
 	intruderConfigure := recoveryTx(t, fixture.intruderKey, fixture.account, 3, map[string]string{
 		"action":    "configure",
 		"guardians": fixture.intruder,
@@ -1650,8 +1728,8 @@ func TestDelegatedEOARecoveryCancelClearAndRoleIsolation(t *testing.T) {
 	if _, err := executor.Execute(store, guardianClear); err == nil || err.Error() != "account recovery owner action requires current owner" {
 		t.Fatalf("guardian clear error = %v", err)
 	}
-	if got := store.GetAccount(fixture.account).Nonce; got != 3 {
-		t.Fatalf("nonce after rejected role actions = %d", got)
+	if store.Root() != rejectedRoleRoot || store.GetAccount(fixture.account).Nonce != 3 {
+		t.Fatal("rejected recovery role actions mutated state")
 	}
 
 	clear := recoveryTx(t, fixture.ownerKey, fixture.account, 3, map[string]string{"action": "clear"})
@@ -1780,20 +1858,14 @@ func TestAccountRecoveryVotesConvergeWithoutMinorityTargetBlocking(t *testing.T)
 		"action":    "approve",
 		"new_owner": fixture.newOwner,
 	})
-	rootBeforeDuplicate := store.Root()
-	if _, err := fixture.executor.ExecuteWithContext(store, duplicate, core.ExecutionContext{BlockHeight: 11}); err == nil || err.Error() != "recovery approval already recorded" {
-		t.Fatalf("duplicate approval error = %v", err)
-	}
-	if store.Root() != rootBeforeDuplicate || store.GetAccount(fixture.account).Nonce != 1 {
-		t.Fatal("duplicate approval mutated state")
-	}
+	requireRecoveryExecutionRevert(t, fixture, duplicate, core.ExecutionContext{BlockHeight: 11})
 
 	otherOwnerKey, err := chaincrypto.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
 	otherOwner := chaincrypto.AddressFromPrivateKey(otherOwnerKey)
-	competing := recoveryTx(t, fixture.guardianBKey, fixture.account, 1, map[string]string{
+	competing := recoveryTx(t, fixture.guardianBKey, fixture.account, 2, map[string]string{
 		"action":    "approve",
 		"new_owner": otherOwner,
 	})
@@ -1815,19 +1887,13 @@ func TestAccountRecoveryVotesConvergeWithoutMinorityTargetBlocking(t *testing.T)
 		t.Fatal(err)
 	}
 	thirdOwner := chaincrypto.AddressFromPrivateKey(thirdOwnerKey)
-	nonConvergingChange := recoveryTx(t, fixture.guardianAKey, fixture.account, 2, map[string]string{
+	nonConvergingChange := recoveryTx(t, fixture.guardianAKey, fixture.account, 3, map[string]string{
 		"action":    "approve",
 		"new_owner": thirdOwner,
 	})
-	rootBeforeChange := store.Root()
-	if _, err := fixture.executor.ExecuteWithContext(store, nonConvergingChange, core.ExecutionContext{BlockHeight: 13}); err == nil || err.Error() != "recovery vote change must reach approval threshold" {
-		t.Fatalf("non-converging vote change error = %v", err)
-	}
-	if store.Root() != rootBeforeChange || store.GetAccount(fixture.account).Nonce != 2 {
-		t.Fatal("rejected vote change mutated state")
-	}
+	requireRecoveryExecutionRevert(t, fixture, nonConvergingChange, core.ExecutionContext{BlockHeight: 13})
 
-	converge := recoveryTx(t, fixture.guardianAKey, fixture.account, 2, map[string]string{
+	converge := recoveryTx(t, fixture.guardianAKey, fixture.account, 4, map[string]string{
 		"action":    "approve",
 		"new_owner": otherOwner,
 	})
@@ -1848,13 +1914,11 @@ func TestAccountRecoveryVotesConvergeWithoutMinorityTargetBlocking(t *testing.T)
 		t.Fatalf("converged execute_after = %q", got)
 	}
 
-	mismatch := recoveryTx(t, fixture.guardianBKey, fixture.account, 3, map[string]string{
+	mismatch := recoveryTx(t, fixture.guardianBKey, fixture.account, 5, map[string]string{
 		"action":    "execute",
 		"new_owner": fixture.newOwner,
 	})
-	if _, err := fixture.executor.ExecuteWithContext(store, mismatch, core.ExecutionContext{BlockHeight: 16}); err == nil || err.Error() != "recovery new owner does not match pending owner" {
-		t.Fatalf("mismatched execute error = %v", err)
-	}
+	requireRecoveryExecutionRevert(t, fixture, mismatch, core.ExecutionContext{BlockHeight: 16})
 }
 
 func TestAccountRecoveryVotingRoundExpiresAndConfigureClearsActiveState(t *testing.T) {
@@ -1945,19 +2009,13 @@ func TestAccountRecoveryExecutionWindowBoundaryAndRollover(t *testing.T) {
 			t.Fatal(err)
 		}
 		execute := recoveryTx(t, fixture.guardianAKey, fixture.account, 1, map[string]string{"action": "execute", "new_owner": fixture.newOwner})
-		rootBefore := fixture.store.Root()
-		if _, err := fixture.executor.ExecuteWithContext(fixture.store, execute, core.ExecutionContext{BlockHeight: 258}); err == nil || err.Error() != "recovery proposal has expired" {
-			t.Fatalf("expired execute error = %v", err)
-		}
-		if fixture.store.Root() != rootBefore || fixture.store.GetAccount(fixture.account).Nonce != 1 {
-			t.Fatal("expired execute mutated state")
-		}
+		requireRecoveryExecutionRevert(t, fixture, execute, core.ExecutionContext{BlockHeight: 258})
 		otherOwnerKey, err := chaincrypto.GenerateKey()
 		if err != nil {
 			t.Fatal(err)
 		}
 		otherOwner := chaincrypto.AddressFromPrivateKey(otherOwnerKey)
-		newRound := recoveryTx(t, fixture.guardianAKey, fixture.account, 1, map[string]string{"action": "approve", "new_owner": otherOwner})
+		newRound := recoveryTx(t, fixture.guardianAKey, fixture.account, 2, map[string]string{"action": "approve", "new_owner": otherOwner})
 		if _, err := fixture.executor.ExecuteWithContext(fixture.store, newRound, core.ExecutionContext{BlockHeight: 258}); err != nil {
 			t.Fatal(err)
 		}
@@ -2067,6 +2125,7 @@ func TestAccountRecoveryRejectsInvalidAuthorityTargetAndNonceOverflow(t *testing
 	store.SetStorage(fixture.account, "recovery:threshold", "1")
 	store.SetStorage(fixture.account, "recovery:delay", "0")
 
+	authorizationRoot := store.Root()
 	badSignature := recoveryTx(t, fixture.ownerKey, fixture.account, 0, map[string]string{"action": "clear"})
 	badSignature.Signature = "0x1234"
 	if _, err := fixture.executor.Execute(store, badSignature); err == nil || err.Error() != "invalid transaction signature" {
@@ -2079,47 +2138,40 @@ func TestAccountRecoveryRejectsInvalidAuthorityTargetAndNonceOverflow(t *testing
 	if _, err := fixture.executor.Execute(store, signerMismatch); err == nil || err.Error() != "invalid transaction signature" {
 		t.Fatalf("signer mismatch error = %v", err)
 	}
+	if store.Root() != authorizationRoot || store.GetAccount(fixture.account).Nonce != 0 {
+		t.Fatal("invalid recovery authorization mutated state")
+	}
 
 	currentOwner := recoveryTx(t, fixture.guardianAKey, fixture.account, 0, map[string]string{
 		"action":    "approve",
 		"new_owner": fixture.owner,
 	})
-	if _, err := fixture.executor.Execute(store, currentOwner); err == nil || err.Error() != "recovery new owner must differ from current owner" {
-		t.Fatalf("current owner target error = %v", err)
-	}
-	accountTarget := recoveryTx(t, fixture.guardianAKey, fixture.account, 0, map[string]string{
+	requireRecoveryExecutionRevert(t, fixture, currentOwner, core.ExecutionContext{})
+	accountTarget := recoveryTx(t, fixture.guardianAKey, fixture.account, 1, map[string]string{
 		"action":    "approve",
 		"new_owner": fixture.account,
 	})
-	if _, err := fixture.executor.Execute(store, accountTarget); err == nil || err.Error() != "recovery new owner must differ from recovered account" {
-		t.Fatalf("account target error = %v", err)
-	}
-	noPending := recoveryTx(t, fixture.guardianAKey, fixture.account, 0, map[string]string{
+	requireRecoveryExecutionRevert(t, fixture, accountTarget, core.ExecutionContext{})
+	noPending := recoveryTx(t, fixture.guardianAKey, fixture.account, 2, map[string]string{
 		"action":    "execute",
 		"new_owner": fixture.newOwner,
 	})
-	if _, err := fixture.executor.Execute(store, noPending); err == nil || err.Error() != "recovery has no pending owner" {
-		t.Fatalf("no pending error = %v", err)
-	}
+	requireRecoveryExecutionRevert(t, fixture, noPending, core.ExecutionContext{})
 
-	ownerGuardian := recoveryTx(t, fixture.ownerKey, fixture.account, 0, map[string]string{
+	ownerGuardian := recoveryTx(t, fixture.ownerKey, fixture.account, 3, map[string]string{
 		"action":    "configure",
 		"guardians": fixture.owner,
 		"threshold": "1",
 		"delay":     "0",
 	})
-	if _, err := fixture.executor.Execute(store, ownerGuardian); err == nil || err.Error() != "recovery guardian must differ from current owner" {
-		t.Fatalf("owner guardian error = %v", err)
-	}
-	accountGuardian := recoveryTx(t, fixture.ownerKey, fixture.account, 0, map[string]string{
+	requireRecoveryExecutionRevert(t, fixture, ownerGuardian, core.ExecutionContext{})
+	accountGuardian := recoveryTx(t, fixture.ownerKey, fixture.account, 4, map[string]string{
 		"action":    "configure",
 		"guardians": fixture.account,
 		"threshold": "1",
 		"delay":     "0",
 	})
-	if _, err := fixture.executor.Execute(store, accountGuardian); err == nil || err.Error() != "recovery guardian must differ from recovered account" {
-		t.Fatalf("account guardian error = %v", err)
-	}
+	requireRecoveryExecutionRevert(t, fixture, accountGuardian, core.ExecutionContext{})
 	contractGuardianFixture := newRecoveryFixture(t, false)
 	contractGuardianFixture.store.SetCodeID(contractGuardianFixture.guardianA, contracts.AccountCodeID)
 	contractGuardian := recoveryTx(t, contractGuardianFixture.ownerKey, contractGuardianFixture.account, 0, map[string]string{
@@ -2128,9 +2180,7 @@ func TestAccountRecoveryRejectsInvalidAuthorityTargetAndNonceOverflow(t *testing
 		"threshold": "1",
 		"delay":     "0",
 	})
-	if _, err := contractGuardianFixture.executor.Execute(contractGuardianFixture.store, contractGuardian); err == nil || err.Error() != "recovery guardian must be an EOA" {
-		t.Fatalf("contract guardian error = %v", err)
-	}
+	requireRecoveryExecutionRevert(t, contractGuardianFixture, contractGuardian, core.ExecutionContext{})
 	contractOwnerFixture := newRecoveryFixture(t, false)
 	contractOwnerFixture.store.SetStorage(contractOwnerFixture.account, "recovery:guardians", contractOwnerFixture.guardianA)
 	contractOwnerFixture.store.SetStorage(contractOwnerFixture.account, "recovery:threshold", "1")
@@ -2140,23 +2190,29 @@ func TestAccountRecoveryRejectsInvalidAuthorityTargetAndNonceOverflow(t *testing
 		"action":    "approve",
 		"new_owner": contractOwnerFixture.newOwner,
 	})
-	if _, err := contractOwnerFixture.executor.Execute(contractOwnerFixture.store, contractOwner); err == nil || err.Error() != "recovery new owner must be an EOA" {
-		t.Fatalf("contract new owner error = %v", err)
-	}
+	requireRecoveryExecutionRevert(t, contractOwnerFixture, contractOwner, core.ExecutionContext{})
 
 	plainStore := state.NewStore()
 	plainStore.SetStorage(fixture.account, "owner", fixture.owner)
 	plainStore.SetBalance(fixture.account, 100_000)
 	plainTx := recoveryTx(t, fixture.ownerKey, fixture.account, 0, map[string]string{"action": "clear"})
+	plainRoot := plainStore.Root()
 	if _, err := fixture.executor.Execute(plainStore, plainTx); err == nil || err.Error() != "account recovery requires account.v1 from account" {
 		t.Fatalf("plain account error = %v", err)
+	}
+	if plainStore.Root() != plainRoot {
+		t.Fatal("plain-account recovery rejection mutated state")
 	}
 	multisigStore := state.NewStore()
 	multisigStore.SetCodeID(fixture.account, contracts.MultisigCodeID)
 	multisigStore.SetStorage(fixture.account, "owner", fixture.owner)
 	multisigStore.SetBalance(fixture.account, 100_000)
+	multisigRoot := multisigStore.Root()
 	if _, err := fixture.executor.Execute(multisigStore, plainTx); err == nil || err.Error() != "account recovery requires account.v1 from account" {
 		t.Fatalf("multisig account error = %v", err)
+	}
+	if multisigStore.Root() != multisigRoot {
+		t.Fatal("multisig recovery rejection mutated state")
 	}
 
 	store.SetNonce(fixture.account, ^uint64(0))
@@ -2177,6 +2233,7 @@ func TestAccountRecoveryRejectsInvalidTargetAndExecuteHeightOverflow(t *testing.
 	store.SetStorage(fixture.account, "recovery:threshold", "1")
 	store.SetStorage(fixture.account, "recovery:delay", "1")
 
+	invalidTargetRoot := store.Root()
 	invalidTarget := recoveryTx(t, fixture.guardianAKey, fixture.account, 0, map[string]string{
 		"action":    "approve",
 		"new_owner": "0x1234",
@@ -2195,25 +2252,23 @@ func TestAccountRecoveryRejectsInvalidTargetAndExecuteHeightOverflow(t *testing.
 	if _, err := fixture.executor.ExecuteWithContext(store, missingExecuteTarget, core.ExecutionContext{BlockHeight: 1}); err == nil || err.Error() != "recovery new owner is required" {
 		t.Fatalf("missing execute target error = %v", err)
 	}
+	if store.Root() != invalidTargetRoot || store.GetAccount(fixture.account).Nonce != 0 {
+		t.Fatal("invalid recovery target mutated state")
+	}
 	overflow := recoveryTx(t, fixture.guardianAKey, fixture.account, 0, map[string]string{
 		"action":    "approve",
 		"new_owner": fixture.newOwner,
 	})
-	rootBefore := store.Root()
-	if _, err := fixture.executor.ExecuteWithContext(store, overflow, core.ExecutionContext{BlockHeight: ^uint64(0)}); err == nil || err.Error() != "recovery execute height overflow" {
-		t.Fatalf("overflow error = %v", err)
-	}
-	if store.Root() != rootBefore || store.GetAccount(fixture.account).Nonce != 0 {
-		t.Fatal("overflowing recovery approval mutated state")
-	}
+	requireRecoveryExecutionRevert(t, fixture, overflow, core.ExecutionContext{BlockHeight: ^uint64(0)})
 }
 
 func TestAccountRecoveryRejectsCorruptedStoredState(t *testing.T) {
 	tests := []struct {
-		name      string
-		setup     func(recoveryFixture)
-		action    string
-		wantError string
+		name             string
+		setup            func(recoveryFixture)
+		action           string
+		wantError        string
+		executionFailure bool
 	}{
 		{name: "zero threshold", setup: func(f recoveryFixture) { f.store.SetStorage(f.account, "recovery:threshold", "0") }, action: "approve", wantError: "recovery threshold must be positive"},
 		{name: "malformed guardian set", setup: func(f recoveryFixture) { f.store.SetStorage(f.account, "recovery:guardians", "0x1234") }, action: "approve", wantError: "recovery guardian must be a 20-byte hex address"},
@@ -2250,7 +2305,7 @@ func TestAccountRecoveryRejectsCorruptedStoredState(t *testing.T) {
 		{name: "session epoch overflow", setup: func(f recoveryFixture) {
 			seedPendingRecovery(f, "1", f.guardianA, "0", "256")
 			f.store.SetStorage(f.account, "session:epoch", "18446744073709551615")
-		}, action: "execute", wantError: "session epoch overflow"},
+		}, action: "execute", wantError: "session epoch overflow", executionFailure: true},
 	}
 
 	for _, test := range tests {
@@ -2262,10 +2317,14 @@ func TestAccountRecoveryRejectsCorruptedStoredState(t *testing.T) {
 			test.setup(fixture)
 			payload := map[string]string{"action": test.action, "new_owner": fixture.newOwner}
 			tx := recoveryTx(t, fixture.guardianBKey, fixture.account, 0, payload)
+			if test.executionFailure {
+				requireRecoveryExecutionRevert(t, fixture, tx, core.ExecutionContext{BlockHeight: 5})
+				return
+			}
 			rootBefore := fixture.store.Root()
 			_, err := fixture.executor.ExecuteWithContext(fixture.store, tx, core.ExecutionContext{BlockHeight: 5})
-			if err == nil || err.Error() != test.wantError {
-				t.Fatalf("error = %v, want %q", err, test.wantError)
+			if !errors.Is(err, core.ErrConsensusExecutionFault) || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("error = %v, want consensus fault containing %q", err, test.wantError)
 			}
 			if fixture.store.Root() != rootBefore || fixture.store.GetAccount(fixture.account).Nonce != 0 {
 				t.Fatal("corrupted recovery state attempt mutated state")
@@ -2325,7 +2384,7 @@ func newRecoveryFixture(t *testing.T, delegated bool) recoveryFixture {
 	store.SetBalance(addresses[2], 500_000)
 	return recoveryFixture{
 		store:        store,
-		executor:     core.NewExecutor("chainlab-local", "0xfee0000000000000000000000000000000000000", contracts.NewRuntimeWithDefaults()),
+		executor:     core.NewExecutor("chainlab-local", recoveryFeeCollector, contracts.NewRuntimeWithDefaults()),
 		account:      account,
 		ownerKey:     keys[0],
 		owner:        addresses[0],
@@ -2694,7 +2753,7 @@ func authorizedTx(t *testing.T, keys []chaincrypto.PrivateKey, tx types.Transact
 	return tx
 }
 
-func TestStakeUnstakeAndVote(t *testing.T) {
+func TestStakeAndUnstake(t *testing.T) {
 	store, executor, key, alice, _ := newExecutorFixture(t)
 
 	stake := signedTx(t, key, types.Transaction{
@@ -2713,50 +2772,11 @@ func TestStakeUnstakeAndVote(t *testing.T) {
 		t.Fatalf("stake = %d", got)
 	}
 
-	submit := signedTx(t, key, types.Transaction{
-		ChainID:  "chainlab-local",
-		Type:     types.TxProposalSubmit,
-		From:     alice,
-		Nonce:    1,
-		GasLimit: 35_000,
-		GasPrice: 1,
-		Payload: map[string]string{
-			"title":         "Upgrade one",
-			"kind":          "param.change",
-			"param":         "governance.mode",
-			"value":         "demo",
-			"voting_period": "2",
-		},
-	})
-	submitReceipt, err := executor.ExecuteAtHeight(store, submit, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	vote := signedTx(t, key, types.Transaction{
-		ChainID:  "chainlab-local",
-		Type:     types.TxVote,
-		From:     alice,
-		Nonce:    2,
-		GasLimit: 25_000,
-		GasPrice: 1,
-		Payload: map[string]string{
-			"proposal": submitReceipt.ProposalID,
-			"choice":   "yes",
-		},
-	})
-	if _, err := executor.ExecuteAtHeight(store, vote, 2); err != nil {
-		t.Fatal(err)
-	}
-	if got := store.Proposal(submitReceipt.ProposalID).Votes["yes"]; got != 500 {
-		t.Fatalf("yes vote power = %d", got)
-	}
-
 	unstake := signedTx(t, key, types.Transaction{
 		ChainID:  "chainlab-local",
 		Type:     types.TxUnstake,
 		From:     alice,
-		Nonce:    3,
+		Nonce:    1,
 		Value:    200,
 		GasLimit: 30_000,
 		GasPrice: 1,
@@ -2769,306 +2789,343 @@ func TestStakeUnstakeAndVote(t *testing.T) {
 	}
 }
 
-func TestGovernanceProposalLifecycleExecutesParamChange(t *testing.T) {
+func TestGovernanceTransactionsAreRejectedAtAdmission(t *testing.T) {
 	store, executor, key, alice, _ := newExecutorFixture(t)
 	if err := store.AddStake(alice, 500); err != nil {
 		t.Fatal(err)
 	}
 
-	submit := signedTx(t, key, types.Transaction{
-		ChainID:  "chainlab-local",
-		Type:     types.TxProposalSubmit,
-		From:     alice,
-		Nonce:    0,
-		GasLimit: 35_000,
-		GasPrice: 1,
-		Payload: map[string]string{
-			"title":         "Tune governance quorum",
-			"description":   "Move quorum to majority for the local chain",
-			"kind":          "param.change",
-			"param":         "governance.quorum",
-			"value":         "majority",
-			"voting_period": "2",
-		},
-	})
-	submitReceipt, err := executor.ExecuteAtHeight(store, submit, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if submitReceipt.ProposalID == "" {
-		t.Fatalf("submit receipt = %+v", submitReceipt)
-	}
-	proposal := store.Proposal(submitReceipt.ProposalID)
-	if proposal.Status != types.ProposalStatusOpen {
-		t.Fatalf("proposal after submit = %+v", proposal)
-	}
-	if proposal.SubmitHeight != 1 || proposal.VotingEndHeight != 3 {
-		t.Fatalf("proposal heights = submit %d end %d", proposal.SubmitHeight, proposal.VotingEndHeight)
-	}
-
-	vote := signedTx(t, key, types.Transaction{
-		ChainID:  "chainlab-local",
-		Type:     types.TxVote,
-		From:     alice,
-		Nonce:    1,
-		GasLimit: 25_000,
-		GasPrice: 1,
-		Payload: map[string]string{
-			"proposal": submitReceipt.ProposalID,
-			"choice":   "yes",
-		},
-	})
-	if _, err := executor.ExecuteAtHeight(store, vote, 2); err != nil {
-		t.Fatal(err)
-	}
-	if got := store.Proposal(submitReceipt.ProposalID).Votes["yes"]; got != 500 {
-		t.Fatalf("yes votes = %d", got)
-	}
-
-	earlyExecute := signedTx(t, key, types.Transaction{
-		ChainID:  "chainlab-local",
-		Type:     types.TxProposalExecute,
-		From:     alice,
-		Nonce:    2,
-		GasLimit: 35_000,
-		GasPrice: 1,
-		Payload: map[string]string{
-			"proposal": submitReceipt.ProposalID,
-		},
-	})
-	if _, err := executor.ExecuteAtHeight(store, earlyExecute, 2); err == nil {
-		t.Fatal("proposal should not execute before voting period ends")
-	}
-
-	execute := signedTx(t, key, types.Transaction{
-		ChainID:  "chainlab-local",
-		Type:     types.TxProposalExecute,
-		From:     alice,
-		Nonce:    2,
-		GasLimit: 35_000,
-		GasPrice: 1,
-		Payload: map[string]string{
-			"proposal": submitReceipt.ProposalID,
-		},
-	})
-	executeReceipt, err := executor.ExecuteAtHeight(store, execute, 3)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := store.Param("governance.quorum"); got != "majority" {
-		t.Fatalf("param value = %q", got)
-	}
-	proposal = store.Proposal(submitReceipt.ProposalID)
-	if proposal.Status != types.ProposalStatusExecuted {
-		t.Fatalf("proposal after execute = %+v", proposal)
-	}
-	if len(executeReceipt.Events) != 1 || executeReceipt.Events[0].Type != "governance.proposal.executed" {
-		t.Fatalf("execute receipt events = %+v", executeReceipt.Events)
+	for _, txType := range []types.TxType{types.TxProposalSubmit, types.TxVote, types.TxProposalExecute} {
+		t.Run(string(txType), func(t *testing.T) {
+			tx := signedTx(t, key, types.Transaction{
+				ChainID:  "chainlab-local",
+				Type:     txType,
+				From:     alice,
+				Nonce:    0,
+				GasLimit: 35_000,
+				GasPrice: 1,
+			})
+			rootBefore := store.Root()
+			accountBefore := store.GetAccount(alice)
+			if _, err := executor.ExecuteAtHeight(store, tx, 1); !errors.Is(err, core.ErrGovernanceDisabled) {
+				t.Fatalf("governance admission error = %v", err)
+			}
+			accountAfter := store.GetAccount(alice)
+			if store.Root() != rootBefore || accountAfter.Nonce != accountBefore.Nonce || accountAfter.Balance != accountBefore.Balance {
+				t.Fatal("disabled governance transaction changed state")
+			}
+		})
 	}
 }
 
-func TestValidatorJoinRequiresStake(t *testing.T) {
-	store, executor, key, alice, _ := newExecutorFixture(t)
-
-	joinWithoutStake := signedTx(t, key, types.Transaction{
-		ChainID:  "chainlab-local",
-		Type:     types.TxValidatorJoin,
-		From:     alice,
-		Nonce:    0,
-		GasLimit: 40_000,
-		GasPrice: 1,
-	})
-	if _, err := executor.Execute(store, joinWithoutStake); err == nil {
-		t.Fatal("validator join without stake should fail")
-	}
-
-	stake := signedTx(t, key, types.Transaction{
-		ChainID:  "chainlab-local",
-		Type:     types.TxStake,
-		From:     alice,
-		Nonce:    0,
-		Value:    500,
-		GasLimit: 30_000,
-		GasPrice: 1,
-	})
-	if _, err := executor.Execute(store, stake); err != nil {
+func TestValidatorJoinAndLeaveAreRejectedAtAdmission(t *testing.T) {
+	store, executor, key, validator, _ := newExecutorFixture(t)
+	store.SetValidators([]string{validator})
+	if err := store.AddStake(validator, 500); err != nil {
 		t.Fatal(err)
 	}
 
-	join := signedTx(t, key, types.Transaction{
-		ChainID:  "chainlab-local",
-		Type:     types.TxValidatorJoin,
-		From:     alice,
-		Nonce:    1,
-		GasLimit: 40_000,
-		GasPrice: 1,
-	})
-	receipt, err := executor.Execute(store, join)
-	if err != nil {
-		t.Fatal(err)
-	}
-	validators := store.Validators()
-	if len(validators) != 1 || validators[0] != alice {
-		t.Fatalf("validators = %#v", validators)
-	}
-	if len(receipt.Events) != 1 || receipt.Events[0].Type != "validator.joined" {
-		t.Fatalf("events = %#v", receipt.Events)
+	for _, txType := range []types.TxType{types.TxValidatorJoin, types.TxValidatorLeave} {
+		t.Run(string(txType), func(t *testing.T) {
+			tx := signedTx(t, key, types.Transaction{
+				ChainID:  "chainlab-local",
+				Type:     txType,
+				From:     validator,
+				Nonce:    0,
+				GasLimit: 40_000,
+				GasPrice: 1,
+			})
+			rootBefore := store.Root()
+			accountBefore := store.GetAccount(validator)
+			feeCollectorBefore := store.GetAccount("0xfee0000000000000000000000000000000000000")
+
+			if _, err := executor.Execute(store, tx); err == nil || !strings.Contains(err.Error(), "certified epoch transition") {
+				t.Fatalf("%s admission error = %v", txType, err)
+			}
+			if store.Root() != rootBefore {
+				t.Fatalf("rejected %s changed state", txType)
+			}
+			accountAfter := store.GetAccount(validator)
+			if accountAfter.Nonce != accountBefore.Nonce || accountAfter.Balance != accountBefore.Balance {
+				t.Fatalf("rejected %s changed sender nonce/balance: before=%+v after=%+v", txType, accountBefore, accountAfter)
+			}
+			if feeCollectorAfter := store.GetAccount("0xfee0000000000000000000000000000000000000"); feeCollectorAfter.Balance != feeCollectorBefore.Balance {
+				t.Fatalf("rejected %s charged a fee", txType)
+			}
+		})
 	}
 }
 
-func TestValidatorLeaveRemovesActiveValidator(t *testing.T) {
-	store, executor, key, alice, _ := newExecutorFixture(t)
-	keyB, err := chaincrypto.GenerateKey()
+func signFinalityVote(t *testing.T, key chaincrypto.PrivateKey, chainID string, height uint64, blockHash string) string {
+	t.Helper()
+	signature, err := chaincrypto.Sign(key, types.FinalityVoteSigningBytes(chainID, height, blockHash))
 	if err != nil {
 		t.Fatal(err)
 	}
-	validatorB := chaincrypto.AddressFromPrivateKey(keyB)
-	store.SetBalance(validatorB, 1_000_000)
-	store.SetValidators([]string{alice, validatorB})
+	return signature
+}
 
-	leave := signedTx(t, key, types.Transaction{
-		ChainID:  "chainlab-local",
-		Type:     types.TxValidatorLeave,
-		From:     alice,
-		Nonce:    0,
-		GasLimit: 40_000,
-		GasPrice: 1,
-	})
-	receipt, err := executor.Execute(store, leave)
-	if err != nil {
-		t.Fatal(err)
-	}
-	validators := store.Validators()
-	if len(validators) != 1 || validators[0] != validatorB {
-		t.Fatalf("validators = %#v", validators)
-	}
-	if len(receipt.Events) != 1 || receipt.Events[0].Type != "validator.left" {
-		t.Fatalf("events = %#v", receipt.Events)
-	}
-
-	leaveLast := signedTx(t, keyB, types.Transaction{
-		ChainID:  "chainlab-local",
-		Type:     types.TxValidatorLeave,
-		From:     validatorB,
-		Nonce:    0,
-		GasLimit: 40_000,
-		GasPrice: 1,
-	})
-	if _, err := executor.Execute(store, leaveLast); err == nil {
-		t.Fatal("last validator should not be able to leave")
+func slashEvidencePayload(
+	t *testing.T,
+	targetKey chaincrypto.PrivateKey,
+	target string,
+	chainID string,
+	height uint64,
+	firstBlockHash string,
+	secondBlockHash string,
+) map[string]string {
+	t.Helper()
+	return map[string]string{
+		"target":            target,
+		"height":            strconv.FormatUint(height, 10),
+		"first_block_hash":  firstBlockHash,
+		"first_signature":   signFinalityVote(t, targetKey, chainID, height, firstBlockHash),
+		"second_block_hash": secondBlockHash,
+		"second_signature":  signFinalityVote(t, targetKey, chainID, height, secondBlockHash),
 	}
 }
 
-func TestValidatorSlashReducesStakeAndRemovesDepletedValidator(t *testing.T) {
-	store, executor, keyA, validatorA, _ := newExecutorFixture(t)
-	keyB, err := chaincrypto.GenerateKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	validatorB := chaincrypto.AddressFromPrivateKey(keyB)
-	store.SetBalance(validatorB, 1_000_000)
-	store.SetValidators([]string{validatorA, validatorB})
-	if err := store.AddStake(validatorB, 600); err != nil {
-		t.Fatal(err)
-	}
-
-	partial := signedTx(t, keyA, types.Transaction{
-		ChainID:  "chainlab-local",
-		Type:     types.TxValidatorSlash,
-		From:     validatorA,
-		Nonce:    0,
-		GasLimit: 45_000,
-		GasPrice: 1,
-		Payload: map[string]string{
-			"target":   validatorB,
-			"amount":   "200",
-			"evidence": "double-sign-height-7",
-		},
-	})
-	partialReceipt, err := executor.Execute(store, partial)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := store.StakeOf(validatorB); got != 400 {
-		t.Fatalf("stake after partial slash = %d", got)
-	}
-	if len(partialReceipt.Events) != 1 || partialReceipt.Events[0].Type != "validator.slashed" {
-		t.Fatalf("partial slash events = %#v", partialReceipt.Events)
-	}
-
-	deplete := signedTx(t, keyA, types.Transaction{
-		ChainID:  "chainlab-local",
-		Type:     types.TxValidatorSlash,
-		From:     validatorA,
-		Nonce:    1,
-		GasLimit: 45_000,
-		GasPrice: 1,
-		Payload: map[string]string{
-			"target":   validatorB,
-			"amount":   "500",
-			"evidence": "downtime-window-9",
-		},
-	})
-	receipt, err := executor.Execute(store, deplete)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := store.StakeOf(validatorB); got != 0 {
-		t.Fatalf("stake after depleted slash = %d", got)
-	}
-	validators := store.Validators()
-	if len(validators) != 1 || validators[0] != validatorA {
-		t.Fatalf("validators = %#v", validators)
-	}
-	if len(receipt.Events) != 1 || receipt.Events[0].Attributes["removed"] != "true" {
-		t.Fatalf("depleted slash event = %#v", receipt.Events)
-	}
-}
-
-func TestValidatorSlashRequiresActiveReporterAndEvidence(t *testing.T) {
-	store, executor, keyA, validatorA, _ := newExecutorFixture(t)
-	keyReporter, err := chaincrypto.GenerateKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	reporter := chaincrypto.AddressFromPrivateKey(keyReporter)
-	store.SetBalance(reporter, 1_000_000)
-	store.SetValidators([]string{validatorA})
-	if err := store.AddStake(validatorA, 600); err != nil {
-		t.Fatal(err)
-	}
-
-	notValidator := signedTx(t, keyReporter, types.Transaction{
+func validatorSlashTx(t *testing.T, reporterKey chaincrypto.PrivateKey, reporter string, nonce uint64, payload map[string]string) types.Transaction {
+	t.Helper()
+	return signedTx(t, reporterKey, types.Transaction{
 		ChainID:  "chainlab-local",
 		Type:     types.TxValidatorSlash,
 		From:     reporter,
-		Nonce:    0,
+		Nonce:    nonce,
 		GasLimit: 45_000,
-		GasPrice: 1,
-		Payload: map[string]string{
-			"target":   validatorA,
-			"amount":   "100",
-			"evidence": "bad-signature",
-		},
+		Payload:  payload,
 	})
-	if _, err := executor.Execute(store, notValidator); err == nil {
-		t.Fatal("inactive reporter should not slash validators")
+}
+
+func TestValidatorSlashConsumesCanonicalEquivocationEvidenceOnce(t *testing.T) {
+	store, executor, reporterKey, reporter, _ := newExecutorFixture(t)
+	targetKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := chaincrypto.AddressFromPrivateKey(targetKey)
+	validators := []string{reporter, target}
+	store.SetValidators(validators)
+	if err := store.AddStake(target, 600); err != nil {
+		t.Fatal(err)
 	}
 
-	missingEvidence := signedTx(t, keyA, types.Transaction{
-		ChainID:  "chainlab-local",
-		Type:     types.TxValidatorSlash,
-		From:     validatorA,
-		Nonce:    0,
-		GasLimit: 45_000,
-		GasPrice: 1,
-		Payload: map[string]string{
-			"target": validatorA,
-			"amount": "100",
+	const height = uint64(7)
+	firstBlockHash := "0x" + strings.Repeat("11", 32)
+	secondBlockHash := "0x" + strings.Repeat("22", 32)
+	payload := slashEvidencePayload(t, targetKey, target, "chainlab-local", height, firstBlockHash, secondBlockHash)
+	receipt, err := executor.Execute(store, validatorSlashTx(t, reporterKey, reporter, 0, payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !receipt.Success || len(receipt.Events) != 1 || receipt.Events[0].Type != "validator.slashed" {
+		t.Fatalf("slash receipt = %+v", receipt)
+	}
+	event := receipt.Events[0]
+	if event.Attributes["reporter"] != reporter || event.Attributes["target"] != target ||
+		event.Attributes["amount"] != "600" || event.Attributes["removed"] != "false" {
+		t.Fatalf("slash event = %+v", event)
+	}
+	if got := store.StakeOf(target); got != 0 {
+		t.Fatalf("stake after slash = %d", got)
+	}
+	if got := strings.Join(store.Validators(), ","); got != strings.Join(validators, ",") {
+		t.Fatalf("slash changed fixed validator set: %q", got)
+	}
+	evidenceID := event.Attributes["evidence"]
+	offenceID := event.Attributes["offence"]
+	if evidenceID == "" || offenceID == "" || store.Param("slash:offence:"+offenceID) != "consumed" {
+		t.Fatalf("slash offence was not marked consumed: evidence=%q offence=%q", evidenceID, offenceID)
+	}
+
+	if err := store.AddStake(target, 100); err != nil {
+		t.Fatal(err)
+	}
+	replay, err := executor.Execute(store, validatorSlashTx(t, reporterKey, reporter, 1, payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replay.Success || replay.FailureCode != types.ReceiptFailureExecutionReverted {
+		t.Fatalf("replayed slash receipt = %+v", replay)
+	}
+	if got := store.StakeOf(target); got != 100 {
+		t.Fatalf("replayed evidence slashed new stake: %d", got)
+	}
+	if got := strings.Join(store.Validators(), ","); got != strings.Join(validators, ",") {
+		t.Fatalf("replayed slash changed fixed validator set: %q", got)
+	}
+
+	swapped := maps.Clone(payload)
+	swapped["first_block_hash"], swapped["second_block_hash"] = swapped["second_block_hash"], swapped["first_block_hash"]
+	swapped["first_signature"], swapped["second_signature"] = swapped["second_signature"], swapped["first_signature"]
+	reordered, err := executor.Execute(store, validatorSlashTx(t, reporterKey, reporter, 2, swapped))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reordered.Success || reordered.FailureCode != types.ReceiptFailureExecutionReverted {
+		t.Fatalf("reordered replay receipt = %+v", reordered)
+	}
+	if got := store.StakeOf(target); got != 100 {
+		t.Fatalf("reordered evidence slashed new stake: %d", got)
+	}
+
+	thirdBlockHash := "0x" + strings.Repeat("33", 32)
+	alternatePair := slashEvidencePayload(t, targetKey, target, "chainlab-local", height, firstBlockHash, thirdBlockHash)
+	alternate, err := executor.Execute(store, validatorSlashTx(t, reporterKey, reporter, 3, alternatePair))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alternate.Success || alternate.FailureCode != types.ReceiptFailureExecutionReverted {
+		t.Fatalf("alternate same-height evidence receipt = %+v", alternate)
+	}
+	if got := store.StakeOf(target); got != 100 {
+		t.Fatalf("alternate same-height evidence slashed new stake: %d", got)
+	}
+}
+
+func TestValidatorSlashRejectsInvalidEvidenceAndMembership(t *testing.T) {
+	tests := []struct {
+		name           string
+		activeReporter bool
+		activeTarget   bool
+		included       bool
+		wantError      string
+		mutate         func(*testing.T, chaincrypto.PrivateKey, chaincrypto.PrivateKey, uint64, map[string]string)
+	}{
+		{
+			name:           "forged signature",
+			activeReporter: true,
+			activeTarget:   true,
+			wantError:      "slash evidence signatures are invalid",
+			mutate: func(t *testing.T, _ chaincrypto.PrivateKey, forgedKey chaincrypto.PrivateKey, height uint64, payload map[string]string) {
+				payload["first_signature"] = signFinalityVote(t, forgedKey, "chainlab-local", height, payload["first_block_hash"])
+			},
 		},
-	})
-	if _, err := executor.Execute(store, missingEvidence); err == nil {
-		t.Fatal("slash without evidence should fail")
+		{
+			name:           "wrong chain signatures",
+			activeReporter: true,
+			activeTarget:   true,
+			wantError:      "slash evidence signatures are invalid",
+			mutate: func(t *testing.T, targetKey, _ chaincrypto.PrivateKey, height uint64, payload map[string]string) {
+				payload["first_signature"] = signFinalityVote(t, targetKey, "chainlab-other", height, payload["first_block_hash"])
+				payload["second_signature"] = signFinalityVote(t, targetKey, "chainlab-other", height, payload["second_block_hash"])
+			},
+		},
+		{
+			name:           "same block hash",
+			activeReporter: true,
+			activeTarget:   true,
+			wantError:      "two distinct block hashes",
+			mutate: func(t *testing.T, targetKey, _ chaincrypto.PrivateKey, height uint64, payload map[string]string) {
+				payload["second_block_hash"] = payload["first_block_hash"]
+				payload["second_signature"] = signFinalityVote(t, targetKey, "chainlab-local", height, payload["first_block_hash"])
+			},
+		},
+		{
+			name:           "non-canonical target",
+			activeReporter: true,
+			activeTarget:   true,
+			wantError:      "target is not canonically encoded",
+			mutate: func(_ *testing.T, _ chaincrypto.PrivateKey, _ chaincrypto.PrivateKey, _ uint64, payload map[string]string) {
+				payload["target"] = strings.ToUpper(payload["target"])
+			},
+		},
+		{
+			name:           "non-canonical block hash",
+			activeReporter: true,
+			activeTarget:   true,
+			wantError:      "not a canonical 32-byte hash",
+			mutate: func(_ *testing.T, _ chaincrypto.PrivateKey, _ chaincrypto.PrivateKey, _ uint64, payload map[string]string) {
+				payload["first_block_hash"] = strings.ToUpper(payload["first_block_hash"])
+			},
+		},
+		{
+			name:           "non-canonical signature",
+			activeReporter: true,
+			activeTarget:   true,
+			wantError:      "not a canonical compact signature",
+			mutate: func(_ *testing.T, _ chaincrypto.PrivateKey, _ chaincrypto.PrivateKey, _ uint64, payload map[string]string) {
+				payload["first_signature"] = strings.ToUpper(payload["first_signature"])
+			},
+		},
+		{name: "inactive reporter", activeTarget: true, included: true},
+		{name: "inactive target", activeReporter: true, included: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			reporterKey, err := chaincrypto.GenerateKey()
+			if err != nil {
+				t.Fatal(err)
+			}
+			targetKey, err := chaincrypto.GenerateKey()
+			if err != nil {
+				t.Fatal(err)
+			}
+			forgedKey, err := chaincrypto.GenerateKey()
+			if err != nil {
+				t.Fatal(err)
+			}
+			reporter := chaincrypto.AddressFromPrivateKey(reporterKey)
+			target := chaincrypto.AddressFromPrivateKey(targetKey)
+			store := state.NewStore()
+			store.SetBalance(reporter, 1_000_000)
+			if err := store.AddStake(target, 600); err != nil {
+				t.Fatal(err)
+			}
+			validators := make([]string, 0, 2)
+			if test.activeReporter {
+				validators = append(validators, reporter)
+			}
+			if test.activeTarget {
+				validators = append(validators, target)
+			}
+			store.SetValidators(validators)
+			executor := core.NewExecutor("chainlab-local", "", contracts.NewRuntimeWithDefaults())
+
+			const height = uint64(9)
+			payload := slashEvidencePayload(
+				t,
+				targetKey,
+				target,
+				"chainlab-local",
+				height,
+				"0x"+strings.Repeat("33", 32),
+				"0x"+strings.Repeat("44", 32),
+			)
+			if test.mutate != nil {
+				test.mutate(t, targetKey, forgedKey, height, payload)
+			}
+			tx := validatorSlashTx(t, reporterKey, reporter, 0, payload)
+			rootBefore := store.Root()
+			receipt, err := executor.Execute(store, tx)
+
+			if !test.included {
+				if err == nil || !strings.Contains(err.Error(), test.wantError) {
+					t.Fatalf("slash admission error = %v, want %q", err, test.wantError)
+				}
+				if store.Root() != rootBefore || store.GetAccount(reporter).Nonce != 0 {
+					t.Fatal("invalid slash evidence changed state before admission")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatal(err)
+			}
+			if receipt.Success || receipt.FailureCode != types.ReceiptFailureExecutionReverted {
+				t.Fatalf("inactive validator slash receipt = %+v", receipt)
+			}
+			if store.GetAccount(reporter).Nonce != 1 || store.StakeOf(target) != 600 {
+				t.Fatal("inactive validator slash changed stake or failed to consume included nonce")
+			}
+			if got := strings.Join(store.Validators(), ","); got != strings.Join(validators, ",") {
+				t.Fatalf("rejected slash changed fixed validator set: %q", got)
+			}
+			if len(store.Params()) != 0 {
+				t.Fatalf("rejected slash consumed evidence: %#v", store.Params())
+			}
+		})
 	}
 }
 
@@ -3250,8 +3307,12 @@ func TestWASMCallGasIncludesHostResourcesAndEnforcesLimit(t *testing.T) {
 			"message": "world",
 		},
 	})
-	if _, err := executor.Execute(store, lowCall); err == nil {
-		t.Fatal("wasm call with only base gas should fail")
+	lowReceipt, err := executor.Execute(store, lowCall)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lowReceipt.Success || lowReceipt.FailureCode != types.ReceiptFailureOutOfGas || lowReceipt.GasUsed != lowCall.GasLimit {
+		t.Fatalf("low-gas call receipt = %+v", lowReceipt)
 	}
 	value, err := contracts.NewRuntimeWithDefaults().Read(store, deployReceipt.ContractAddress, alice, "get", nil)
 	if err != nil {
@@ -3266,7 +3327,7 @@ func TestWASMCallGasIncludesHostResourcesAndEnforcesLimit(t *testing.T) {
 		Type:     types.TxCall,
 		From:     alice,
 		To:       deployReceipt.ContractAddress,
-		Nonce:    2,
+		Nonce:    3,
 		GasLimit: 60_000,
 		GasPrice: 1,
 		Payload: map[string]string{

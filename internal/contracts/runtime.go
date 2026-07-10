@@ -19,15 +19,24 @@ type Contract interface {
 }
 
 type Context struct {
-	Store    *state.Store
-	Address  string
-	Caller   string
-	Meter    *Meter
-	ReadOnly bool
+	store        *state.Store
+	reader       state.Reader
+	nativeBudget *nativeInvocationBudget
+	address      string
+	caller       string
+	meter        *Meter
+	readOnly     bool
 }
+
+func (ctx Context) Address() string { return ctx.address }
+
+func (ctx Context) Caller() string { return ctx.caller }
+
+func (ctx Context) IsReadOnly() bool { return ctx.readOnly }
 
 type Runtime struct {
 	registry       map[string]Contract
+	sealed         bool
 	wasmCache      map[string]wasmCacheEntry
 	wasmCacheOrder []string
 	wasmCompiling  map[string]*wasmCompileCall
@@ -62,11 +71,22 @@ func NewRuntime() *Runtime {
 
 func NewRuntimeWithDefaults() *Runtime {
 	runtime := NewRuntime()
-	runtime.Register(AccountCodeID, Account{})
-	runtime.Register(MultisigCodeID, Multisig{})
-	runtime.Register("counter.v1", Counter{})
-	runtime.Register("token.v1", Token{})
-	runtime.Register("wasm.echo.v1", NewWasmEchoContract())
+	defaults := []struct {
+		codeID   string
+		contract Contract
+	}{
+		{codeID: AccountCodeID, contract: Account{}},
+		{codeID: MultisigCodeID, contract: Multisig{}},
+		{codeID: "counter.v1", contract: Counter{}},
+		{codeID: "token.v1", contract: Token{}},
+		{codeID: "wasm.echo.v1", contract: NewWasmEchoContract()},
+	}
+	for _, entry := range defaults {
+		if err := runtime.Register(entry.codeID, entry.contract); err != nil {
+			panic(err)
+		}
+	}
+	runtime.Seal()
 	return runtime
 }
 
@@ -90,10 +110,26 @@ func (r *Runtime) ValidateAndCacheWasmCode(code []byte) error {
 	return err
 }
 
-func (r *Runtime) Register(codeID string, contract Contract) {
+func (r *Runtime) Register(codeID string, contract Contract) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.sealed {
+		return errors.New("contract runtime registry is sealed")
+	}
+	if strings.TrimSpace(codeID) == "" || contract == nil {
+		return errors.New("contract registration requires code id and implementation")
+	}
+	if _, exists := r.registry[codeID]; exists {
+		return fmt.Errorf("contract code id %q is already registered", codeID)
+	}
 	r.registry[codeID] = contract
+	return nil
+}
+
+func (r *Runtime) Seal() {
+	r.mu.Lock()
+	r.sealed = true
+	r.mu.Unlock()
 }
 
 func (r *Runtime) Deploy(store *state.Store, creator string, codeID string, seed string, args map[string]string) (string, []types.Event, error) {
@@ -124,9 +160,21 @@ func (r *Runtime) DeployMeteredInTransaction(store *state.Store, creator string,
 		return "", nil, meter.GasUsed(), err
 	}
 	address := contractAddress(creator, codeID, seed)
+	_, isWASM := wasmContractResources(contract)
+	if !isWASM {
+		if err := chargeNativeInvocation(meter, "deploy", args); err != nil {
+			return "", nil, meter.GasUsed(), err
+		}
+		if err := chargeNativeLinear(meter, nativeAccountWriteGas, nativeStorageWriteByteGas, len(codeID)); err != nil {
+			return "", nil, meter.GasUsed(), err
+		}
+	}
 	store.SetCodeID(address, codeID)
-	ctx := Context{Store: store, Address: address, Caller: strings.ToLower(creator), Meter: meter}
-	events, err := contract.Deploy(ctx, args)
+	ctx := Context{store: store, reader: store, address: address, caller: strings.ToLower(creator), meter: meter}
+	if !isWASM {
+		ctx.nativeBudget = &nativeInvocationBudget{}
+	}
+	events, err := invokeContractDeploy(contract, ctx, args, isWASM)
 	if err != nil {
 		return "", nil, meter.GasUsed(), err
 	}
@@ -138,6 +186,11 @@ func (r *Runtime) DeployMeteredInTransaction(store *state.Store, creator string,
 			"creator": strings.ToLower(creator),
 		},
 	}}, events...)
+	if !isWASM {
+		if err := chargeNativeEvents(meter, events); err != nil {
+			return "", nil, meter.GasUsed(), err
+		}
+	}
 	return address, events, meter.GasUsed(), nil
 }
 
@@ -163,19 +216,34 @@ func (r *Runtime) CallMeteredWithLimit(store *state.Store, address string, calle
 // CallMeteredInTransaction executes against a caller-owned working store.
 // The caller must discard that store if this method or a later operation fails.
 func (r *Runtime) CallMeteredInTransaction(store *state.Store, address string, caller string, method string, args map[string]string, gasLimit uint64) ([]types.Event, uint64, error) {
-	account := store.GetAccount(address)
-	if account.CodeID == "" {
+	codeID := store.CodeID(address)
+	if codeID == "" {
 		return nil, 0, errors.New("target account is not a contract")
 	}
 	meter := NewLimitedMeter(gasLimit)
-	contract, err := r.contractFor(store, account.CodeID, meter)
+	contract, err := r.contractFor(store, codeID, meter)
+	if err != nil {
+		if errors.Is(err, errUnknownContractCode) {
+			err = fmt.Errorf("%w: persisted unknown contract code id", ErrContractStateFault)
+		}
+		return nil, meter.GasUsed(), err
+	}
+	ctx := Context{store: store, reader: store, address: strings.ToLower(address), caller: strings.ToLower(caller), meter: meter}
+	_, isWASM := wasmContractResources(contract)
+	if !isWASM {
+		ctx.nativeBudget = &nativeInvocationBudget{}
+		if err := chargeNativeInvocation(meter, method, args); err != nil {
+			return nil, meter.GasUsed(), err
+		}
+	}
+	events, err := invokeContractCall(contract, ctx, method, args, isWASM)
 	if err != nil {
 		return nil, meter.GasUsed(), err
 	}
-	ctx := Context{Store: store, Address: strings.ToLower(address), Caller: strings.ToLower(caller), Meter: meter}
-	events, err := contract.Call(ctx, method, args)
-	if err != nil {
-		return nil, meter.GasUsed(), err
+	if !isWASM {
+		if err := chargeNativeEvents(meter, events); err != nil {
+			return nil, meter.GasUsed(), err
+		}
 	}
 	return events, meter.GasUsed(), nil
 }
@@ -187,30 +255,82 @@ func (r *Runtime) Read(store *state.Store, address string, caller string, method
 
 func (r *Runtime) ReadMetered(store *state.Store, address string, caller string, method string, args map[string]string, gasLimit uint64) (string, uint64, error) {
 	working := store.Clone()
-	account := working.GetAccount(address)
-	if account.CodeID == "" {
+	return r.readMeteredSnapshot(working.ReadView(), address, caller, method, args, gasLimit)
+}
+
+// ReadImmutableSnapshot executes against a Store that its owner has published
+// as immutable. Read-only contract contexts reject every state mutation, so
+// callers can retain an O(1) version handle without cloning the whole state.
+func (r *Runtime) ReadImmutableSnapshot(view state.ReadView, address string, caller string, method string, args map[string]string) (string, error) {
+	value, _, err := r.readMeteredSnapshot(view, address, caller, method, args, DefaultReadGasLimit)
+	return value, err
+}
+
+func (r *Runtime) readMeteredSnapshot(reader state.Reader, address string, caller string, method string, args map[string]string, gasLimit uint64) (string, uint64, error) {
+	codeID := reader.CodeID(address)
+	if codeID == "" {
 		return "", 0, errors.New("target account is not a contract")
 	}
 	meter := NewLimitedMeter(gasLimit)
-	contract, err := r.contractFor(working, account.CodeID, meter)
+	contract, err := r.contractFor(reader, codeID, meter)
 	if err != nil {
+		if errors.Is(err, errUnknownContractCode) {
+			err = fmt.Errorf("%w: persisted unknown contract code id", ErrContractStateFault)
+		}
 		return "", meter.GasUsed(), err
 	}
 	ctx := Context{
-		Store:    working,
-		Address:  strings.ToLower(address),
-		Caller:   strings.ToLower(caller),
-		Meter:    meter,
-		ReadOnly: true,
+		reader:   reader,
+		address:  strings.ToLower(address),
+		caller:   strings.ToLower(caller),
+		meter:    meter,
+		readOnly: true,
 	}
-	value, err := contract.Read(ctx, method, args)
+	_, isWASM := wasmContractResources(contract)
+	if !isWASM {
+		ctx.nativeBudget = &nativeInvocationBudget{}
+		if err := chargeNativeInvocation(meter, method, args); err != nil {
+			return "", meter.GasUsed(), err
+		}
+	}
+	value, err := invokeContractRead(contract, ctx, method, args, isWASM)
+	if err == nil && !isWASM {
+		err = chargeNativeOutput(meter, value)
+	}
 	return value, meter.GasUsed(), err
 }
 
-func (r *Runtime) contractFor(store *state.Store, codeID string, meter *Meter) (Contract, error) {
-	r.mu.RLock()
+func invokeContractDeploy(contract Contract, ctx Context, args map[string]string, isWASM bool) (events []types.Event, err error) {
+	defer recoverContractPanic(isWASM, &err)
+	return contract.Deploy(ctx, args)
+}
+
+func invokeContractCall(contract Contract, ctx Context, method string, args map[string]string, isWASM bool) (events []types.Event, err error) {
+	defer recoverContractPanic(isWASM, &err)
+	return contract.Call(ctx, method, args)
+}
+
+func invokeContractRead(contract Contract, ctx Context, method string, args map[string]string, isWASM bool) (value string, err error) {
+	defer recoverContractPanic(isWASM, &err)
+	return contract.Read(ctx, method, args)
+}
+
+func recoverContractPanic(isWASM bool, err *error) {
+	if recover() == nil {
+		return
+	}
+	if isWASM {
+		*err = fmt.Errorf("%w: contract adapter panic", ErrWasmRuntimeFault)
+		return
+	}
+	*err = fmt.Errorf("%w: contract implementation panic", ErrNativeRuntimeFault)
+}
+
+func (r *Runtime) contractFor(store state.Reader, codeID string, meter *Meter) (Contract, error) {
+	r.mu.Lock()
+	r.sealed = true
 	if contract, ok := r.registry[codeID]; ok {
-		r.mu.RUnlock()
+		r.mu.Unlock()
 		if resources, isWASM := wasmContractResources(contract); isWASM {
 			if err := ensureWASMInvocationBudget(meter, resources); err != nil {
 				return nil, err
@@ -218,10 +338,10 @@ func (r *Runtime) contractFor(store *state.Store, codeID string, meter *Meter) (
 		}
 		return contract, nil
 	}
-	r.mu.RUnlock()
+	r.mu.Unlock()
 	code, ok := store.ContractCode(codeID)
 	if !ok {
-		return nil, fmt.Errorf("unknown contract code id %q", codeID)
+		return nil, fmt.Errorf("%w %q", errUnknownContractCode, codeID)
 	}
 	if code.CodeID != codeID {
 		return nil, fmt.Errorf("%w: admitted wasm code record id mismatch", ErrWasmRuntimeFault)
@@ -241,6 +361,9 @@ func (r *Runtime) contractFor(store *state.Store, codeID string, meter *Meter) (
 		return cached.contract, nil
 	}
 	r.mu.RUnlock()
+	if err := ensureWASMEncodedCodeBudget(meter, code.Bytecode); err != nil {
+		return nil, err
+	}
 	raw, err := hex.DecodeString(strings.TrimPrefix(code.Bytecode, "0x"))
 	if err != nil {
 		return nil, fmt.Errorf("%w: admitted wasm bytecode encoding is invalid", ErrWasmRuntimeFault)
@@ -340,6 +463,17 @@ func ensureWASMInvocationBudget(meter *Meter, resources wasmModuleResources) err
 		return nil
 	}
 	return meter.Charge(resources.instantiationGas())
+}
+
+func ensureWASMEncodedCodeBudget(meter *Meter, bytecode string) error {
+	if !strings.HasPrefix(bytecode, "0x") || len(bytecode) < 2 || (len(bytecode)-2)%2 != 0 {
+		return fmt.Errorf("%w: admitted wasm bytecode encoding is invalid", ErrWasmRuntimeFault)
+	}
+	codeBytes := (len(bytecode) - 2) / 2
+	if codeBytes > MaxWASMModuleBytes {
+		return fmt.Errorf("%w: admitted wasm bytecode exceeds module limit", ErrWasmRuntimeFault)
+	}
+	return ensureWASMInvocationBudget(meter, wasmModuleResources{codeBytes: uint64(codeBytes)})
 }
 
 func contractAddress(creator string, codeID string, seed string) string {

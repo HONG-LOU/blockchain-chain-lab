@@ -25,7 +25,10 @@ type ExecutionContext struct {
 	BaseFeePerGas uint64
 }
 
-const sessionEpochKey = "session:epoch"
+const (
+	sessionEpochKey = "session:epoch"
+	maxSessionKeys  = 16
+)
 
 func NewExecutor(chainID string, feeCollector string, runtime *contracts.Runtime) *Executor {
 	if runtime == nil {
@@ -46,9 +49,16 @@ func (e *Executor) ExecuteAtHeight(store *state.Store, tx types.Transaction, blo
 	return e.ExecuteWithContext(store, tx, ExecutionContext{BlockHeight: blockHeight})
 }
 
-func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, context ExecutionContext) (types.Receipt, error) {
+func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, context ExecutionContext) (receipt types.Receipt, err error) {
 	if tx.ChainID != e.chainID {
 		return types.Receipt{}, fmt.Errorf("wrong chain id %q", tx.ChainID)
+	}
+	intrinsicGas, err := intrinsicGasForTransaction(tx)
+	if err != nil {
+		return types.Receipt{}, err
+	}
+	if tx.GasLimit < intrinsicGas {
+		return types.Receipt{}, errors.New("gas limit too low")
 	}
 	if err := validateTransactionAuthorization(store, tx, context.BlockHeight); err != nil {
 		return types.Receipt{}, err
@@ -61,30 +71,39 @@ func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, 
 		return types.Receipt{}, fmt.Errorf("bad nonce: got %d want %d", tx.Nonce, account.Nonce)
 	}
 
-	baseGas, err := EstimateGas(tx.Type)
+	if err := e.validateFeeCapacity(store, tx, context.BaseFeePerGas); err != nil {
+		return types.Receipt{}, err
+	}
+
+	ante := store.Clone()
+	if err := ante.IncrementNonce(tx.From); err != nil {
+		return types.Receipt{}, err
+	}
+	feePayer := transactionFeePayer(tx)
+	maximumFee, err := maximumTransactionFee(tx)
 	if err != nil {
-		return types.Receipt{}, err
+		return types.Receipt{}, fmt.Errorf("%w: fee escrow calculation: %v", ErrConsensusExecutionFault, err)
 	}
-	if tx.GasLimit < baseGas {
-		return types.Receipt{}, errors.New("gas limit too low")
+	if err := ante.SubBalance(feePayer, maximumFee); err != nil {
+		return types.Receipt{}, fmt.Errorf("%w: fee escrow reservation: %v", ErrConsensusExecutionFault, err)
 	}
-	if tx.Type == types.TxBatch && len(tx.Batch) > types.MaxBatchOperations {
-		return types.Receipt{}, fmt.Errorf("batch exceeds %d operations", types.MaxBatchOperations)
-	}
-	if err := validateFeeCapacity(store, tx, context.BaseFeePerGas); err != nil {
-		return types.Receipt{}, err
-	}
+	working := ante.Clone()
+	executionStarted := true
+	gasUsed := intrinsicGas
+	defer func() {
+		if err == nil || !executionStarted {
+			return
+		}
+		if IsFatalExecutionError(err) {
+			return
+		}
+		receipt, err = e.commitFailedExecution(store, ante, tx, context, feePayer, maximumFee, gasUsed, err)
+	}()
 
-	working := store.Clone()
-	if err := working.IncrementNonce(tx.From); err != nil {
-		return types.Receipt{}, err
-	}
-
-	receipt := types.Receipt{
+	receipt = types.Receipt{
 		TxHash:  tx.Hash(),
 		Success: true,
 	}
-	gasUsed := baseGas
 
 	switch tx.Type {
 	case types.TxTransfer:
@@ -100,21 +119,18 @@ func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, 
 			receipt.Events = append(receipt.Events, sessionEvent)
 		}
 	case types.TxBatch:
-		if len(tx.Batch) == 0 {
-			return types.Receipt{}, errors.New("batch requires at least one operation")
-		}
 		receipt.Events = append(receipt.Events, types.Event{Type: "batch.executed", Attributes: map[string]string{
 			"operations": strconv.Itoa(len(tx.Batch)),
 		}})
 		for index, operation := range tx.Batch {
 			remainingGas := tx.GasLimit - gasUsed
-			events, operationGas, err := e.executeBatchOperation(working, tx, operation, index, remainingGas)
+			events, resourceGas, operationErr := e.executeBatchOperation(working, tx, operation, index, remainingGas)
+			gasUsed, err = checkedAdd(gasUsed, resourceGas)
 			if err != nil {
-				return types.Receipt{}, err
+				return types.Receipt{}, fmt.Errorf("%w: batch gas accounting: %v", ErrConsensusExecutionFault, err)
 			}
-			gasUsed, err = checkedAdd(gasUsed, operationGas)
-			if err != nil {
-				return types.Receipt{}, err
+			if operationErr != nil {
+				return types.Receipt{}, operationErr
 			}
 			receipt.Events = append(receipt.Events, events...)
 		}
@@ -140,120 +156,47 @@ func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, 
 			return types.Receipt{}, err
 		}
 		receipt.Events = append(receipt.Events, types.Event{Type: "unstake"})
-	case types.TxProposalSubmit:
-		proposal, err := parseProposalSubmitPayload(tx, context.BlockHeight)
-		if err != nil {
-			return types.Receipt{}, err
-		}
-		if working.StakeOf(tx.From) == 0 {
-			return types.Receipt{}, errors.New("proposal submit requires stake")
-		}
-		working.SetProposal(proposal)
-		receipt.ProposalID = proposal.ID
-		receipt.Events = append(receipt.Events, types.Event{Type: "governance.proposal.submitted", Attributes: map[string]string{
-			"proposal": proposal.ID,
-			"kind":     proposal.Kind,
-			"proposer": strings.ToLower(tx.From),
-		}})
-	case types.TxVote:
-		proposal := tx.Payload["proposal"]
-		choice := tx.Payload["choice"]
-		if proposal == "" || choice == "" {
-			return types.Receipt{}, errors.New("vote requires proposal and choice")
-		}
-		choice = strings.ToLower(strings.TrimSpace(choice))
-		if choice != "yes" && choice != "no" && choice != "abstain" {
-			return types.Receipt{}, errors.New("vote choice must be yes, no, or abstain")
-		}
-		record := working.Proposal(proposal)
-		if record.Status != types.ProposalStatusOpen {
-			return types.Receipt{}, errors.New("proposal is not open")
-		}
-		if record.VotingEndHeight != 0 && context.BlockHeight >= record.VotingEndHeight {
-			return types.Receipt{}, errors.New("proposal voting period has ended")
-		}
-		power := working.StakeOf(tx.From)
-		if power == 0 {
-			return types.Receipt{}, errors.New("voter has no stake")
-		}
-		working.RecordVote(proposal, tx.From, choice, power)
-		receipt.Events = append(receipt.Events, types.Event{Type: "governance.vote", Attributes: map[string]string{"proposal": proposal, "choice": choice}})
-	case types.TxProposalExecute:
-		proposalID := strings.TrimSpace(tx.Payload["proposal"])
-		if proposalID == "" {
-			return types.Receipt{}, errors.New("proposal execute requires proposal")
-		}
-		proposal := working.Proposal(proposalID)
-		if proposal.Status != types.ProposalStatusOpen {
-			return types.Receipt{}, errors.New("proposal is not open")
-		}
-		if context.BlockHeight < proposal.VotingEndHeight {
-			return types.Receipt{}, errors.New("proposal voting period is still open")
-		}
-		eventType := "governance.proposal.rejected"
-		if proposal.Votes["yes"] > proposal.Votes["no"] && proposal.Votes["yes"] > 0 {
-			if err := executeProposal(working, proposal); err != nil {
-				return types.Receipt{}, err
-			}
-			proposal.Status = types.ProposalStatusExecuted
-			eventType = "governance.proposal.executed"
-		} else {
-			proposal.Status = types.ProposalStatusRejected
-		}
-		working.SetProposal(proposal)
-		receipt.ProposalID = proposal.ID
-		receipt.Events = append(receipt.Events, types.Event{Type: eventType, Attributes: map[string]string{
-			"proposal": proposal.ID,
-			"yes":      strconv.FormatUint(proposal.Votes["yes"], 10),
-			"no":       strconv.FormatUint(proposal.Votes["no"], 10),
-		}})
+	case types.TxProposalSubmit, types.TxVote, types.TxProposalExecute:
+		return types.Receipt{}, ErrGovernanceDisabled
 	case types.TxValidatorJoin:
-		if working.StakeOf(tx.From) == 0 {
-			return types.Receipt{}, errors.New("validator join requires stake")
-		}
-		if err := working.AddValidator(tx.From); err != nil {
-			return types.Receipt{}, err
-		}
-		receipt.Events = append(receipt.Events, types.Event{Type: "validator.joined", Attributes: map[string]string{"validator": tx.From}})
+		return types.Receipt{}, errors.New("dynamic validator joins require a certified epoch transition and are disabled")
 	case types.TxValidatorLeave:
-		if err := working.RemoveValidator(tx.From); err != nil {
+		return types.Receipt{}, errors.New("dynamic validator leaves require a certified epoch transition and are disabled")
+	case types.TxValidatorSlash:
+		evidence, err := parseSlashPayload(tx.Payload)
+		if err != nil {
 			return types.Receipt{}, err
 		}
-		receipt.Events = append(receipt.Events, types.Event{Type: "validator.left", Attributes: map[string]string{"validator": tx.From}})
-	case types.TxValidatorSlash:
-		target, slashAmount, evidence, err := parseSlashPayload(tx.Payload)
-		if err != nil {
+		if err := validateSlashEvidence(tx.ChainID, evidence); err != nil {
 			return types.Receipt{}, err
 		}
 		if !isActiveValidator(working, tx.From) {
 			return types.Receipt{}, errors.New("slash reporter must be an active validator")
 		}
-		if !isActiveValidator(working, target) {
+		if !isActiveValidator(working, evidence.Target) {
 			return types.Receipt{}, errors.New("slash target must be an active validator")
 		}
-		currentStake := working.StakeOf(target)
+		evidenceID := slashEvidenceID(tx.ChainID, evidence)
+		offenceID := slashOffenceID(tx.ChainID, evidence)
+		consumedKey := "slash:offence:" + offenceID
+		if working.Param(consumedKey) != "" {
+			return types.Receipt{}, errors.New("slash evidence has already been consumed")
+		}
+		currentStake := working.StakeOf(evidence.Target)
 		if currentStake == 0 {
 			return types.Receipt{}, errors.New("slash target has no stake")
 		}
-		if slashAmount > currentStake {
-			slashAmount = currentStake
-		}
-		if err := working.SubStake(target, slashAmount); err != nil {
+		if err := working.SubStake(evidence.Target, currentStake); err != nil {
 			return types.Receipt{}, err
 		}
-		removed := "false"
-		if working.StakeOf(target) == 0 {
-			if err := working.RemoveValidator(target); err != nil {
-				return types.Receipt{}, err
-			}
-			removed = "true"
-		}
+		working.SetParam(consumedKey, "consumed")
 		receipt.Events = append(receipt.Events, types.Event{Type: "validator.slashed", Attributes: map[string]string{
 			"reporter": tx.From,
-			"target":   strings.ToLower(target),
-			"amount":   strconv.FormatUint(slashAmount, 10),
-			"evidence": evidence,
-			"removed":  removed,
+			"target":   evidence.Target,
+			"amount":   strconv.FormatUint(currentStake, 10),
+			"evidence": evidenceID,
+			"offence":  offenceID,
+			"removed":  "false",
 		}})
 	case types.TxSetCode:
 		eventType, attributes, err := executeSetCode(working, tx)
@@ -278,10 +221,6 @@ func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, 
 		if err != nil {
 			return types.Receipt{}, err
 		}
-		gasUsed = EstimateWASMUploadGas(bytecode)
-		if tx.GasLimit < gasUsed {
-			return types.Receipt{}, errors.New("gas limit too low")
-		}
 		if err := e.runtime.ValidateAndCacheWasmCode(bytecode); err != nil {
 			return types.Receipt{}, err
 		}
@@ -301,33 +240,27 @@ func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, 
 		}})
 	case types.TxDeploy:
 		codeID := tx.Payload["code_id"]
-		if codeID == "" {
-			return types.Receipt{}, errors.New("deploy requires code_id")
-		}
 		resourceLimit := tx.GasLimit - gasUsed
-		address, events, resourceGas, err := e.runtime.DeployMeteredInTransaction(working, tx.From, codeID, tx.Hash(), tx.Payload, resourceLimit)
-		if err != nil {
-			return types.Receipt{}, err
-		}
+		address, events, resourceGas, executionErr := e.runtime.DeployMeteredInTransaction(working, tx.From, codeID, tx.Hash(), tx.Payload, resourceLimit)
 		gasUsed, err = checkedAdd(gasUsed, resourceGas)
 		if err != nil {
-			return types.Receipt{}, err
+			return types.Receipt{}, fmt.Errorf("%w: deploy gas accounting: %v", ErrConsensusExecutionFault, err)
+		}
+		if executionErr != nil {
+			return types.Receipt{}, executionErr
 		}
 		receipt.ContractAddress = address
 		receipt.Events = append(receipt.Events, events...)
 	case types.TxCall:
 		method := tx.Payload["method"]
-		if tx.To == "" || method == "" {
-			return types.Receipt{}, errors.New("call requires to and method")
-		}
 		resourceLimit := tx.GasLimit - gasUsed
-		events, resourceGas, err := e.runtime.CallMeteredInTransaction(working, tx.To, tx.From, method, tx.Payload, resourceLimit)
-		if err != nil {
-			return types.Receipt{}, err
-		}
+		events, resourceGas, executionErr := e.runtime.CallMeteredInTransaction(working, tx.To, tx.From, method, tx.Payload, resourceLimit)
 		gasUsed, err = checkedAdd(gasUsed, resourceGas)
 		if err != nil {
-			return types.Receipt{}, err
+			return types.Receipt{}, fmt.Errorf("%w: call gas accounting: %v", ErrConsensusExecutionFault, err)
+		}
+		if executionErr != nil {
+			return types.Receipt{}, executionErr
 		}
 		receipt.Events = append(receipt.Events, events...)
 		sessionEvent, err := applySessionKeyUsage(working, tx)
@@ -342,13 +275,12 @@ func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, 
 	}
 
 	if tx.GasLimit < gasUsed {
-		return types.Receipt{}, errors.New("gas limit too low")
+		return types.Receipt{}, contracts.ErrContractOutOfGas
 	}
 	fee, err := CalculateFee(tx, gasUsed, context.BaseFeePerGas)
 	if err != nil {
-		return types.Receipt{}, err
+		return types.Receipt{}, fmt.Errorf("%w: fee settlement: %v", ErrConsensusExecutionFault, err)
 	}
-	feePayer := transactionFeePayer(tx)
 	if strings.TrimSpace(tx.Paymaster) != "" {
 		receipt.FeePayer = tx.Paymaster
 		receipt.Events = append(receipt.Events, types.Event{Type: "paymaster.sponsored", Attributes: map[string]string{
@@ -358,7 +290,7 @@ func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, 
 	} else if feePayer != strings.ToLower(strings.TrimSpace(tx.From)) {
 		receipt.FeePayer = feePayer
 	}
-	if err := e.chargeFee(working, feePayer, fee.TotalFee, fee.PriorityFee); err != nil {
+	if err := e.settleFeeEscrow(working, feePayer, maximumFee, fee); err != nil {
 		return types.Receipt{}, err
 	}
 	receipt.GasUsed = gasUsed
@@ -366,6 +298,9 @@ func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, 
 	receipt.EffectiveGasPrice = fee.EffectiveGasPrice
 	receipt.BaseFeeBurned = fee.BaseFeeBurned
 	receipt.PriorityFeePaid = fee.PriorityFee
+	if err := types.ValidateReceiptSchema(receipt, tx.Hash()); err != nil {
+		return types.Receipt{}, fmt.Errorf("%w: invalid generated receipt: %v", ErrConsensusExecutionFault, err)
+	}
 	store.ReplaceWith(working)
 	return receipt, nil
 }
@@ -373,16 +308,6 @@ func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, 
 func (e *Executor) executeBatchOperation(store *state.Store, tx types.Transaction, operation types.BatchOperation, index int, gasLimit uint64) ([]types.Event, uint64, error) {
 	switch operation.Type {
 	case types.TxTransfer:
-		if strings.TrimSpace(operation.To) == "" {
-			return nil, 0, fmt.Errorf("batch operation %d transfer requires to", index)
-		}
-		gas, err := EstimateGas(types.TxTransfer)
-		if err != nil {
-			return nil, 0, err
-		}
-		if gasLimit < gas {
-			return nil, 0, errors.New("gas limit too low")
-		}
 		if err := store.Transfer(tx.From, operation.To, operation.Value); err != nil {
 			return nil, 0, err
 		}
@@ -393,29 +318,15 @@ func (e *Executor) executeBatchOperation(store *state.Store, tx types.Transactio
 				"to":       operation.To,
 				"op_index": strconv.Itoa(index),
 			},
-		}}, gas, nil
+		}}, 0, nil
 	case types.TxCall:
 		method := operation.Payload["method"]
-		if strings.TrimSpace(operation.To) == "" || strings.TrimSpace(method) == "" {
-			return nil, 0, fmt.Errorf("batch operation %d call requires to and method", index)
-		}
-		gas, err := EstimateGas(types.TxCall)
+		events, resourceGas, err := e.runtime.CallMeteredInTransaction(store, operation.To, tx.From, method, operation.Payload, gasLimit)
 		if err != nil {
-			return nil, 0, err
-		}
-		if gasLimit < gas {
-			return nil, 0, errors.New("gas limit too low")
-		}
-		events, resourceGas, err := e.runtime.CallMeteredInTransaction(store, operation.To, tx.From, method, operation.Payload, gasLimit-gas)
-		if err != nil {
-			return nil, 0, err
-		}
-		gas, err = checkedAdd(gas, resourceGas)
-		if err != nil {
-			return nil, 0, err
+			return nil, resourceGas, err
 		}
 		tagBatchEvents(events, index)
-		return events, gas, nil
+		return events, resourceGas, nil
 	default:
 		return nil, 0, fmt.Errorf("unsupported batch operation type %q", operation.Type)
 	}
@@ -465,7 +376,10 @@ func validateTransactionAuthorization(store *state.Store, tx types.Transaction, 
 	}
 	owner := strings.ToLower(strings.TrimSpace(store.GetStorage(tx.From, "owner")))
 	if owner == "" {
-		return errors.New("smart account owner is not set")
+		return fmt.Errorf("%w: smart account owner is not set", contracts.ErrContractStateFault)
+	}
+	if normalized, err := chaincrypto.NormalizeAddress(owner); err != nil || normalized != owner {
+		return fmt.Errorf("%w: invalid smart account owner", contracts.ErrContractStateFault)
 	}
 	if signer == owner {
 		return nil
@@ -495,16 +409,19 @@ func validateMultisigAuthorization(store *state.Store, tx types.Transaction) err
 	if account.CodeID != contracts.MultisigCodeID {
 		return errors.New("transaction authorizations require multisig.v1 from account")
 	}
+	if len(tx.Authorizations) > contracts.MaxMultisigOwners {
+		return fmt.Errorf("multisig authorization count exceeds %d", contracts.MaxMultisigOwners)
+	}
 	owners, err := multisigOwners(store.GetStorage(tx.From, "owners"))
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %v", contracts.ErrContractStateFault, err)
 	}
 	threshold, err := strconv.ParseUint(strings.TrimSpace(store.GetStorage(tx.From, "threshold")), 10, 64)
 	if err != nil || threshold == 0 {
-		return errors.New("multisig threshold is not set")
+		return fmt.Errorf("%w: multisig threshold is not set", contracts.ErrContractStateFault)
 	}
 	if threshold > uint64(len(owners)) {
-		return errors.New("multisig threshold exceeds owner count")
+		return fmt.Errorf("%w: multisig threshold exceeds owner count", contracts.ErrContractStateFault)
 	}
 	seen := make(map[string]struct{}, len(tx.Authorizations))
 	for _, authorization := range tx.Authorizations {
@@ -532,9 +449,9 @@ func validateMultisigAuthorization(store *state.Store, tx types.Transaction) err
 func multisigOwners(raw string) (map[string]struct{}, error) {
 	owners := make(map[string]struct{})
 	for _, part := range strings.Split(raw, ",") {
-		owner := strings.ToLower(strings.TrimSpace(part))
-		if owner == "" {
-			continue
+		owner, err := chaincrypto.NormalizeAddress(part)
+		if err != nil || owner != part {
+			return nil, errors.New("multisig owner is not canonically encoded")
 		}
 		owners[owner] = struct{}{}
 	}
@@ -608,12 +525,11 @@ func feeCaps(tx types.Transaction) (uint64, uint64) {
 	return tx.MaxFeePerGas, tx.MaxPriorityFeePerGas
 }
 
-func validateFeeCapacity(store *state.Store, tx types.Transaction, baseFeePerGas uint64) error {
+func (e *Executor) validateFeeCapacity(store *state.Store, tx types.Transaction, baseFeePerGas uint64) error {
 	if _, err := CalculateFee(tx, 0, baseFeePerGas); err != nil {
 		return err
 	}
-	maxFeePerGas, _ := feeCaps(tx)
-	maximumFee, err := checkedMul(tx.GasLimit, maxFeePerGas)
+	maximumFee, err := maximumTransactionFee(tx)
 	if err != nil {
 		return err
 	}
@@ -633,7 +549,79 @@ func validateFeeCapacity(store *state.Store, tx types.Transaction, baseFeePerGas
 	} else if store.GetAccount(tx.From).Balance < valueExposure {
 		return errors.New("insufficient funds")
 	}
+	if err := validateExecutionCreditCapacity(store, tx, feePayer, 0); err != nil {
+		return err
+	}
+	collector := strings.ToLower(strings.TrimSpace(e.feeCollector))
+	if collector != "" && collector != feePayer {
+		maximumBreakdown, err := CalculateFee(tx, tx.GasLimit, baseFeePerGas)
+		if err != nil {
+			return err
+		}
+		if err := validateExecutionCreditCapacity(store, tx, collector, maximumBreakdown.PriorityFee); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func validateExecutionCreditCapacity(store *state.Store, tx types.Transaction, target string, additional uint64) error {
+	incoming, err := transactionIncomingValue(tx, target)
+	if err != nil {
+		return err
+	}
+	total, err := checkedAdd(incoming, additional)
+	if err != nil {
+		return errors.New("recipient balance overflow")
+	}
+	balance := store.GetAccount(target).Balance
+	if total > math.MaxUint64-balance {
+		return errors.New("recipient balance overflow")
+	}
+	return nil
+}
+
+func transactionIncomingValue(tx types.Transaction, target string) (uint64, error) {
+	target = strings.ToLower(strings.TrimSpace(target))
+	sender := strings.ToLower(strings.TrimSpace(tx.From))
+	if target == "" {
+		return 0, nil
+	}
+	switch tx.Type {
+	case types.TxTransfer:
+		if target == sender {
+			return 0, nil
+		}
+		if strings.ToLower(strings.TrimSpace(tx.To)) == target {
+			return tx.Value, nil
+		}
+	case types.TxBatch:
+		if target == sender {
+			return 0, nil
+		}
+		var incoming uint64
+		for _, operation := range tx.Batch {
+			if operation.Type != types.TxTransfer || strings.ToLower(strings.TrimSpace(operation.To)) != target {
+				continue
+			}
+			next, err := checkedAdd(incoming, operation.Value)
+			if err != nil {
+				return 0, errors.New("recipient balance overflow")
+			}
+			incoming = next
+		}
+		return incoming, nil
+	case types.TxUnstake:
+		if target == sender {
+			return tx.Value, nil
+		}
+	}
+	return 0, nil
+}
+
+func maximumTransactionFee(tx types.Transaction) (uint64, error) {
+	maxFeePerGas, _ := feeCaps(tx)
+	return checkedMul(tx.GasLimit, maxFeePerGas)
 }
 
 func transactionValueExposure(tx types.Transaction) (uint64, error) {
@@ -671,17 +659,21 @@ func transactionFeePayer(tx types.Transaction) string {
 	return strings.ToLower(strings.TrimSpace(tx.From))
 }
 
-func (e *Executor) chargeFee(store *state.Store, from string, totalFee uint64, priorityFee uint64) error {
-	if totalFee == 0 {
+func (e *Executor) settleFeeEscrow(store *state.Store, payer string, maximumFee uint64, fee FeeBreakdown) error {
+	if fee.TotalFee > maximumFee {
+		return fmt.Errorf("%w: actual fee exceeds escrow", ErrConsensusExecutionFault)
+	}
+	refund := maximumFee - fee.TotalFee
+	if err := store.AddBalance(payer, refund); err != nil {
+		return fmt.Errorf("%w: fee escrow refund: %v", ErrConsensusExecutionFault, err)
+	}
+	if e.feeCollector == "" || fee.PriorityFee == 0 {
 		return nil
 	}
-	if err := store.SubBalance(from, totalFee); err != nil {
-		return err
+	if err := store.AddBalance(e.feeCollector, fee.PriorityFee); err != nil {
+		return fmt.Errorf("%w: priority fee credit: %v", ErrConsensusExecutionFault, err)
 	}
-	if e.feeCollector == "" || priorityFee == 0 {
-		return nil
-	}
-	return store.AddBalance(e.feeCollector, priorityFee)
+	return nil
 }
 
 func EstimateGas(txType types.TxType) (uint64, error) {
@@ -767,6 +759,9 @@ func parseProposalSubmitPayload(tx types.Transaction, blockHeight uint64) (types
 	if err != nil || votingPeriod == 0 {
 		return types.Proposal{}, errors.New("proposal voting_period must be positive")
 	}
+	if math.MaxUint64-blockHeight < votingPeriod {
+		return types.Proposal{}, errors.New("proposal voting end height overflow")
+	}
 	proposal := types.Proposal{
 		ID:              types.ProposalID(tx.Hash()),
 		Proposer:        strings.ToLower(tx.From),
@@ -836,14 +831,20 @@ func checkedMul(left uint64, right uint64) (uint64, error) {
 }
 
 func parseWASMUploadPayload(payload map[string]string) ([]byte, error) {
-	raw := strings.TrimSpace(payload["bytecode"])
-	if raw == "" {
-		raw = strings.TrimSpace(payload["wasm"])
+	if len(payload) != 1 {
+		return nil, errors.New("wasm upload payload must contain only bytecode")
+	}
+	raw, ok := payload["bytecode"]
+	if !ok {
+		return nil, errors.New("wasm upload payload must contain only bytecode")
 	}
 	if raw == "" {
 		return nil, errors.New("wasm upload requires bytecode")
 	}
-	raw = strings.TrimPrefix(raw, "0x")
+	if raw != strings.TrimSpace(raw) || !strings.HasPrefix(raw, "0x") || raw != strings.ToLower(raw) {
+		return nil, errors.New("wasm bytecode must be canonical 0x-prefixed lowercase hex")
+	}
+	raw = raw[2:]
 	if len(raw) > contracts.MaxWASMModuleBytes*2 {
 		return nil, fmt.Errorf("wasm module size exceeds %d bytes", contracts.MaxWASMModuleBytes)
 	}
@@ -884,7 +885,9 @@ func executeSetCode(store *state.Store, tx types.Transaction) (string, map[strin
 	}
 	store.ClearDelegation(tx.From)
 	store.SetDelegatedCodeID(tx.From, codeID)
-	store.SetStorage(tx.From, "owner", owner)
+	if err := store.SetStorage(tx.From, "owner", owner); err != nil {
+		return "", nil, err
+	}
 	attributes["code_id"] = codeID
 	attributes["owner"] = owner
 	return "account.delegation_set", attributes, nil
@@ -910,9 +913,13 @@ func executeSessionKey(store *state.Store, tx types.Transaction) (types.Event, e
 		return types.Event{}, errors.New("session key changes require account owner")
 	}
 	action := strings.ToLower(strings.TrimSpace(tx.Payload["action"]))
-	key := strings.ToLower(strings.TrimSpace(tx.Payload["key"]))
-	if key == "" {
+	keyRaw := tx.Payload["key"]
+	if keyRaw == "" {
 		return types.Event{}, errors.New("session key address is required")
+	}
+	key, err := chaincrypto.NormalizeAddress(keyRaw)
+	if err != nil || key != keyRaw {
+		return types.Event{}, errors.New("session key must be a canonical 20-byte address")
 	}
 	prefix := sessionKeyStoragePrefix(key)
 	attributes := map[string]string{
@@ -921,6 +928,9 @@ func executeSessionKey(store *state.Store, tx types.Transaction) (types.Event, e
 	}
 	switch action {
 	case "add":
+		if store.GetStorage(tx.From, prefix+"epoch") == "" && activeSessionKeyCount(store, tx.From) >= maxSessionKeys {
+			return types.Event{}, fmt.Errorf("session key count exceeds %d", maxSessionKeys)
+		}
 		limitRaw := strings.TrimSpace(tx.Payload["limit"])
 		limit := uint64(0)
 		if limitRaw != "" {
@@ -934,8 +944,14 @@ func executeSessionKey(store *state.Store, tx types.Transaction) (types.Event, e
 		if err != nil {
 			return types.Event{}, err
 		}
-		allowedTo := strings.ToLower(strings.TrimSpace(tx.Payload["to"]))
-		callTo := strings.ToLower(strings.TrimSpace(tx.Payload["call_to"]))
+		allowedTo, err := optionalCanonicalAddress(tx.Payload["to"], "session key transfer target")
+		if err != nil {
+			return types.Event{}, err
+		}
+		callTo, err := optionalCanonicalAddress(tx.Payload["call_to"], "session key call target")
+		if err != nil {
+			return types.Event{}, err
+		}
 		callMethod := strings.TrimSpace(tx.Payload["call_method"])
 		if (callTo == "") != (callMethod == "") {
 			return types.Event{}, errors.New("session key call policy requires call_to and call_method")
@@ -947,28 +963,40 @@ func executeSessionKey(store *state.Store, tx types.Transaction) (types.Event, e
 			store.DeleteStorage(tx.From, prefix+"limit")
 			store.DeleteStorage(tx.From, prefix+"spent")
 		} else {
-			store.SetStorage(tx.From, prefix+"limit", strconv.FormatUint(limit, 10))
-			store.SetStorage(tx.From, prefix+"spent", "0")
+			if err := store.SetStorage(tx.From, prefix+"limit", strconv.FormatUint(limit, 10)); err != nil {
+				return types.Event{}, err
+			}
+			if err := store.SetStorage(tx.From, prefix+"spent", "0"); err != nil {
+				return types.Event{}, err
+			}
 			attributes["limit"] = strconv.FormatUint(limit, 10)
 		}
 		if expires == 0 {
 			store.DeleteStorage(tx.From, prefix+"expires")
 		} else {
-			store.SetStorage(tx.From, prefix+"expires", strconv.FormatUint(expires, 10))
+			if err := store.SetStorage(tx.From, prefix+"expires", strconv.FormatUint(expires, 10)); err != nil {
+				return types.Event{}, err
+			}
 			attributes["expires"] = strconv.FormatUint(expires, 10)
 		}
 		if allowedTo == "" {
 			store.DeleteStorage(tx.From, prefix+"to")
 		} else {
-			store.SetStorage(tx.From, prefix+"to", allowedTo)
+			if err := store.SetStorage(tx.From, prefix+"to", allowedTo); err != nil {
+				return types.Event{}, err
+			}
 			attributes["to"] = allowedTo
 		}
 		if callTo == "" {
 			store.DeleteStorage(tx.From, prefix+"call_to")
 			store.DeleteStorage(tx.From, prefix+"call_method")
 		} else {
-			store.SetStorage(tx.From, prefix+"call_to", callTo)
-			store.SetStorage(tx.From, prefix+"call_method", callMethod)
+			if err := store.SetStorage(tx.From, prefix+"call_to", callTo); err != nil {
+				return types.Event{}, err
+			}
+			if err := store.SetStorage(tx.From, prefix+"call_method", callMethod); err != nil {
+				return types.Event{}, err
+			}
 			attributes["call_to"] = callTo
 			attributes["call_method"] = callMethod
 		}
@@ -976,7 +1004,9 @@ func executeSessionKey(store *state.Store, tx types.Transaction) (types.Event, e
 		if err != nil {
 			return types.Event{}, err
 		}
-		store.SetStorage(tx.From, prefix+"epoch", strconv.FormatUint(epoch, 10))
+		if err := store.SetStorage(tx.From, prefix+"epoch", strconv.FormatUint(epoch, 10)); err != nil {
+			return types.Event{}, err
+		}
 		return types.Event{Type: "account.session_key_added", Attributes: attributes}, nil
 	case "revoke":
 		store.DeleteStorage(tx.From, prefix+"limit")
@@ -1070,7 +1100,9 @@ func applySessionKeyUsage(store *state.Store, tx types.Transaction) (types.Event
 	if err != nil {
 		return types.Event{}, err
 	}
-	store.SetStorage(tx.From, sessionKeyStoragePrefix(signer)+"spent", strconv.FormatUint(spent, 10))
+	if err := store.SetStorage(tx.From, sessionKeyStoragePrefix(signer)+"spent", strconv.FormatUint(spent, 10)); err != nil {
+		return types.Event{}, err
+	}
 	return types.Event{Type: "account.session_key_used", Attributes: map[string]string{
 		"account": strings.ToLower(tx.From),
 		"key":     signer,
@@ -1088,21 +1120,25 @@ func parseSessionKeyPolicy(store *state.Store, account string, key string) (sess
 		var err error
 		limit, err = parsePositiveUint(limitRaw, "session key limit")
 		if err != nil {
-			return sessionKeyPolicy{}, errors.New("session key is not authorized")
+			return sessionKeyPolicy{}, fmt.Errorf("%w: invalid stored session key limit", contracts.ErrContractStateFault)
 		}
 	}
 	spent, err := parseOptionalUint(store.GetStorage(account, prefix+"spent"), "session key spent")
 	if err != nil {
-		return sessionKeyPolicy{}, err
+		return sessionKeyPolicy{}, fmt.Errorf("%w: %v", contracts.ErrContractStateFault, err)
 	}
 	expires, err := parseOptionalUint(store.GetStorage(account, prefix+"expires"), "session key expires")
 	if err != nil {
-		return sessionKeyPolicy{}, err
+		return sessionKeyPolicy{}, fmt.Errorf("%w: %v", contracts.ErrContractStateFault, err)
 	}
-	callTo := strings.ToLower(strings.TrimSpace(store.GetStorage(account, prefix+"call_to")))
+	callToRaw := store.GetStorage(account, prefix+"call_to")
+	callTo, err := optionalCanonicalAddress(callToRaw, "stored session key call target")
+	if err != nil {
+		return sessionKeyPolicy{}, fmt.Errorf("%w: %v", contracts.ErrContractStateFault, err)
+	}
 	callMethod := strings.TrimSpace(store.GetStorage(account, prefix+"call_method"))
 	if (callTo == "") != (callMethod == "") {
-		return sessionKeyPolicy{}, errors.New("session key call policy is incomplete")
+		return sessionKeyPolicy{}, fmt.Errorf("%w: session key call policy is incomplete", contracts.ErrContractStateFault)
 	}
 	if limit == 0 && callTo == "" {
 		return sessionKeyPolicy{}, errors.New("session key is not authorized")
@@ -1112,18 +1148,48 @@ func parseSessionKeyPolicy(store *state.Store, account string, key string) (sess
 		return sessionKeyPolicy{}, err
 	}
 	policyEpoch, err := parseOptionalUint(store.GetStorage(account, prefix+"epoch"), "session key epoch")
-	if err != nil || policyEpoch != currentEpoch {
+	if err != nil {
+		return sessionKeyPolicy{}, fmt.Errorf("%w: %v", contracts.ErrContractStateFault, err)
+	}
+	if policyEpoch != currentEpoch {
 		return sessionKeyPolicy{}, errors.New("session key is not authorized")
+	}
+	toRaw := store.GetStorage(account, prefix+"to")
+	to, err := optionalCanonicalAddress(toRaw, "stored session key transfer target")
+	if err != nil {
+		return sessionKeyPolicy{}, fmt.Errorf("%w: %v", contracts.ErrContractStateFault, err)
 	}
 	return sessionKeyPolicy{
 		Key:        key,
 		Limit:      limit,
 		Spent:      spent,
 		Expires:    expires,
-		To:         strings.ToLower(strings.TrimSpace(store.GetStorage(account, prefix+"to"))),
+		To:         to,
 		CallTo:     callTo,
 		CallMethod: callMethod,
 	}, nil
+}
+
+func activeSessionKeyCount(store *state.Store, account string) int {
+	keys := make(map[string]struct{})
+	for key := range store.GetAccount(account).Storage {
+		if !strings.HasPrefix(key, "session:") || !strings.HasSuffix(key, ":epoch") || key == sessionEpochKey {
+			continue
+		}
+		keys[strings.TrimSuffix(strings.TrimPrefix(key, "session:"), ":epoch")] = struct{}{}
+	}
+	return len(keys)
+}
+
+func optionalCanonicalAddress(raw string, field string) (string, error) {
+	if raw == "" {
+		return "", nil
+	}
+	address, err := chaincrypto.NormalizeAddress(raw)
+	if err != nil || address != raw {
+		return "", fmt.Errorf("%s must be a canonical 20-byte address", field)
+	}
+	return address, nil
 }
 
 func sessionKeyStoragePrefix(key string) string {
@@ -1131,7 +1197,11 @@ func sessionKeyStoragePrefix(key string) string {
 }
 
 func sessionEpoch(store *state.Store, account string) (uint64, error) {
-	return parseOptionalUint(store.GetStorage(account, sessionEpochKey), "session epoch")
+	epoch, err := parseOptionalUint(store.GetStorage(account, sessionEpochKey), "session epoch")
+	if err != nil {
+		return 0, fmt.Errorf("%w: %v", contracts.ErrContractStateFault, err)
+	}
+	return epoch, nil
 }
 
 func isAccountV1Authority(account types.Account) bool {
@@ -1139,43 +1209,106 @@ func isAccountV1Authority(account types.Account) bool {
 }
 
 func parsePositiveUint(raw string, field string) (uint64, error) {
-	value, err := strconv.ParseUint(strings.TrimSpace(raw), 10, 64)
-	if err != nil || value == 0 {
+	value, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil || value == 0 || strconv.FormatUint(value, 10) != raw {
 		return 0, fmt.Errorf("%s must be positive", field)
 	}
 	return value, nil
 }
 
 func parseOptionalUint(raw string, field string) (uint64, error) {
-	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return 0, nil
 	}
 	value, err := strconv.ParseUint(raw, 10, 64)
-	if err != nil {
+	if err != nil || strconv.FormatUint(value, 10) != raw {
 		return 0, fmt.Errorf("%s must be an unsigned integer", field)
 	}
 	return value, nil
 }
 
-func parseSlashPayload(payload map[string]string) (string, uint64, string, error) {
-	target := strings.ToLower(strings.TrimSpace(payload["target"]))
-	if target == "" {
-		return "", 0, "", errors.New("slash target is required")
+type validatorSlashEvidence struct {
+	Target          string `json:"target"`
+	Height          uint64 `json:"height"`
+	FirstBlockHash  string `json:"first_block_hash"`
+	FirstSignature  string `json:"first_signature"`
+	SecondBlockHash string `json:"second_block_hash"`
+	SecondSignature string `json:"second_signature"`
+}
+
+func parseSlashPayload(payload map[string]string) (validatorSlashEvidence, error) {
+	fields := []string{"target", "height", "first_block_hash", "first_signature", "second_block_hash", "second_signature"}
+	if err := requirePayloadFields(payload, "validator slash", fields); err != nil {
+		return validatorSlashEvidence{}, err
 	}
-	amountRaw := payload["amount"]
-	if amountRaw == "" {
-		return "", 0, "", errors.New("slash amount is required")
+	heightRaw := payload["height"]
+	height, err := strconv.ParseUint(heightRaw, 10, 64)
+	if err != nil || height == 0 || strconv.FormatUint(height, 10) != heightRaw {
+		return validatorSlashEvidence{}, errors.New("slash evidence height must be a positive canonical integer")
 	}
-	amount, err := strconv.ParseUint(amountRaw, 10, 64)
-	if err != nil || amount == 0 {
-		return "", 0, "", errors.New("slash amount must be positive")
+	evidence := validatorSlashEvidence{
+		Target:          payload["target"],
+		Height:          height,
+		FirstBlockHash:  payload["first_block_hash"],
+		FirstSignature:  payload["first_signature"],
+		SecondBlockHash: payload["second_block_hash"],
+		SecondSignature: payload["second_signature"],
 	}
-	evidence := strings.TrimSpace(payload["evidence"])
-	if evidence == "" {
-		return "", 0, "", errors.New("slash evidence is required")
+	if err := validateSlashEvidenceShape(evidence); err != nil {
+		return validatorSlashEvidence{}, err
 	}
-	return target, amount, evidence, nil
+	return evidence, nil
+}
+
+func validateSlashEvidenceShape(evidence validatorSlashEvidence) error {
+	target, err := chaincrypto.NormalizeAddress(evidence.Target)
+	if err != nil || target != evidence.Target {
+		return errors.New("slash target is not canonically encoded")
+	}
+	if evidence.FirstBlockHash == evidence.SecondBlockHash {
+		return errors.New("slash evidence must contain two distinct block hashes")
+	}
+	if err := types.ValidateCanonicalHash("first slash evidence block hash", evidence.FirstBlockHash); err != nil {
+		return err
+	}
+	if err := types.ValidateCanonicalHash("second slash evidence block hash", evidence.SecondBlockHash); err != nil {
+		return err
+	}
+	if err := types.ValidateCanonicalSignature("first slash evidence signature", evidence.FirstSignature); err != nil {
+		return err
+	}
+	return types.ValidateCanonicalSignature("second slash evidence signature", evidence.SecondSignature)
+}
+
+func validateSlashEvidence(chainID string, evidence validatorSlashEvidence) error {
+	if err := validateSlashEvidenceShape(evidence); err != nil {
+		return err
+	}
+	firstMessage := types.FinalityVoteSigningBytes(chainID, evidence.Height, evidence.FirstBlockHash)
+	secondMessage := types.FinalityVoteSigningBytes(chainID, evidence.Height, evidence.SecondBlockHash)
+	if !chaincrypto.Verify(evidence.Target, firstMessage, evidence.FirstSignature) ||
+		!chaincrypto.Verify(evidence.Target, secondMessage, evidence.SecondSignature) {
+		return errors.New("slash evidence signatures are invalid")
+	}
+	return nil
+}
+
+func slashEvidenceID(chainID string, evidence validatorSlashEvidence) string {
+	return types.FinalityEquivocationID(
+		chainID,
+		evidence.Target,
+		evidence.Height,
+		evidence.FirstBlockHash,
+		evidence.SecondBlockHash,
+	)
+}
+
+func slashOffenceID(chainID string, evidence validatorSlashEvidence) string {
+	return types.FinalityEquivocationOffenceID(
+		chainID,
+		evidence.Target,
+		evidence.Height,
+	)
 }
 
 func isActiveValidator(store *state.Store, address string) bool {

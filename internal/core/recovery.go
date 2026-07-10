@@ -32,7 +32,7 @@ func validateAccountRecoveryAuthorization(store *state.Store, tx types.Transacti
 	if len(tx.Authorizations) > 0 {
 		return errors.New("account recovery does not support multisig authorizations")
 	}
-	if strings.TrimSpace(tx.SignatureKind) != "" {
+	if strings.TrimSpace(tx.SignatureKind) != "" || strings.TrimSpace(tx.EthereumRawHash) != "" {
 		return errors.New("account recovery does not support ethereum signatures")
 	}
 	if strings.TrimSpace(tx.Paymaster) != "" || strings.TrimSpace(tx.PaymasterSignature) != "" {
@@ -45,12 +45,20 @@ func validateAccountRecoveryAuthorization(store *state.Store, tx types.Transacti
 	if signer == "" {
 		return errors.New("account recovery requires signer")
 	}
+	if err := requireCanonicalSignature("transaction signature", tx.Signature); err != nil {
+		return errors.New("invalid transaction signature")
+	}
 	if !chaincrypto.Verify(signer, tx.SigningBytes(), tx.Signature) {
 		return errors.New("invalid transaction signature")
 	}
 	account := store.GetAccount(tx.From)
 	if !isAccountV1Authority(account) {
 		return errors.New("account recovery requires account.v1 from account")
+	}
+	ownerRaw := store.GetStorage(tx.From, "owner")
+	owner, ownerErr := chaincrypto.NormalizeAddress(ownerRaw)
+	if ownerErr != nil || owner != ownerRaw {
+		return fmt.Errorf("%w: invalid account recovery owner", ErrConsensusExecutionFault)
 	}
 	action, err := accountRecoveryAction(tx.Payload)
 	if err != nil {
@@ -61,8 +69,7 @@ func validateAccountRecoveryAuthorization(store *state.Store, tx types.Transacti
 	}
 	switch action {
 	case "configure", "cancel", "clear":
-		owner := strings.ToLower(strings.TrimSpace(store.GetStorage(tx.From, "owner")))
-		if owner == "" || signer != owner {
+		if signer != owner {
 			return errors.New("account recovery owner action requires current owner")
 		}
 	case "approve", "execute":
@@ -129,9 +136,15 @@ func executeAccountRecovery(store *state.Store, tx types.Transaction, blockHeigh
 			return types.Event{}, err
 		}
 		guardiansRaw := strings.Join(guardians, ",")
-		store.SetStorage(tx.From, recoveryGuardiansKey, guardiansRaw)
-		store.SetStorage(tx.From, recoveryThresholdKey, strconv.FormatUint(threshold, 10))
-		store.SetStorage(tx.From, recoveryDelayKey, strconv.FormatUint(delay, 10))
+		if err := store.SetStorage(tx.From, recoveryGuardiansKey, guardiansRaw); err != nil {
+			return types.Event{}, err
+		}
+		if err := store.SetStorage(tx.From, recoveryThresholdKey, strconv.FormatUint(threshold, 10)); err != nil {
+			return types.Event{}, err
+		}
+		if err := store.SetStorage(tx.From, recoveryDelayKey, strconv.FormatUint(delay, 10)); err != nil {
+			return types.Event{}, err
+		}
 		clearPendingRecovery(store, tx.From)
 		attributes["guardians"] = guardiansRaw
 		attributes["threshold"] = strconv.FormatUint(threshold, 10)
@@ -163,7 +176,7 @@ func executeAccountRecovery(store *state.Store, tx types.Transaction, blockHeigh
 		expiresAtRaw := strings.TrimSpace(store.GetStorage(tx.From, recoveryExpiresAtKey))
 		if pendingRaw != "" {
 			if expiresAtRaw == "" {
-				return types.Event{}, errors.New("recovery proposal expiry is not set")
+				return types.Event{}, consensusStateFault("recovery proposal expiry is not set")
 			}
 			expiresAt, err := parseStoredRecoveryExpiry(expiresAtRaw)
 			if err != nil {
@@ -187,7 +200,7 @@ func executeAccountRecovery(store *state.Store, tx types.Transaction, blockHeigh
 		if pendingRaw != "" {
 			pendingOwner, err := normalizeRecoveryAddress(pendingRaw, "recovery pending owner")
 			if err != nil {
-				return types.Event{}, err
+				return types.Event{}, consensusStateFault(err.Error())
 			}
 			if pendingOwner != newOwner {
 				return types.Event{}, errors.New("recovery for another owner is already pending")
@@ -216,7 +229,9 @@ func executeAccountRecovery(store *state.Store, tx types.Transaction, blockHeigh
 		if !voteUpdated {
 			votes = append(votes, recoveryVote{Guardian: signer, NewOwner: newOwner})
 		}
-		store.SetStorage(tx.From, recoveryVotesKey, encodeRecoveryVotes(votes))
+		if err := store.SetStorage(tx.From, recoveryVotesKey, encodeRecoveryVotes(votes)); err != nil {
+			return types.Event{}, err
+		}
 		approvals := recoveryVotesForOwner(votes, newOwner)
 
 		executeAfterRaw := ""
@@ -231,14 +246,22 @@ func executeAccountRecovery(store *state.Store, tx types.Transaction, blockHeigh
 			}
 			executeAfterRaw = strconv.FormatUint(executeAfter, 10)
 			expiresAtRaw = strconv.FormatUint(expiresAt, 10)
-			store.SetStorage(tx.From, recoveryPendingOwnerKey, newOwner)
-			store.SetStorage(tx.From, recoveryApprovalsKey, strings.Join(approvals, ","))
-			store.SetStorage(tx.From, recoveryExecuteAfterKey, executeAfterRaw)
-			store.SetStorage(tx.From, recoveryExpiresAtKey, expiresAtRaw)
+			if err := store.SetStorage(tx.From, recoveryPendingOwnerKey, newOwner); err != nil {
+				return types.Event{}, err
+			}
+			if err := store.SetStorage(tx.From, recoveryApprovalsKey, strings.Join(approvals, ",")); err != nil {
+				return types.Event{}, err
+			}
+			if err := store.SetStorage(tx.From, recoveryExecuteAfterKey, executeAfterRaw); err != nil {
+				return types.Event{}, err
+			}
+			if err := store.SetStorage(tx.From, recoveryExpiresAtKey, expiresAtRaw); err != nil {
+				return types.Event{}, err
+			}
 			store.DeleteStorage(tx.From, recoveryVotesKey)
 		} else {
 			if strings.TrimSpace(store.GetStorage(tx.From, recoveryExecuteAfterKey)) != "" {
-				return types.Event{}, errors.New("recovery execute height is set before approval threshold")
+				return types.Event{}, consensusStateFault("recovery execute height is set before approval threshold")
 			}
 			if expiresAtRaw == "" {
 				expiresAt, err := checkedAdd(blockHeight, recoveryProposalWindow)
@@ -246,7 +269,9 @@ func executeAccountRecovery(store *state.Store, tx types.Transaction, blockHeigh
 					return types.Event{}, errors.New("recovery proposal expiry overflow")
 				}
 				expiresAtRaw = strconv.FormatUint(expiresAt, 10)
-				store.SetStorage(tx.From, recoveryExpiresAtKey, expiresAtRaw)
+				if err := store.SetStorage(tx.From, recoveryExpiresAtKey, expiresAtRaw); err != nil {
+					return types.Event{}, err
+				}
 			}
 		}
 		attributes["guardian"] = signer
@@ -288,7 +313,7 @@ func executeAccountRecovery(store *state.Store, tx types.Transaction, blockHeigh
 			if len(votes) > 0 {
 				expiresAtRaw := strings.TrimSpace(store.GetStorage(tx.From, recoveryExpiresAtKey))
 				if expiresAtRaw == "" {
-					return types.Event{}, errors.New("recovery voting round expiry is not set")
+					return types.Event{}, consensusStateFault("recovery voting round expiry is not set")
 				}
 				expiresAt, err := parseStoredRecoveryExpiry(expiresAtRaw)
 				if err != nil {
@@ -303,7 +328,7 @@ func executeAccountRecovery(store *state.Store, tx types.Transaction, blockHeigh
 		}
 		pendingOwner, err := normalizeRecoveryAddress(pendingRaw, "recovery pending owner")
 		if err != nil {
-			return types.Event{}, err
+			return types.Event{}, consensusStateFault(err.Error())
 		}
 		if newOwner != pendingOwner {
 			return types.Event{}, errors.New("recovery new owner does not match pending owner")
@@ -313,11 +338,11 @@ func executeAccountRecovery(store *state.Store, tx types.Transaction, blockHeigh
 			return types.Event{}, err
 		}
 		if uint64(len(approvals)) < threshold {
-			return types.Event{}, errors.New("recovery approval threshold not met")
+			return types.Event{}, consensusStateFault("recovery approval threshold not met")
 		}
 		executeAfterRaw := strings.TrimSpace(store.GetStorage(tx.From, recoveryExecuteAfterKey))
 		if executeAfterRaw == "" {
-			return types.Event{}, errors.New("recovery execute height is not set")
+			return types.Event{}, consensusStateFault("recovery execute height is not set")
 		}
 		executeAfter, err := parseStoredRecoveryHeight(executeAfterRaw)
 		if err != nil {
@@ -325,7 +350,7 @@ func executeAccountRecovery(store *state.Store, tx types.Transaction, blockHeigh
 		}
 		expiresAtRaw := strings.TrimSpace(store.GetStorage(tx.From, recoveryExpiresAtKey))
 		if expiresAtRaw == "" {
-			return types.Event{}, errors.New("recovery proposal expiry is not set")
+			return types.Event{}, consensusStateFault("recovery proposal expiry is not set")
 		}
 		expiresAt, err := parseStoredRecoveryExpiry(expiresAtRaw)
 		if err != nil {
@@ -345,8 +370,12 @@ func executeAccountRecovery(store *state.Store, tx types.Transaction, blockHeigh
 			return types.Event{}, errors.New("session epoch overflow")
 		}
 		oldOwner := strings.ToLower(strings.TrimSpace(store.GetStorage(tx.From, "owner")))
-		store.SetStorage(tx.From, "owner", pendingOwner)
-		store.SetStorage(tx.From, sessionEpochKey, strconv.FormatUint(epoch+1, 10))
+		if err := store.SetStorage(tx.From, "owner", pendingOwner); err != nil {
+			return types.Event{}, err
+		}
+		if err := store.SetStorage(tx.From, sessionEpochKey, strconv.FormatUint(epoch+1, 10)); err != nil {
+			return types.Event{}, err
+		}
 		clearPendingRecovery(store, tx.From)
 		attributes["guardian"] = signer
 		attributes["old_owner"] = oldOwner
@@ -413,12 +442,16 @@ func storedRecoveryGuardians(store *state.Store, account string) ([]string, erro
 	if raw == "" {
 		return nil, errors.New("account recovery guardian action requires configured guardian")
 	}
-	return parseRecoveryGuardians(raw)
+	guardians, err := parseRecoveryGuardians(raw)
+	if err != nil {
+		return nil, consensusStateFault(err.Error())
+	}
+	return guardians, nil
 }
 
 func parseRecoveryThreshold(raw string, guardianCount int) (uint64, error) {
-	threshold, err := strconv.ParseUint(strings.TrimSpace(raw), 10, 64)
-	if err != nil || threshold == 0 {
+	threshold, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil || threshold == 0 || strconv.FormatUint(threshold, 10) != raw {
 		return 0, errors.New("recovery threshold must be positive")
 	}
 	if threshold > uint64(guardianCount) {
@@ -428,12 +461,16 @@ func parseRecoveryThreshold(raw string, guardianCount int) (uint64, error) {
 }
 
 func storedRecoveryThreshold(store *state.Store, account string, guardianCount int) (uint64, error) {
-	return parseRecoveryThreshold(store.GetStorage(account, recoveryThresholdKey), guardianCount)
+	threshold, err := parseRecoveryThreshold(store.GetStorage(account, recoveryThresholdKey), guardianCount)
+	if err != nil {
+		return 0, consensusStateFault(err.Error())
+	}
+	return threshold, nil
 }
 
 func parseRecoveryDelay(raw string) (uint64, error) {
-	delay, err := strconv.ParseUint(strings.TrimSpace(raw), 10, 64)
-	if err != nil {
+	delay, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil || strconv.FormatUint(delay, 10) != raw {
 		return 0, errors.New("recovery delay must be an unsigned integer")
 	}
 	return delay, nil
@@ -442,9 +479,13 @@ func parseRecoveryDelay(raw string) (uint64, error) {
 func storedRecoveryDelay(store *state.Store, account string) (uint64, error) {
 	raw := strings.TrimSpace(store.GetStorage(account, recoveryDelayKey))
 	if raw == "" {
-		return 0, errors.New("recovery delay is not configured")
+		return 0, consensusStateFault("recovery delay is not configured")
 	}
-	return parseRecoveryDelay(raw)
+	delay, err := parseRecoveryDelay(raw)
+	if err != nil {
+		return 0, consensusStateFault(err.Error())
+	}
+	return delay, nil
 }
 
 func requiredRecoveryNewOwner(raw string) (string, error) {
@@ -496,10 +537,18 @@ func normalizeRecoveryAddress(raw string, field string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if address != raw {
+		return "", fmt.Errorf("%s is not canonically encoded", field)
+	}
 	return address, nil
 }
 
-func storedRecoveryApprovals(store *state.Store, account string, guardians []string) ([]string, error) {
+func storedRecoveryApprovals(store *state.Store, account string, guardians []string) (approvals []string, err error) {
+	defer func() {
+		if err != nil && !errors.Is(err, ErrConsensusExecutionFault) {
+			err = consensusStateFault(err.Error())
+		}
+	}()
 	raw := strings.TrimSpace(store.GetStorage(account, recoveryApprovalsKey))
 	if raw == "" {
 		return nil, nil
@@ -511,7 +560,7 @@ func storedRecoveryApprovals(store *state.Store, account string, guardians []str
 	if len(parts) > len(guardians) {
 		return nil, errors.New("recovery approvals exceed configured guardian count")
 	}
-	approvals := make([]string, 0, len(parts))
+	approvals = make([]string, 0, len(parts))
 	seen := make(map[string]struct{}, len(parts))
 	for _, part := range parts {
 		approval, err := normalizeRecoveryAddress(part, "recovery approval")
@@ -535,7 +584,12 @@ type recoveryVote struct {
 	NewOwner string
 }
 
-func storedRecoveryVotes(store *state.Store, account string, guardians []string) ([]recoveryVote, error) {
+func storedRecoveryVotes(store *state.Store, account string, guardians []string) (votes []recoveryVote, err error) {
+	defer func() {
+		if err != nil && !errors.Is(err, ErrConsensusExecutionFault) {
+			err = consensusStateFault(err.Error())
+		}
+	}()
 	raw := strings.TrimSpace(store.GetStorage(account, recoveryVotesKey))
 	if raw == "" {
 		return nil, nil
@@ -547,7 +601,7 @@ func storedRecoveryVotes(store *state.Store, account string, guardians []string)
 	if len(parts) > len(guardians) {
 		return nil, errors.New("recovery votes exceed configured guardian count")
 	}
-	votes := make([]recoveryVote, 0, len(parts))
+	votes = make([]recoveryVote, 0, len(parts))
 	seen := make(map[string]struct{}, len(parts))
 	for _, part := range parts {
 		fields := strings.SplitN(part, "=", 2)
@@ -595,7 +649,7 @@ func recoveryVotesForOwner(votes []recoveryVote, newOwner string) []string {
 func parseStoredRecoveryHeight(raw string) (uint64, error) {
 	height, err := strconv.ParseUint(strings.TrimSpace(raw), 10, 64)
 	if err != nil {
-		return 0, errors.New("recovery execute height is invalid")
+		return 0, consensusStateFault("recovery execute height is invalid")
 	}
 	return height, nil
 }
@@ -603,9 +657,13 @@ func parseStoredRecoveryHeight(raw string) (uint64, error) {
 func parseStoredRecoveryExpiry(raw string) (uint64, error) {
 	height, err := strconv.ParseUint(strings.TrimSpace(raw), 10, 64)
 	if err != nil {
-		return 0, errors.New("recovery proposal expiry is invalid")
+		return 0, consensusStateFault("recovery proposal expiry is invalid")
 	}
 	return height, nil
+}
+
+func consensusStateFault(message string) error {
+	return fmt.Errorf("%w: %s", ErrConsensusExecutionFault, message)
 }
 
 func clearPendingRecovery(store *state.Store, account string) {

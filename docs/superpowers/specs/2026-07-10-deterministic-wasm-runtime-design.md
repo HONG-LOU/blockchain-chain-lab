@@ -231,13 +231,14 @@ runtime fault: the node must stop the affected consensus processing path and
 must not manufacture a failure receipt from that error.
 
 The adapter classifies those errors as `ErrWasmRuntimeFault`. The development
-node records a process-local sticky halt when consensus-adjacent submit,
-produce, import, finality-vote, revalidation, or queued-promotion paths observe
-that class and rejects subsequent submit/produce/import/finality operations.
-The halt is not persisted and is not yet protocol-wide across CometBFT ABCI++
-validators. Persistent fatal state, fault injection on every production
-processing path, and deterministic recovery/upgrade behavior remain required
-before production activation.
+node records a sticky halt when consensus-adjacent submit, produce, import,
+finality-vote, revalidation, or queued-promotion paths observe that class and
+rejects subsequent submit/produce/import/finality operations. Persistent nodes
+write the halt as a strict, checksummed `HALT.json` record and restore it before
+resuming consensus entry points; non-persistent development nodes keep the halt
+in memory only. This is not yet protocol-wide across CometBFT ABCI++ validators.
+Cross-validator fault injection and deterministic recovery/upgrade behavior
+remain required before production activation.
 
 Receipts continue to record total transaction gas. A later protocol version may
 add metering version and guest/host breakdown, but nodes must already expose
@@ -266,8 +267,8 @@ Implementation is not complete until all of these pass:
 
 Passing the local implementation milestone removes wall-clock time from the
 WASM transaction outcome. It does not activate the runtime for mainnet and does
-not make the chain production-ready. Deterministic call-depth behavior,
-failed-transaction charging, native-contract metering, hard JIT memory bounds,
+not make the chain production-ready. Production activation and evidence for the
+implemented deterministic call-depth, failed-transaction charging, and native
+contract metering rules remain open alongside hard JIT memory bounds,
 supported-target artifacts/vectors, CometBFT integration, transactional
-storage, protocol upgrades, operations, and independent review remain open
-production gates.
+storage, protocol upgrades, operations, and independent review.

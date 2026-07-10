@@ -20,6 +20,8 @@ func TestWASMHostFieldLimits(t *testing.T) {
 		{name: "event type", code: wasmEventLengthsContractForTest(wasmMaxEventTypeBytes+1, 0, 0, 1)},
 		{name: "event key", code: wasmEventLengthsContractForTest(0, wasmMaxEventKeyBytes+1, 0, 1)},
 		{name: "event value", code: wasmEventLengthsContractForTest(0, 0, wasmMaxEventValueBytes+1, 1)},
+		{name: "empty event type", code: wasmEventLengthsContractForTest(0, 1, 0, 1)},
+		{name: "empty event key", code: wasmEventLengthsContractForTest(1, 0, 0, 1)},
 		{name: "return value", code: wasmReturnLengthContractForTest(wasmMaxReturnBytes + 1), read: true},
 	}
 	for _, test := range tests {

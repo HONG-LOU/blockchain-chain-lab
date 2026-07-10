@@ -29,11 +29,8 @@ func TestRunDemo(t *testing.T) {
 	if summary.Stake != 200 {
 		t.Fatalf("stake = %d", summary.Stake)
 	}
-	if summary.YesVotes != 200 {
-		t.Fatalf("yes votes = %d", summary.YesVotes)
-	}
-	if summary.GovernanceParam != "majority" {
-		t.Fatalf("governance param = %q", summary.GovernanceParam)
+	if summary.GovernanceTransactionsEnabled {
+		t.Fatal("unsafe governance transactions must remain disabled")
 	}
 	if summary.SponsoredReceiverBalance != 15 {
 		t.Fatalf("sponsored receiver balance = %d", summary.SponsoredReceiverBalance)

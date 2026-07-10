@@ -1,10 +1,13 @@
 package types
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
+	"strconv"
 	"strings"
 
 	chaincrypto "chainlab/internal/crypto"
@@ -42,11 +45,24 @@ func DecodeRawTransactionForChain(raw string, chainID string) (Transaction, erro
 
 func decodeChainLabRawTransactionBytes(encoded []byte) (Transaction, error) {
 	var tx Transaction
-	if err := json.Unmarshal(encoded, &tx); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&tx); err != nil {
+		return Transaction{}, fmt.Errorf("invalid raw transaction json")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
 		return Transaction{}, fmt.Errorf("invalid raw transaction json")
 	}
 	if err := validateRawTransaction(tx); err != nil {
 		return Transaction{}, err
+	}
+	canonical, err := hash.CanonicalBytes(tx)
+	if err != nil {
+		return Transaction{}, fmt.Errorf("encode canonical raw transaction: %w", err)
+	}
+	if !bytes.Equal(encoded, canonical) {
+		return Transaction{}, fmt.Errorf("raw transaction json is not canonically encoded")
 	}
 	return tx, nil
 }
@@ -67,9 +83,16 @@ func decodeEthereumType2RawTransaction(encoded []byte, expectedChainID string) (
 	if err != nil {
 		return Transaction{}, err
 	}
+	if chainNumberValue == 0 {
+		return Transaction{}, fmt.Errorf("ethereum type2 chain id must be positive")
+	}
 	chainID := ethereumInternalChainID(chainNumberValue)
 	if expectedChainID != "" {
-		if ethereumChainNumber(expectedChainID) != chainNumberValue {
+		expectedChainNumber, err := ethereumChainNumber(expectedChainID)
+		if err != nil {
+			return Transaction{}, err
+		}
+		if expectedChainNumber != chainNumberValue {
 			return Transaction{}, fmt.Errorf("ethereum type2 chain id %d does not match node chain %q", chainNumberValue, expectedChainID)
 		}
 		chainID = expectedChainID
@@ -124,7 +147,6 @@ func decodeEthereumType2RawTransaction(encoded []byte, expectedChainID string) (
 		MaxPriorityFeePerGas: maxPriorityFeePerGas,
 		Signature:            signature,
 		SignatureKind:        SignatureKindEthereumType2,
-		EthereumRawHash:      hash.KeccakHex(encoded),
 	}
 	digest, err := EthereumType2SigningDigest(tx)
 	if err != nil {
@@ -135,6 +157,14 @@ func decodeEthereumType2RawTransaction(encoded []byte, expectedChainID string) (
 		return Transaction{}, fmt.Errorf("invalid ethereum type2 signature")
 	}
 	tx.From = from
+	canonical, err := EthereumType2SignedBytes(tx)
+	if err != nil {
+		return Transaction{}, err
+	}
+	if !bytes.Equal(encoded, canonical) {
+		return Transaction{}, fmt.Errorf("ethereum type2 transaction is not canonically encoded")
+	}
+	tx.EthereumRawHash = hash.KeccakHex(canonical)
 	if err := validateRawTransaction(tx); err != nil {
 		return Transaction{}, err
 	}
@@ -149,13 +179,75 @@ func EthereumType2SigningDigest(tx Transaction) ([]byte, error) {
 	return hash.Keccak(payload), nil
 }
 
+func EthereumType2SignedBytes(tx Transaction) ([]byte, error) {
+	to, err := ethereumAddressBytes(tx.To)
+	if err != nil {
+		return nil, err
+	}
+	chainNumber, err := ethereumChainNumber(tx.ChainID)
+	if err != nil {
+		return nil, err
+	}
+	signature, err := canonicalCompactSignatureBytes(tx.Signature)
+	if err != nil {
+		return nil, err
+	}
+	yParity := uint64(signature[0] - 27)
+	r := bytes.TrimLeft(signature[1:33], "\x00")
+	s := bytes.TrimLeft(signature[33:65], "\x00")
+	if len(r) == 0 || len(s) == 0 {
+		return nil, fmt.Errorf("ethereum type2 signature values must be positive")
+	}
+	payload := rlpEncodeList(
+		rlpEncodeUint64(chainNumber),
+		rlpEncodeUint64(tx.Nonce),
+		rlpEncodeUint64(tx.MaxPriorityFeePerGas),
+		rlpEncodeUint64(tx.MaxFeePerGas),
+		rlpEncodeUint64(tx.GasLimit),
+		rlpEncodeBytes(to),
+		rlpEncodeUint64(tx.Value),
+		rlpEncodeBytes(nil),
+		rlpEncodeList(),
+		rlpEncodeUint64(yParity),
+		rlpEncodeBytes(r),
+		rlpEncodeBytes(s),
+	)
+	return append([]byte{0x02}, payload...), nil
+}
+
+func EthereumType2TransactionHash(tx Transaction) (string, error) {
+	encoded, err := EthereumType2SignedBytes(tx)
+	if err != nil {
+		return "", err
+	}
+	return hash.KeccakHex(encoded), nil
+}
+
+func canonicalCompactSignatureBytes(signature string) ([]byte, error) {
+	if err := ValidateCanonicalSignature("signature", signature); err != nil {
+		return nil, err
+	}
+	raw, err := hex.DecodeString(signature[2:])
+	if err != nil {
+		return nil, fmt.Errorf("signature is not canonically encoded")
+	}
+	if raw[0] != 27 && raw[0] != 28 {
+		return nil, fmt.Errorf("ethereum type2 signature recovery id must be 0 or 1")
+	}
+	return raw, nil
+}
+
 func ethereumType2SigningPayload(tx Transaction) ([]byte, error) {
 	to, err := ethereumAddressBytes(tx.To)
 	if err != nil {
 		return nil, err
 	}
+	chainNumber, err := ethereumChainNumber(tx.ChainID)
+	if err != nil {
+		return nil, err
+	}
 	payload := rlpEncodeList(
-		rlpEncodeUint64(ethereumChainNumber(tx.ChainID)),
+		rlpEncodeUint64(chainNumber),
 		rlpEncodeUint64(tx.Nonce),
 		rlpEncodeUint64(tx.MaxPriorityFeePerGas),
 		rlpEncodeUint64(tx.MaxFeePerGas),
@@ -175,30 +267,18 @@ func ethereumInternalChainID(chainNumberValue uint64) string {
 	return fmt.Sprintf("0x%x", chainNumberValue)
 }
 
-func ethereumChainNumber(chainID string) uint64 {
+func ethereumChainNumber(chainID string) (uint64, error) {
 	if chainID == "chainlab-local" {
-		return 31337
+		return 31337, nil
 	}
-	if strings.HasPrefix(chainID, "0x") {
-		value, err := hex.DecodeString(strings.TrimPrefix(chainID, "0x"))
-		if err == nil && len(value) <= 8 {
-			var output uint64
-			for _, b := range value {
-				output = output<<8 | uint64(b)
-			}
-			if output != 0 {
-				return output
-			}
-		}
+	if len(chainID) <= 2 || !strings.HasPrefix(chainID, "0x") || chainID != strings.ToLower(chainID) {
+		return 0, fmt.Errorf("ethereum type2 requires chainlab-local or canonical positive 0x chain id")
 	}
-	var value uint64
-	for _, b := range []byte(chainID) {
-		value = value*33 + uint64(b)
+	value, err := strconv.ParseUint(chainID[2:], 16, 64)
+	if err != nil || value == 0 || fmt.Sprintf("0x%x", value) != chainID {
+		return 0, fmt.Errorf("ethereum type2 requires chainlab-local or canonical positive 0x chain id")
 	}
-	if value == 0 {
-		return 1
-	}
-	return value
+	return value, nil
 }
 
 func ethereumCompactSignature(yParity uint64, rItem rlpItem, sItem rlpItem) (string, error) {
@@ -413,9 +493,22 @@ func validateRawTransaction(tx Transaction) error {
 	if strings.TrimSpace(tx.Signature) == "" && len(tx.Authorizations) == 0 {
 		return fmt.Errorf("raw transaction missing signature")
 	}
+	if tx.Signature != "" {
+		if err := ValidateCanonicalSignature("raw transaction signature", tx.Signature); err != nil {
+			return err
+		}
+	}
+	if tx.PaymasterSignature != "" {
+		if err := ValidateCanonicalSignature("raw paymaster signature", tx.PaymasterSignature); err != nil {
+			return err
+		}
+	}
 	for _, authorization := range tx.Authorizations {
 		if strings.TrimSpace(authorization.Signer) == "" || strings.TrimSpace(authorization.Signature) == "" {
 			return fmt.Errorf("raw transaction missing authorization signature")
+		}
+		if err := ValidateCanonicalSignature("raw authorization signature", authorization.Signature); err != nil {
+			return err
 		}
 	}
 	return nil
