@@ -100,7 +100,7 @@ Run the targeted tests before implementation and record the expected compile/tes
 - [x] Run `go build -o $env:TEMP\chainlab-account-recovery-verify.exe ./cmd/chainlab`.
 - [x] Run `git diff --check` and `git diff --cached --check`.
 - [x] Commit the plan, core, CLI, and documentation as separate coherent commits.
-- [ ] Write the required Obsidian diary/project record, commit it, and push `D:\code\obsidian-note`.
+- [x] Write the required Obsidian diary/project record, commit it, and push `D:\code\obsidian-note` (`d4ddad6`).
 
 ## Completion Evidence
 

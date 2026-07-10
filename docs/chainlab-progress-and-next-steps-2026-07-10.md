@@ -71,6 +71,8 @@ git diff --check
 
 The race run covered every package. The demo completed at height 21 with transfer, sponsored transfer, batch, smart account, multisig, native contracts, WASM, staking, and governance results intact.
 
+The required Obsidian diary and `ota/chainlab-production-chain.md` project record were committed and pushed to GitHub as `d4ddad6`.
+
 ## Current Production Blockers
 
 Ordered by consensus/security dependency, not feature visibility:
