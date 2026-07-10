@@ -1,10 +1,27 @@
 package crypto_test
 
 import (
+	"errors"
 	"testing"
 
 	chaincrypto "chainlab/internal/crypto"
 )
+
+func TestNormalizeAddress(t *testing.T) {
+	address, err := chaincrypto.NormalizeAddress(" 0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if address != "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("normalized address = %q", address)
+	}
+	if _, err := chaincrypto.NormalizeAddress("0x1234"); !errors.Is(err, chaincrypto.ErrInvalidAddress) {
+		t.Fatalf("short address error = %v", err)
+	}
+	if _, err := chaincrypto.NormalizeAddress("0x0000000000000000000000000000000000000000"); !errors.Is(err, chaincrypto.ErrZeroAddress) {
+		t.Fatalf("zero address error = %v", err)
+	}
+}
 
 func TestSignVerifyAndAddress(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()

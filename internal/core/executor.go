@@ -25,6 +25,8 @@ type ExecutionContext struct {
 	BaseFeePerGas uint64
 }
 
+const sessionEpochKey = "session:epoch"
+
 func NewExecutor(chainID string, feeCollector string, runtime *contracts.Runtime) *Executor {
 	if runtime == nil {
 		runtime = contracts.NewRuntimeWithDefaults()
@@ -65,7 +67,9 @@ func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, 
 	}
 
 	working := store.Clone()
-	working.IncrementNonce(tx.From)
+	if err := working.IncrementNonce(tx.From); err != nil {
+		return types.Receipt{}, err
+	}
 
 	receipt := types.Receipt{
 		TxHash:  tx.Hash(),
@@ -253,6 +257,12 @@ func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, 
 			return types.Receipt{}, err
 		}
 		receipt.Events = append(receipt.Events, event)
+	case types.TxAccountRecovery:
+		event, err := executeAccountRecovery(working, tx, context.BlockHeight)
+		if err != nil {
+			return types.Receipt{}, err
+		}
+		receipt.Events = append(receipt.Events, event)
 	case types.TxWASMUpload:
 		bytecode, err := parseWASMUploadPayload(tx.Payload)
 		if err != nil {
@@ -330,6 +340,12 @@ func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, 
 			"user":      strings.ToLower(tx.From),
 			"paymaster": strings.ToLower(tx.Paymaster),
 		}})
+	} else if tx.Type == types.TxAccountRecovery {
+		action, _ := accountRecoveryAction(tx.Payload)
+		if action == "approve" || action == "execute" {
+			feePayer = strings.ToLower(strings.TrimSpace(tx.Signer))
+			receipt.FeePayer = feePayer
+		}
 	}
 	if err := e.chargeFee(working, feePayer, fee.TotalFee, fee.PriorityFee); err != nil {
 		return types.Receipt{}, err
@@ -398,6 +414,9 @@ func tagBatchEvents(events []types.Event, index int) {
 }
 
 func validateTransactionAuthorization(store *state.Store, tx types.Transaction, blockHeight uint64) error {
+	if tx.Type == types.TxAccountRecovery {
+		return validateAccountRecoveryAuthorization(store, tx)
+	}
 	if tx.Type == types.TxSetCode {
 		if strings.TrimSpace(tx.Signer) != "" || len(tx.Authorizations) > 0 || tx.SignatureKind != "" {
 			return errors.New("set_code must be signed directly by from")
@@ -605,6 +624,8 @@ func EstimateGas(txType types.TxType) (uint64, error) {
 		return 45_000, nil
 	case types.TxSessionKey:
 		return 45_000, nil
+	case types.TxAccountRecovery:
+		return 55_000, nil
 	case types.TxWASMUpload:
 		return 120_000, nil
 	case types.TxDeploy:
@@ -763,10 +784,18 @@ func executeSetCode(store *state.Store, tx types.Transaction) (string, map[strin
 	if codeID != contracts.AccountCodeID {
 		return "", nil, fmt.Errorf("unsupported delegated code id %q", codeID)
 	}
-	owner := strings.ToLower(strings.TrimSpace(tx.Payload["owner"]))
-	if owner == "" {
+	ownerRaw := strings.TrimSpace(tx.Payload["owner"])
+	if ownerRaw == "" {
 		return "", nil, errors.New("set_code account.v1 requires owner")
 	}
+	owner, err := normalizeRecoveryAddress(ownerRaw, "set_code owner")
+	if err != nil {
+		return "", nil, err
+	}
+	if strings.EqualFold(owner, tx.From) {
+		return "", nil, errors.New("set_code owner must differ from delegated account")
+	}
+	store.ClearDelegation(tx.From)
 	store.SetDelegatedCodeID(tx.From, codeID)
 	store.SetStorage(tx.From, "owner", owner)
 	attributes["code_id"] = codeID
@@ -856,6 +885,11 @@ func executeSessionKey(store *state.Store, tx types.Transaction) (types.Event, e
 			attributes["call_to"] = callTo
 			attributes["call_method"] = callMethod
 		}
+		epoch, err := sessionEpoch(store, tx.From)
+		if err != nil {
+			return types.Event{}, err
+		}
+		store.SetStorage(tx.From, prefix+"epoch", strconv.FormatUint(epoch, 10))
 		return types.Event{Type: "account.session_key_added", Attributes: attributes}, nil
 	case "revoke":
 		store.DeleteStorage(tx.From, prefix+"limit")
@@ -864,6 +898,7 @@ func executeSessionKey(store *state.Store, tx types.Transaction) (types.Event, e
 		store.DeleteStorage(tx.From, prefix+"to")
 		store.DeleteStorage(tx.From, prefix+"call_to")
 		store.DeleteStorage(tx.From, prefix+"call_method")
+		store.DeleteStorage(tx.From, prefix+"epoch")
 		return types.Event{Type: "account.session_key_revoked", Attributes: attributes}, nil
 	default:
 		return types.Event{}, errors.New("session key action must be add or revoke")
@@ -985,6 +1020,14 @@ func parseSessionKeyPolicy(store *state.Store, account string, key string) (sess
 	if limit == 0 && callTo == "" {
 		return sessionKeyPolicy{}, errors.New("session key is not authorized")
 	}
+	currentEpoch, err := sessionEpoch(store, account)
+	if err != nil {
+		return sessionKeyPolicy{}, err
+	}
+	policyEpoch, err := parseOptionalUint(store.GetStorage(account, prefix+"epoch"), "session key epoch")
+	if err != nil || policyEpoch != currentEpoch {
+		return sessionKeyPolicy{}, errors.New("session key is not authorized")
+	}
 	return sessionKeyPolicy{
 		Key:        key,
 		Limit:      limit,
@@ -998,6 +1041,10 @@ func parseSessionKeyPolicy(store *state.Store, account string, key string) (sess
 
 func sessionKeyStoragePrefix(key string) string {
 	return "session:" + strings.ToLower(strings.TrimSpace(key)) + ":"
+}
+
+func sessionEpoch(store *state.Store, account string) (uint64, error) {
+	return parseOptionalUint(store.GetStorage(account, sessionEpochKey), "session epoch")
 }
 
 func isAccountV1Authority(account types.Account) bool {

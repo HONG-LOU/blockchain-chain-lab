@@ -70,6 +70,7 @@ const (
 )
 
 var errReplacementTransactionUnderpriced = errors.New("replacement transaction underpriced")
+var errReplacementAuthorizationMismatch = errors.New("replacement transaction authorization differs")
 
 type FinalityCheckpoint struct {
 	HeadHeight       uint64 `json:"head_height"`
@@ -1189,6 +1190,9 @@ func checkedAdd(left uint64, right uint64) (uint64, error) {
 }
 
 func canReplacePendingTransaction(oldTx types.Transaction, newTx types.Transaction) error {
+	if replacementAuthorizationIdentity(oldTx) != replacementAuthorizationIdentity(newTx) {
+		return errReplacementAuthorizationMismatch
+	}
 	oldMaxFee, oldPriorityFee := replacementFeeCaps(oldTx)
 	newMaxFee, newPriorityFee := replacementFeeCaps(newTx)
 	if !feeBumpedByPercent(oldMaxFee, newMaxFee, txpoolReplacementPriceBump) ||
@@ -1196,6 +1200,22 @@ func canReplacePendingTransaction(oldTx types.Transaction, newTx types.Transacti
 		return errReplacementTransactionUnderpriced
 	}
 	return nil
+}
+
+func replacementAuthorizationIdentity(tx types.Transaction) string {
+	if len(tx.Authorizations) > 0 {
+		signers := make([]string, 0, len(tx.Authorizations))
+		for _, authorization := range tx.Authorizations {
+			signers = append(signers, normalizedAddress(authorization.Signer))
+		}
+		sort.Strings(signers)
+		return "multisig:" + strings.Join(signers, ",")
+	}
+	signer := normalizedAddress(tx.Signer)
+	if signer == "" {
+		signer = normalizedAddress(tx.From)
+	}
+	return strings.TrimSpace(tx.SignatureKind) + ":" + signer
 }
 
 func replacementFeeCaps(tx types.Transaction) (uint64, uint64) {
@@ -1267,7 +1287,7 @@ func (n *Node) indexBlock(block types.Block) {
 			BlockHash:   blockHash,
 			Index:       i,
 		}
-		address := strings.ToLower(eventAddress(tx, receipt))
+		address := strings.ToLower(types.EventSourceAddress(tx, receipt))
 		for eventIndex, event := range receipt.Events {
 			record := types.EventRecord{
 				Event:            cloneEvent(event),
@@ -1296,16 +1316,6 @@ func eventMatchesFilter(record types.EventRecord, fromBlock uint64, toBlock uint
 		return false
 	}
 	return topic0 == "" || strings.ToLower(record.Topic0) == topic0
-}
-
-func eventAddress(tx types.Transaction, receipt types.Receipt) string {
-	if receipt.ContractAddress != "" {
-		return receipt.ContractAddress
-	}
-	if tx.Type == types.TxCall {
-		return tx.To
-	}
-	return ""
 }
 
 func eventTopic0(event types.Event) string {

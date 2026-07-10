@@ -2,6 +2,7 @@ package node_test
 
 import (
 	"encoding/hex"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -502,6 +503,134 @@ func TestNodePersistsChainStateAndTransactionIndex(t *testing.T) {
 	}
 	if !record.Receipt.Success {
 		t.Fatalf("receipt should succeed: %+v", record.Receipt)
+	}
+}
+
+func TestNodePersistsAndExecutesPendingAccountRecoveryAfterRestart(t *testing.T) {
+	ownerKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	guardianAKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	guardianBKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	newOwnerKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := chaincrypto.AddressFromPrivateKey(ownerKey)
+	guardianA := chaincrypto.AddressFromPrivateKey(guardianAKey)
+	guardianB := chaincrypto.AddressFromPrivateKey(guardianBKey)
+	newOwner := chaincrypto.AddressFromPrivateKey(newOwnerKey)
+	genesisBalances := map[string]uint64{owner: 2_000_000, guardianA: 500_000, guardianB: 500_000}
+	dataDir := t.TempDir()
+	first, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    ownerKey,
+		GenesisBalance: genesisBalances,
+		DataDir:        dataDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deploy := signedNodeTx(t, ownerKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxDeploy,
+		From:     owner,
+		Nonce:    0,
+		GasLimit: 80_000,
+		GasPrice: 1,
+		Payload:  map[string]string{"code_id": contracts.AccountCodeID, "owner": owner},
+	})
+	if err := first.SubmitTx(deploy); err != nil {
+		t.Fatal(err)
+	}
+	block, err := first.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	account := block.Receipts[0].ContractAddress
+	fund := signedNodeTx(t, ownerKey, types.Transaction{ChainID: "chainlab-local", Type: types.TxTransfer, From: owner, To: account, Nonce: 1, Value: 400_000, GasLimit: 21_000, GasPrice: 1})
+	if err := first.SubmitTx(fund); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+	configure := signedNodeTx(t, ownerKey, types.Transaction{
+		ChainID: "chainlab-local", Type: types.TxAccountRecovery, From: account, Signer: owner, Nonce: 0, GasLimit: 55_000, GasPrice: 1,
+		Payload: map[string]string{"action": "configure", "guardians": guardianA + "," + guardianB, "threshold": "2", "delay": "2"},
+	})
+	if err := first.SubmitTx(configure); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+	approveA := signedNodeTx(t, guardianAKey, types.Transaction{
+		ChainID: "chainlab-local", Type: types.TxAccountRecovery, From: account, Signer: guardianA, Nonce: 1, GasLimit: 55_000, GasPrice: 1,
+		Payload: map[string]string{"action": "approve", "new_owner": newOwner},
+	})
+	if err := first.SubmitTx(approveA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+	approveB := signedNodeTx(t, guardianBKey, types.Transaction{
+		ChainID: "chainlab-local", Type: types.TxAccountRecovery, From: account, Signer: guardianB, Nonce: 2, GasLimit: 55_000, GasPrice: 1,
+		Payload: map[string]string{"action": "approve", "new_owner": newOwner},
+	})
+	if err := first.SubmitTx(approveB); err != nil {
+		t.Fatal(err)
+	}
+	thresholdBlock, err := first.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	executeAfter := thresholdBlock.Header.Height + 2
+
+	reloaded, err := node.New(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    ownerKey,
+		GenesisBalance: genesisBalances,
+		DataDir:        dataDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveredAccount := reloaded.Account(account)
+	if recoveredAccount.Storage["recovery:pending_owner"] != newOwner || recoveredAccount.Storage["recovery:execute_after"] != strconv.FormatUint(executeAfter, 10) {
+		t.Fatalf("reloaded recovery state = %#v", recoveredAccount.Storage)
+	}
+	recoveryEvents := reloaded.Events(node.EventFilter{FromBlock: 3, ToBlock: thresholdBlock.Header.Height, HasToBlock: true, Address: account})
+	if len(recoveryEvents) != 3 {
+		t.Fatalf("reloaded recovery events = %#v", recoveryEvents)
+	}
+	for reloaded.Head().Header.Height+1 < executeAfter {
+		if _, err := reloaded.ProduceBlock(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	execute := signedNodeTx(t, guardianAKey, types.Transaction{
+		ChainID: "chainlab-local", Type: types.TxAccountRecovery, From: account, Signer: guardianA, Nonce: 3, GasLimit: 55_000, GasPrice: 1,
+		Payload: map[string]string{"action": "execute", "new_owner": newOwner},
+	})
+	if err := reloaded.SubmitTx(execute); err != nil {
+		t.Fatal(err)
+	}
+	executeBlock, err := reloaded.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if executeBlock.Header.Height != executeAfter || reloaded.Account(account).Storage["owner"] != newOwner {
+		t.Fatalf("recovery after restart block=%d account=%+v", executeBlock.Header.Height, reloaded.Account(account))
 	}
 }
 
@@ -2234,6 +2363,127 @@ func TestNodeFaucetRequestsSignedTransferThroughMempool(t *testing.T) {
 	}
 	if got := n.Account(recipient).Balance; got != 250 {
 		t.Fatalf("recipient balance = %d", got)
+	}
+}
+
+func TestNodeRejectsCrossGuardianRecoveryReplacement(t *testing.T) {
+	ownerKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	guardianAKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	guardianBKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	newOwnerKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := chaincrypto.AddressFromPrivateKey(ownerKey)
+	guardianA := chaincrypto.AddressFromPrivateKey(guardianAKey)
+	guardianB := chaincrypto.AddressFromPrivateKey(guardianBKey)
+	newOwner := chaincrypto.AddressFromPrivateKey(newOwnerKey)
+	n, err := node.New(node.Config{
+		ChainID:     "chainlab-local",
+		ProposerKey: ownerKey,
+		GenesisBalance: map[string]uint64{
+			owner:     2_000_000,
+			guardianA: 500_000,
+			guardianB: 500_000,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deploy := signedNodeTx(t, ownerKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxDeploy,
+		From:     owner,
+		Nonce:    0,
+		GasLimit: 80_000,
+		GasPrice: 1,
+		Payload:  map[string]string{"code_id": contracts.AccountCodeID, "owner": owner},
+	})
+	if err := n.SubmitTx(deploy); err != nil {
+		t.Fatal(err)
+	}
+	block, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	account := block.Receipts[0].ContractAddress
+	fund := signedNodeTx(t, ownerKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     owner,
+		To:       account,
+		Nonce:    1,
+		Value:    300_000,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+	if err := n.SubmitTx(fund); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+	configure := signedNodeTx(t, ownerKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxAccountRecovery,
+		From:     account,
+		Signer:   owner,
+		Nonce:    0,
+		GasLimit: 55_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"action":    "configure",
+			"guardians": guardianA + "," + guardianB,
+			"threshold": "2",
+			"delay":     "0",
+		},
+	})
+	if err := n.SubmitTx(configure); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+
+	approvalA := signedNodeTx(t, guardianAKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxAccountRecovery,
+		From:     account,
+		Signer:   guardianA,
+		Nonce:    1,
+		GasLimit: 55_000,
+		GasPrice: 1,
+		Payload:  map[string]string{"action": "approve", "new_owner": newOwner},
+	})
+	if err := n.SubmitTx(approvalA); err != nil {
+		t.Fatal(err)
+	}
+	replacementB := signedNodeTx(t, guardianBKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxAccountRecovery,
+		From:     account,
+		Signer:   guardianB,
+		Nonce:    1,
+		GasLimit: 55_000,
+		GasPrice: 2,
+		Payload:  map[string]string{"action": "approve", "new_owner": newOwner},
+	})
+	if err := n.SubmitTx(replacementB); err == nil || !strings.Contains(err.Error(), "replacement transaction authorization differs") {
+		t.Fatalf("cross-guardian replacement error = %v", err)
+	}
+	pool := n.Mempool()
+	if len(pool) != 1 || pool[0].Hash() != approvalA.Hash() {
+		t.Fatalf("recovery replacement mempool = %+v", pool)
 	}
 }
 

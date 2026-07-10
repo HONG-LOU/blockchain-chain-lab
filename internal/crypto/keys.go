@@ -11,6 +11,11 @@ import (
 	secpECDSA "github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
 )
 
+var (
+	ErrInvalidAddress = errors.New("address must be a 20-byte hex address")
+	ErrZeroAddress    = errors.New("address must not be the zero address")
+)
+
 type PrivateKey = *secp.PrivateKey
 
 func GenerateKey() (PrivateKey, error) {
@@ -34,6 +39,23 @@ func PrivateKeyFromHex(encoded string) (PrivateKey, error) {
 
 func AddressFromPrivateKey(key PrivateKey) string {
 	return addressFromPublicKey(key.PubKey())
+}
+
+func NormalizeAddress(encoded string) (string, error) {
+	address := strings.ToLower(strings.TrimSpace(encoded))
+	if len(address) != 42 || !strings.HasPrefix(address, "0x") {
+		return "", ErrInvalidAddress
+	}
+	raw, err := hex.DecodeString(address[2:])
+	if err != nil || len(raw) != 20 {
+		return "", ErrInvalidAddress
+	}
+	for _, value := range raw {
+		if value != 0 {
+			return address, nil
+		}
+	}
+	return "", ErrZeroAddress
 }
 
 func Sign(key PrivateKey, message []byte) (string, error) {

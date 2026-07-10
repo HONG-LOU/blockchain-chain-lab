@@ -3,6 +3,7 @@ package state
 import (
 	"errors"
 	"math"
+	"sort"
 	"strings"
 
 	"chainlab/internal/hash"
@@ -157,10 +158,14 @@ func (s *Store) Transfer(from string, to string, amount uint64) error {
 	return nil
 }
 
-func (s *Store) IncrementNonce(address string) {
+func (s *Store) IncrementNonce(address string) error {
 	account := s.account(address)
+	if account.Nonce == math.MaxUint64 {
+		return errors.New("nonce overflow")
+	}
 	account.Nonce++
 	s.accounts[normalize(address)] = account
+	return nil
 }
 
 func (s *Store) SetNonce(address string, nonce uint64) {
@@ -188,6 +193,8 @@ func (s *Store) ClearDelegation(address string) {
 		delete(account.Storage, "owner")
 	}
 	s.accounts[normalize(address)] = account
+	s.DeleteStoragePrefix(address, "session:")
+	s.DeleteStoragePrefix(address, "recovery:")
 }
 
 func (s *Store) SetStorage(address string, key string, value string) {
@@ -205,6 +212,23 @@ func (s *Store) DeleteStorage(address string, key string) {
 		delete(account.Storage, key)
 	}
 	s.accounts[normalize(address)] = account
+}
+
+// DeleteStoragePrefix removes storage entries whose keys start with prefix and returns the number removed.
+func (s *Store) DeleteStoragePrefix(address string, prefix string) int {
+	account := s.account(address)
+	keys := make([]string, 0)
+	for key := range account.Storage {
+		if strings.HasPrefix(key, prefix) {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		delete(account.Storage, key)
+	}
+	s.accounts[normalize(address)] = account
+	return len(keys)
 }
 
 func (s *Store) GetStorage(address string, key string) string {

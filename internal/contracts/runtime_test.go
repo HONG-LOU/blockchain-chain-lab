@@ -142,6 +142,62 @@ func TestAccountContractStoresOwner(t *testing.T) {
 	}
 }
 
+func TestAccountOwnerRotationClearsPendingRecoveryAndSessionAuthority(t *testing.T) {
+	store := state.NewStore()
+	runtime := contracts.NewRuntimeWithDefaults()
+	owner := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	nextOwner := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+	account, _, err := runtime.Deploy(store, owner, contracts.AccountCodeID, "seed-owner-rotation", map[string]string{"owner": owner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	storage := map[string]string{
+		"recovery:guardians":     "0xcccccccccccccccccccccccccccccccccccccccc",
+		"recovery:threshold":     "1",
+		"recovery:delay":         "3",
+		"recovery:pending_owner": nextOwner,
+		"recovery:execute_after": "10",
+		"recovery:expires_at":    "266",
+		"recovery:approvals":     "0xcccccccccccccccccccccccccccccccccccccccc",
+		"recovery:votes":         "0xcccccccccccccccccccccccccccccccccccccccc=0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"session:0xdddddddddddddddddddddddddddddddddddddddd:limit": "100",
+		"session:0xdddddddddddddddddddddddddddddddddddddddd:spent": "20",
+		"profile:name": "alice",
+	}
+	for key, value := range storage {
+		store.SetStorage(account, key, value)
+	}
+
+	events, err := runtime.Call(store, account, owner, "setOwner", map[string]string{"owner": nextOwner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := store.GetStorage(account, "owner"); got != nextOwner {
+		t.Fatalf("owner = %q", got)
+	}
+	for _, key := range []string{"recovery:pending_owner", "recovery:execute_after", "recovery:expires_at", "recovery:approvals", "recovery:votes"} {
+		if got := store.GetStorage(account, key); got != "" {
+			t.Fatalf("pending recovery key %q = %q", key, got)
+		}
+	}
+	if got := store.GetStorage(account, "recovery:guardians"); got == "" {
+		t.Fatal("owner rotation should preserve recovery configuration")
+	}
+	if got := store.GetStorage(account, "session:0xdddddddddddddddddddddddddddddddddddddddd:limit"); got != "" {
+		t.Fatalf("old session authority = %q", got)
+	}
+	if got := store.GetStorage(account, "profile:name"); got != "alice" {
+		t.Fatalf("unrelated storage = %q", got)
+	}
+	if len(events) != 1 || events[0].Type != "account.owner_set" || events[0].Attributes["old_owner"] != owner {
+		t.Fatalf("owner rotation events = %#v", events)
+	}
+	if _, err := runtime.Call(store, account, nextOwner, "setOwner", map[string]string{"owner": account}); err == nil {
+		t.Fatal("account must not be set as its own owner")
+	}
+}
+
 func TestMultisigContractStoresOwnersAndThreshold(t *testing.T) {
 	store := state.NewStore()
 	runtime := contracts.NewRuntimeWithDefaults()

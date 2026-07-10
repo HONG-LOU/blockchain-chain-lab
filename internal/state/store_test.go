@@ -1,6 +1,8 @@
 package state_test
 
 import (
+	"math"
+	"strings"
 	"testing"
 
 	"chainlab/internal/state"
@@ -15,7 +17,9 @@ func TestBalancesNonceAndStorage(t *testing.T) {
 	if err := store.Transfer(alice, bob, 35); err != nil {
 		t.Fatal(err)
 	}
-	store.IncrementNonce(alice)
+	if err := store.IncrementNonce(alice); err != nil {
+		t.Fatal(err)
+	}
 	store.SetStorage(alice, "role", "admin")
 
 	if got := store.GetAccount(alice).Balance; got != 65 {
@@ -29,6 +33,23 @@ func TestBalancesNonceAndStorage(t *testing.T) {
 	}
 	if got := store.GetStorage(alice, "role"); got != "admin" {
 		t.Fatalf("storage role = %q", got)
+	}
+}
+
+func TestIncrementNonceRejectsOverflow(t *testing.T) {
+	store := state.NewStore()
+	account := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	store.SetNonce(account, math.MaxUint64)
+	rootBefore := store.Root()
+
+	if err := store.IncrementNonce(account); err == nil || err.Error() != "nonce overflow" {
+		t.Fatalf("increment error = %v", err)
+	}
+	if got := store.GetAccount(account).Nonce; got != math.MaxUint64 {
+		t.Fatalf("nonce after overflow = %d", got)
+	}
+	if store.Root() != rootBefore {
+		t.Fatal("nonce overflow changed state root")
 	}
 }
 
@@ -66,6 +87,57 @@ func TestDeleteStorageRemovesKeyFromSnapshotAndRoot(t *testing.T) {
 	restored := state.NewStoreFromSnapshot(store.Snapshot())
 	if got := restored.GetStorage(account, key); got != "" {
 		t.Fatalf("restored deleted storage = %q", got)
+	}
+}
+
+func TestDeleteStoragePrefixIsolatedAcrossCloneSnapshotAndRoot(t *testing.T) {
+	store := state.NewStore()
+	account := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	sessionKeys := []string{
+		"session:0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:limit",
+		"session:0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:spent",
+		"session:0xcccccccccccccccccccccccccccccccccccccccc:expires",
+	}
+	for _, key := range sessionKeys {
+		store.SetStorage(account, key, "value")
+	}
+	store.SetStorage(account, "recovery:guardian", "enabled")
+	store.SetStorage(account, "profile:name", "alice")
+	rootWithSessions := store.Root()
+
+	clone := store.Clone()
+	if got := clone.DeleteStoragePrefix(account, "session:"); got != len(sessionKeys) {
+		t.Fatalf("deleted session keys = %d, want %d", got, len(sessionKeys))
+	}
+	if got := clone.DeleteStoragePrefix(account, "session:"); got != 0 {
+		t.Fatalf("deleted session keys on second call = %d, want 0", got)
+	}
+	if clone.Root() == rootWithSessions {
+		t.Fatal("clone root did not change after deleting session storage")
+	}
+	for _, key := range sessionKeys {
+		if got := clone.GetStorage(account, key); got != "" {
+			t.Fatalf("clone storage %q = %q after prefix deletion", key, got)
+		}
+		if got := store.GetStorage(account, key); got != "value" {
+			t.Fatalf("original storage %q = %q after clone deletion", key, got)
+		}
+	}
+	if got := clone.GetStorage(account, "recovery:guardian"); got != "enabled" {
+		t.Fatalf("unmatched recovery storage = %q", got)
+	}
+	if got := clone.GetStorage(account, "profile:name"); got != "alice" {
+		t.Fatalf("unmatched profile storage = %q", got)
+	}
+
+	restored := state.NewStoreFromSnapshot(clone.Snapshot())
+	if restored.Root() != clone.Root() {
+		t.Fatalf("restored root = %s, want %s", restored.Root(), clone.Root())
+	}
+	for _, key := range sessionKeys {
+		if got := restored.GetStorage(account, key); got != "" {
+			t.Fatalf("restored storage %q = %q after prefix deletion", key, got)
+		}
 	}
 }
 
@@ -181,5 +253,51 @@ func TestDelegatedCodeIDPersistsThroughCloneSnapshotAndRoot(t *testing.T) {
 	}
 	if got := restored.GetStorage(alice, "owner"); got != "" {
 		t.Fatalf("cleared owner = %q", got)
+	}
+}
+
+func TestClearDelegationRemovesAllAuthorizationStorage(t *testing.T) {
+	store := state.NewStore()
+	account := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	store.SetDelegatedCodeID(account, "account.v1")
+	storage := map[string]string{
+		"owner": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"session:0xcccccccccccccccccccccccccccccccccccccccc:limit": "100",
+		"session:0xcccccccccccccccccccccccccccccccccccccccc:spent": "25",
+		"recovery:guardian": "0xdddddddddddddddddddddddddddddddddddddddd",
+		"recovery:delay":    "10",
+		"profile:name":      "alice",
+	}
+	for key, value := range storage {
+		store.SetStorage(account, key, value)
+	}
+	rootWithDelegation := store.Root()
+
+	store.ClearDelegation(account)
+	cleared := store.GetAccount(account)
+	if cleared.DelegatedCodeID != "" {
+		t.Fatalf("cleared delegated code id = %q", cleared.DelegatedCodeID)
+	}
+	for key := range cleared.Storage {
+		if key == "owner" || strings.HasPrefix(key, "session:") || strings.HasPrefix(key, "recovery:") {
+			t.Fatalf("authorization storage %q remained after clearing delegation", key)
+		}
+	}
+	if got := store.GetStorage(account, "profile:name"); got != "alice" {
+		t.Fatalf("unrelated profile storage = %q", got)
+	}
+	if store.Root() == rootWithDelegation {
+		t.Fatal("root did not change after clearing delegation")
+	}
+
+	restored := state.NewStoreFromSnapshot(store.Snapshot())
+	if restored.Root() != store.Root() {
+		t.Fatalf("restored root = %s, want %s", restored.Root(), store.Root())
+	}
+	restoredAccount := restored.GetAccount(account)
+	for key := range restoredAccount.Storage {
+		if key == "owner" || strings.HasPrefix(key, "session:") || strings.HasPrefix(key, "recovery:") {
+			t.Fatalf("restored authorization storage %q remained after clearing delegation", key)
+		}
 	}
 }

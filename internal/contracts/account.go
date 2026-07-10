@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	chaincrypto "chainlab/internal/crypto"
 	"chainlab/internal/types"
 )
 
@@ -15,9 +16,9 @@ const MultisigCodeID = "multisig.v1"
 type Account struct{}
 
 func (Account) Deploy(ctx Context, args map[string]string) ([]types.Event, error) {
-	owner := normalizeAddress(args["owner"])
-	if owner == "" {
-		return nil, errors.New("account owner is required")
+	owner, err := validatedAccountOwner(args["owner"], ctx.Address)
+	if err != nil {
+		return nil, err
 	}
 	ctx.Store.SetStorage(ctx.Address, "owner", owner)
 	return []types.Event{{Type: "account.owner_set", Attributes: map[string]string{"owner": owner}}}, nil
@@ -33,12 +34,21 @@ func (Account) Call(ctx Context, method string, args map[string]string) ([]types
 		if normalizeAddress(ctx.Caller) != current {
 			return nil, errors.New("account setOwner requires current owner")
 		}
-		next := normalizeAddress(args["owner"])
-		if next == "" {
-			return nil, errors.New("account owner is required")
+		next, err := validatedAccountOwner(args["owner"], ctx.Address)
+		if err != nil {
+			return nil, err
 		}
 		ctx.Store.SetStorage(ctx.Address, "owner", next)
-		return []types.Event{{Type: "account.owner_set", Attributes: map[string]string{"owner": next}}}, nil
+		ctx.Store.DeleteStorage(ctx.Address, "recovery:pending_owner")
+		ctx.Store.DeleteStorage(ctx.Address, "recovery:execute_after")
+		ctx.Store.DeleteStorage(ctx.Address, "recovery:expires_at")
+		ctx.Store.DeleteStorage(ctx.Address, "recovery:approvals")
+		ctx.Store.DeleteStorage(ctx.Address, "recovery:votes")
+		ctx.Store.DeleteStoragePrefix(ctx.Address, "session:")
+		return []types.Event{{Type: "account.owner_set", Attributes: map[string]string{
+			"old_owner": current,
+			"owner":     next,
+		}}}, nil
 	default:
 		return nil, fmt.Errorf("unknown account method %q", method)
 	}
@@ -51,6 +61,26 @@ func (Account) Read(ctx Context, method string, args map[string]string) (string,
 	default:
 		return "", fmt.Errorf("unknown account read method %q", method)
 	}
+}
+
+func validatedAccountOwner(raw string, account string) (string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return "", errors.New("account owner is required")
+	}
+	owner, err := chaincrypto.NormalizeAddress(raw)
+	if errors.Is(err, chaincrypto.ErrInvalidAddress) {
+		return "", errors.New("account owner must be a 20-byte hex address")
+	}
+	if errors.Is(err, chaincrypto.ErrZeroAddress) {
+		return "", errors.New("account owner must not be the zero address")
+	}
+	if err != nil {
+		return "", err
+	}
+	if owner == normalizeAddress(account) {
+		return "", errors.New("account owner must differ from account address")
+	}
+	return owner, nil
 }
 
 func normalizeAddress(address string) string {

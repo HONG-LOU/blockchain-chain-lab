@@ -2502,6 +2502,126 @@ func TestEthGetLogsFiltersContractEvents(t *testing.T) {
 	}
 }
 
+func TestEthGetLogsIndexesAccountRecoveryEventsAtRecoveredAccount(t *testing.T) {
+	ownerKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	guardianKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	newOwnerKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := chaincrypto.AddressFromPrivateKey(ownerKey)
+	guardian := chaincrypto.AddressFromPrivateKey(guardianKey)
+	newOwner := chaincrypto.AddressFromPrivateKey(newOwnerKey)
+	n, err := node.New(node.Config{
+		ChainID:     "chainlab-local",
+		ProposerKey: ownerKey,
+		GenesisBalance: map[string]uint64{
+			owner:    2_000_000,
+			guardian: 500_000,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	deploy := signedRPCTransaction(t, ownerKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxDeploy,
+		From:     owner,
+		Nonce:    0,
+		GasLimit: 80_000,
+		GasPrice: 1,
+		Payload:  map[string]string{"code_id": contracts.AccountCodeID, "owner": owner},
+	})
+	if err := n.SubmitTx(deploy); err != nil {
+		t.Fatal(err)
+	}
+	deployBlock, err := n.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	account := deployBlock.Receipts[0].ContractAddress
+
+	fund := signedTransfer(t, ownerKey, owner, account, 1, 300_000)
+	if err := n.SubmitTx(fund); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+	configure := signedRPCTransaction(t, ownerKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxAccountRecovery,
+		From:     account,
+		Signer:   owner,
+		Nonce:    0,
+		GasLimit: 55_000,
+		GasPrice: 1,
+		Payload: map[string]string{
+			"action":    "configure",
+			"guardians": guardian,
+			"threshold": "1",
+			"delay":     "0",
+		},
+	})
+	if err := n.SubmitTx(configure); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+	approve := signedRPCTransaction(t, guardianKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxAccountRecovery,
+		From:     account,
+		Signer:   guardian,
+		Nonce:    1,
+		GasLimit: 55_000,
+		GasPrice: 1,
+		Payload:  map[string]string{"action": "approve", "new_owner": newOwner},
+	})
+	if err := n.SubmitTx(approve); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.ProduceBlock(); err != nil {
+		t.Fatal(err)
+	}
+
+	topic := hash.KeccakHex([]byte("account.recovery_approved"))
+	result := callRPC(t, server.URL, "eth_getLogs", []any{map[string]any{
+		"fromBlock": "0x3",
+		"toBlock":   "latest",
+		"address":   account,
+		"topics":    []any{topic},
+	}})
+	logs, ok := result.([]any)
+	if !ok || len(logs) != 1 {
+		t.Fatalf("recovery logs = %#v", result)
+	}
+	logEntry, ok := logs[0].(map[string]any)
+	if !ok || logEntry["address"] != account || logEntry["transactionHash"] != approve.Hash() || logEntry["blockNumber"] != "0x4" {
+		t.Fatalf("recovery log = %#v", logs[0])
+	}
+
+	receiptResult := callRPC(t, server.URL, "eth_getTransactionReceipt", []any{approve.Hash()})
+	receipt, ok := receiptResult.(map[string]any)
+	if !ok {
+		t.Fatalf("recovery receipt = %#v", receiptResult)
+	}
+	receiptLogs, ok := receipt["logs"].([]any)
+	if !ok || len(receiptLogs) != 1 {
+		t.Fatalf("recovery receipt logs = %#v", receipt["logs"])
+	}
+}
+
 func TestEthLogFilterTracksIncrementalChanges(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {

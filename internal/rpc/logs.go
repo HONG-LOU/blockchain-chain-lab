@@ -188,7 +188,7 @@ func evmBlockLogs(block types.Block, filter logFilter) []map[string]any {
 			continue
 		}
 		receipt := block.Receipts[txIndex]
-		address := logAddress(tx, receipt)
+		address := types.EventSourceAddress(tx, receipt)
 		if address == "" {
 			continue
 		}
@@ -223,16 +223,6 @@ func evmTransactionLogs(block types.Block, txHash string) []map[string]any {
 		}
 	}
 	return matched
-}
-
-func logAddress(tx types.Transaction, receipt types.Receipt) string {
-	if receipt.ContractAddress != "" {
-		return receipt.ContractAddress
-	}
-	if tx.Type == types.TxCall {
-		return tx.To
-	}
-	return ""
 }
 
 func eventTopics(event types.Event) []string {

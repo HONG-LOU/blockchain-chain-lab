@@ -18,6 +18,7 @@ const (
 	TxCall            TxType = "call"
 	TxSetCode         TxType = "set_code"
 	TxSessionKey      TxType = "account.session_key"
+	TxAccountRecovery TxType = "account.recovery"
 	TxWASMUpload      TxType = "wasm.upload"
 	TxStake           TxType = "stake"
 	TxUnstake         TxType = "unstake"
@@ -152,6 +153,20 @@ type EventRecord struct {
 	TransactionIndex int    `json:"transaction_index"`
 	EventIndex       int    `json:"event_index"`
 	LogIndex         uint64 `json:"log_index"`
+}
+
+func EventSourceAddress(tx Transaction, receipt Receipt) string {
+	if receipt.ContractAddress != "" {
+		return receipt.ContractAddress
+	}
+	switch tx.Type {
+	case TxCall:
+		return tx.To
+	case TxSetCode, TxSessionKey, TxAccountRecovery:
+		return tx.From
+	default:
+		return ""
+	}
 }
 
 type ProposalStatus string

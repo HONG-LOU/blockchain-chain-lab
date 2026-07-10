@@ -2,6 +2,7 @@ package core_test
 
 import (
 	"encoding/hex"
+	"strings"
 	"testing"
 
 	"chainlab/internal/contracts"
@@ -641,6 +642,84 @@ func TestDelegatedEOARejectsUnauthorizedSignerAndClearDisablesDelegation(t *test
 	}
 }
 
+func TestSetCodeRejectsInvalidOwnerAndClearsPreviousAuthorizationPolicy(t *testing.T) {
+	eoaKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	eoa := chaincrypto.AddressFromPrivateKey(eoaKey)
+	owner := chaincrypto.AddressFromPrivateKey(ownerKey)
+	executor := core.NewExecutor("chainlab-local", "0xfee0000000000000000000000000000000000000", contracts.NewRuntimeWithDefaults())
+
+	invalidOwners := []struct {
+		name      string
+		owner     string
+		wantError string
+	}{
+		{name: "malformed", owner: "0x1234", wantError: "set_code owner must be a 20-byte hex address"},
+		{name: "zero", owner: "0x0000000000000000000000000000000000000000", wantError: "set_code owner must not be the zero address"},
+		{name: "self", owner: eoa, wantError: "set_code owner must differ from delegated account"},
+	}
+	for _, test := range invalidOwners {
+		t.Run(test.name, func(t *testing.T) {
+			store := state.NewStore()
+			store.SetBalance(eoa, 100_000)
+			tx := signedTx(t, eoaKey, types.Transaction{
+				ChainID:  "chainlab-local",
+				Type:     types.TxSetCode,
+				From:     eoa,
+				Nonce:    0,
+				GasLimit: 45_000,
+				GasPrice: 1,
+				Payload:  map[string]string{"code_id": contracts.AccountCodeID, "owner": test.owner},
+			})
+			rootBefore := store.Root()
+			if _, err := executor.Execute(store, tx); err == nil || err.Error() != test.wantError {
+				t.Fatalf("error = %v, want %q", err, test.wantError)
+			}
+			if store.Root() != rootBefore || store.GetAccount(eoa).Nonce != 0 {
+				t.Fatal("invalid delegated owner mutated state")
+			}
+		})
+	}
+
+	store := state.NewStore()
+	store.SetBalance(eoa, 100_000)
+	store.SetDelegatedCodeID(eoa, contracts.AccountCodeID)
+	store.SetStorage(eoa, "owner", "0xdddddddddddddddddddddddddddddddddddddddd")
+	store.SetStorage(eoa, "session:0xcccccccccccccccccccccccccccccccccccccccc:limit", "100")
+	store.SetStorage(eoa, "recovery:guardians", "0xcccccccccccccccccccccccccccccccccccccccc")
+	store.SetStorage(eoa, "recovery:votes", "0xcccccccccccccccccccccccccccccccccccccccc="+owner)
+	store.SetStorage(eoa, "profile:name", "alice")
+	reconfigure := signedTx(t, eoaKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxSetCode,
+		From:     eoa,
+		Nonce:    0,
+		GasLimit: 45_000,
+		GasPrice: 1,
+		Payload:  map[string]string{"code_id": contracts.AccountCodeID, "owner": owner},
+	})
+	if _, err := executor.Execute(store, reconfigure); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.GetStorage(eoa, "owner"); got != owner {
+		t.Fatalf("reconfigured owner = %q", got)
+	}
+	for key := range store.GetAccount(eoa).Storage {
+		if strings.HasPrefix(key, "session:") || strings.HasPrefix(key, "recovery:") {
+			t.Fatalf("stale delegated authorization %q remained", key)
+		}
+	}
+	if got := store.GetStorage(eoa, "profile:name"); got != "alice" {
+		t.Fatalf("unrelated delegated storage = %q", got)
+	}
+}
+
 func TestAccountSessionKeyCanTransferWithinPolicy(t *testing.T) {
 	ownerKey, err := chaincrypto.GenerateKey()
 	if err != nil {
@@ -1122,6 +1201,970 @@ func TestAccountSessionKeyRejectsInvalidPolicyUseAndRevocation(t *testing.T) {
 	if _, err := executor.ExecuteWithContext(store, afterRevoke, core.ExecutionContext{BlockHeight: 1}); err == nil {
 		t.Fatal("revoked session key should not authorize transfer")
 	}
+}
+
+func TestAccountRecoveryRotatesOwnerAfterThresholdAndDelay(t *testing.T) {
+	fixture := newRecoveryFixture(t, false)
+	store := fixture.store
+	executor := fixture.executor
+
+	store.SetStorage(fixture.account, "session:"+fixture.guardianA+":limit", "100")
+	store.SetStorage(fixture.account, "session:"+fixture.guardianA+":spent", "0")
+	store.SetStorage(fixture.account, "session:"+fixture.guardianA+":call_to", "0xcccccccccccccccccccccccccccccccccccccccc")
+	store.SetStorage(fixture.account, "session:"+fixture.guardianA+":call_method", "increment")
+
+	configure := recoveryTx(t, fixture.ownerKey, fixture.account, 0, map[string]string{
+		"action":    "configure",
+		"guardians": fixture.guardianA + "," + fixture.guardianB,
+		"threshold": "2",
+		"delay":     "3",
+	})
+	configured, err := executor.ExecuteWithContext(store, configure, core.ExecutionContext{BlockHeight: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(configured.Events) != 1 || configured.Events[0].Type != "account.recovery_configured" {
+		t.Fatalf("configure events = %#v", configured.Events)
+	}
+	if got := store.GetStorage(fixture.account, "recovery:guardians"); got != fixture.guardianA+","+fixture.guardianB {
+		t.Fatalf("guardians = %q", got)
+	}
+
+	approveA := recoveryTx(t, fixture.guardianAKey, fixture.account, 1, map[string]string{
+		"action":    "approve",
+		"new_owner": fixture.newOwner,
+	})
+	approvedA, err := executor.ExecuteWithContext(store, approveA, core.ExecutionContext{BlockHeight: 11})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approvedA.Events[0].Attributes["approvals"] != "1" {
+		t.Fatalf("first approval event = %#v", approvedA.Events)
+	}
+	if got := store.GetStorage(fixture.account, "recovery:execute_after"); got != "" {
+		t.Fatalf("execute_after before threshold = %q", got)
+	}
+	if got := store.GetAccount(fixture.guardianA).Nonce; got != 0 {
+		t.Fatalf("guardian nonce = %d", got)
+	}
+
+	beforeRejected := store.Root()
+	earlyThreshold := recoveryTx(t, fixture.guardianAKey, fixture.account, 2, map[string]string{
+		"action":    "execute",
+		"new_owner": fixture.newOwner,
+	})
+	if _, err := executor.ExecuteWithContext(store, earlyThreshold, core.ExecutionContext{BlockHeight: 14}); err == nil || err.Error() != "recovery approval threshold not met" {
+		t.Fatalf("threshold error = %v", err)
+	}
+	if store.Root() != beforeRejected || store.GetAccount(fixture.account).Nonce != 2 {
+		t.Fatal("failed threshold check mutated recovery account")
+	}
+
+	approveB := recoveryTx(t, fixture.guardianBKey, fixture.account, 2, map[string]string{
+		"action":    "approve",
+		"new_owner": fixture.newOwner,
+	})
+	approvedB, err := executor.ExecuteWithContext(store, approveB, core.ExecutionContext{BlockHeight: 12})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approvedB.FeePayer != fixture.guardianB || approvedB.Events[0].Attributes["pending"] != "true" {
+		t.Fatalf("threshold approval receipt = %+v", approvedB)
+	}
+	if got := store.GetStorage(fixture.account, "recovery:execute_after"); got != "15" {
+		t.Fatalf("execute_after after threshold = %q", got)
+	}
+	beforeDelay := store.Root()
+	earlyDelay := recoveryTx(t, fixture.guardianAKey, fixture.account, 3, map[string]string{
+		"action":    "execute",
+		"new_owner": fixture.newOwner,
+	})
+	if _, err := executor.ExecuteWithContext(store, earlyDelay, core.ExecutionContext{BlockHeight: 13}); err == nil || err.Error() != "recovery delay has not elapsed" {
+		t.Fatalf("delay error = %v", err)
+	}
+	if store.Root() != beforeDelay || store.GetAccount(fixture.account).Nonce != 3 {
+		t.Fatal("failed delay check mutated recovery account")
+	}
+
+	execute := recoveryTx(t, fixture.guardianBKey, fixture.account, 3, map[string]string{
+		"action":    "execute",
+		"new_owner": fixture.newOwner,
+	})
+	executed, err := executor.ExecuteWithContext(store, execute, core.ExecutionContext{BlockHeight: 15})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(executed.Events) != 1 || executed.Events[0].Type != "account.recovery_executed" {
+		t.Fatalf("execute events = %#v", executed.Events)
+	}
+	if got := store.GetStorage(fixture.account, "owner"); got != fixture.newOwner {
+		t.Fatalf("rotated owner = %q", got)
+	}
+	for _, key := range []string{"recovery:pending_owner", "recovery:execute_after", "recovery:approvals"} {
+		if got := store.GetStorage(fixture.account, key); got != "" {
+			t.Fatalf("pending key %q = %q", key, got)
+		}
+	}
+	if got := store.GetStorage(fixture.account, "recovery:guardians"); got == "" {
+		t.Fatal("successful recovery should preserve guardian configuration")
+	}
+	if executed.FeePayer != fixture.guardianB || executed.Events[0].Attributes["account"] != fixture.account || executed.Events[0].Attributes["new_owner"] != fixture.newOwner {
+		t.Fatalf("execute receipt = %+v", executed)
+	}
+
+	oldOwnerTransfer := signedTx(t, fixture.ownerKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     fixture.account,
+		Signer:   fixture.owner,
+		To:       fixture.receiver,
+		Nonce:    4,
+		Value:    1,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+	if _, err := executor.Execute(store, oldOwnerTransfer); err == nil {
+		t.Fatal("old owner should not authorize after recovery")
+	}
+	oldSessionTransfer := signedTx(t, fixture.guardianAKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     fixture.account,
+		Signer:   fixture.guardianA,
+		To:       fixture.receiver,
+		Nonce:    4,
+		Value:    1,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+	if _, err := executor.Execute(store, oldSessionTransfer); err == nil {
+		t.Fatal("session policy installed before recovery should be invalidated")
+	}
+	oldSessionCall := signedTx(t, fixture.guardianAKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxCall,
+		From:     fixture.account,
+		Signer:   fixture.guardianA,
+		To:       "0xcccccccccccccccccccccccccccccccccccccccc",
+		Nonce:    4,
+		GasLimit: 50_000,
+		GasPrice: 1,
+		Payload:  map[string]string{"method": "increment"},
+	})
+	if _, err := executor.Execute(store, oldSessionCall); err == nil {
+		t.Fatal("call session policy installed before recovery should be invalidated")
+	}
+	newOwnerTransfer := signedTx(t, fixture.newOwnerKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     fixture.account,
+		Signer:   fixture.newOwner,
+		To:       fixture.receiver,
+		Nonce:    4,
+		Value:    10,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+	if _, err := executor.Execute(store, newOwnerTransfer); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.GetAccount(fixture.receiver).Balance; got != 10 {
+		t.Fatalf("receiver balance = %d", got)
+	}
+	if got := store.GetAccount(fixture.account).Balance; got != 1_923_990 {
+		t.Fatalf("recovered account balance = %d", got)
+	}
+	if got := store.GetAccount(fixture.guardianA).Balance; got != 445_000 {
+		t.Fatalf("guardian A balance = %d", got)
+	}
+	if got := store.GetAccount(fixture.guardianB).Balance; got != 390_000 {
+		t.Fatalf("guardian B balance = %d", got)
+	}
+	if got := store.GetAccount(fixture.guardianB).Nonce; got != 0 {
+		t.Fatalf("guardian B nonce = %d", got)
+	}
+	if got := store.GetAccount("0xfee0000000000000000000000000000000000000").Balance; got != 241_000 {
+		t.Fatalf("fee collector balance = %d", got)
+	}
+}
+
+func TestDelegatedEOARecoveryCancelClearAndRoleIsolation(t *testing.T) {
+	fixture := newRecoveryFixture(t, true)
+	store := fixture.store
+	executor := fixture.executor
+
+	configure := recoveryTx(t, fixture.ownerKey, fixture.account, 0, map[string]string{
+		"action":    "configure",
+		"guardians": fixture.guardianA + "," + fixture.guardianB,
+		"threshold": "1",
+		"delay":     "0",
+	})
+	if _, err := executor.ExecuteWithContext(store, configure, core.ExecutionContext{BlockHeight: 1}); err != nil {
+		t.Fatal(err)
+	}
+	approve := recoveryTx(t, fixture.guardianAKey, fixture.account, 1, map[string]string{
+		"action":    "approve",
+		"new_owner": fixture.newOwner,
+	})
+	if _, err := executor.ExecuteWithContext(store, approve, core.ExecutionContext{BlockHeight: 2}); err != nil {
+		t.Fatal(err)
+	}
+	cancel := recoveryTx(t, fixture.ownerKey, fixture.account, 2, map[string]string{"action": "cancel"})
+	cancelled, err := executor.ExecuteWithContext(store, cancel, core.ExecutionContext{BlockHeight: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cancelled.Events[0].Type != "account.recovery_cancelled" || store.GetStorage(fixture.account, "recovery:pending_owner") != "" {
+		t.Fatalf("cancel result = %#v", cancelled)
+	}
+	if store.GetStorage(fixture.account, "recovery:guardians") == "" {
+		t.Fatal("cancel should preserve guardian configuration")
+	}
+
+	guardianTransfer := signedTx(t, fixture.guardianAKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     fixture.account,
+		Signer:   fixture.guardianA,
+		To:       fixture.receiver,
+		Nonce:    3,
+		Value:    1,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+	if _, err := executor.Execute(store, guardianTransfer); err == nil {
+		t.Fatal("guardian recovery authority must not authorize transfers")
+	}
+
+	intruderConfigure := recoveryTx(t, fixture.intruderKey, fixture.account, 3, map[string]string{
+		"action":    "configure",
+		"guardians": fixture.intruder,
+		"threshold": "1",
+		"delay":     "0",
+	})
+	if _, err := executor.Execute(store, intruderConfigure); err == nil || err.Error() != "account recovery owner action requires current owner" {
+		t.Fatalf("non-owner configure error = %v", err)
+	}
+	intruderApprove := recoveryTx(t, fixture.intruderKey, fixture.account, 3, map[string]string{
+		"action":    "approve",
+		"new_owner": fixture.newOwner,
+	})
+	if _, err := executor.Execute(store, intruderApprove); err == nil || err.Error() != "account recovery guardian action requires configured guardian" {
+		t.Fatalf("non-guardian approve error = %v", err)
+	}
+	guardianClear := recoveryTx(t, fixture.guardianAKey, fixture.account, 3, map[string]string{"action": "clear"})
+	if _, err := executor.Execute(store, guardianClear); err == nil || err.Error() != "account recovery owner action requires current owner" {
+		t.Fatalf("guardian clear error = %v", err)
+	}
+	if got := store.GetAccount(fixture.account).Nonce; got != 3 {
+		t.Fatalf("nonce after rejected role actions = %d", got)
+	}
+
+	clear := recoveryTx(t, fixture.ownerKey, fixture.account, 3, map[string]string{"action": "clear"})
+	cleared, err := executor.Execute(store, clear)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared.Events[0].Type != "account.recovery_cleared" {
+		t.Fatalf("clear events = %#v", cleared.Events)
+	}
+	for _, key := range []string{"recovery:guardians", "recovery:threshold", "recovery:delay", "recovery:pending_owner", "recovery:execute_after", "recovery:expires_at", "recovery:approvals", "recovery:votes"} {
+		if got := store.GetStorage(fixture.account, key); got != "" {
+			t.Fatalf("cleared key %q = %q", key, got)
+		}
+	}
+}
+
+func TestDelegatedEOARecoveryRotatesOwnerWithGuardianFundedGas(t *testing.T) {
+	fixture := newRecoveryFixture(t, true)
+	store := fixture.store
+	store.SetBalance(fixture.account, 100_000)
+
+	configure := recoveryTx(t, fixture.ownerKey, fixture.account, 0, map[string]string{
+		"action":    "configure",
+		"guardians": fixture.guardianA,
+		"threshold": "1",
+		"delay":     "0",
+	})
+	configured, err := fixture.executor.ExecuteWithContext(store, configure, core.ExecutionContext{BlockHeight: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configured.FeePayer != "" || store.GetAccount(fixture.account).Balance != 45_000 {
+		t.Fatalf("owner-funded configure = %+v, account = %+v", configured, store.GetAccount(fixture.account))
+	}
+
+	approve := recoveryTx(t, fixture.guardianAKey, fixture.account, 1, map[string]string{
+		"action":    "approve",
+		"new_owner": fixture.newOwner,
+	})
+	approved, err := fixture.executor.ExecuteWithContext(store, approve, core.ExecutionContext{BlockHeight: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approved.FeePayer != fixture.guardianA || store.GetAccount(fixture.account).Balance != 45_000 {
+		t.Fatalf("guardian-funded approval = %+v", approved)
+	}
+
+	execute := recoveryTx(t, fixture.guardianAKey, fixture.account, 2, map[string]string{
+		"action":    "execute",
+		"new_owner": fixture.newOwner,
+	})
+	executed, err := fixture.executor.ExecuteWithContext(store, execute, core.ExecutionContext{BlockHeight: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if executed.FeePayer != fixture.guardianA || store.GetStorage(fixture.account, "owner") != fixture.newOwner {
+		t.Fatalf("delegated execute = %+v", executed)
+	}
+	if got := store.GetAccount(fixture.account).DelegatedCodeID; got != contracts.AccountCodeID {
+		t.Fatalf("delegated code after recovery = %q", got)
+	}
+	if got := store.GetAccount(fixture.guardianA).Balance; got != 390_000 {
+		t.Fatalf("guardian balance = %d", got)
+	}
+	if got := store.GetAccount(fixture.guardianA).Nonce; got != 0 {
+		t.Fatalf("guardian nonce = %d", got)
+	}
+
+	transfer := signedTx(t, fixture.newOwnerKey, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxTransfer,
+		From:     fixture.account,
+		Signer:   fixture.newOwner,
+		To:       fixture.receiver,
+		Nonce:    3,
+		Value:    10,
+		GasLimit: 21_000,
+		GasPrice: 1,
+	})
+	if _, err := fixture.executor.Execute(store, transfer); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.GetAccount(fixture.receiver).Balance; got != 10 {
+		t.Fatalf("receiver balance = %d", got)
+	}
+}
+
+func TestAccountRecoveryGuardianInsufficientGasBalanceRollsBackApproval(t *testing.T) {
+	fixture := newRecoveryFixture(t, false)
+	fixture.store.SetStorage(fixture.account, "recovery:guardians", fixture.guardianA)
+	fixture.store.SetStorage(fixture.account, "recovery:threshold", "1")
+	fixture.store.SetStorage(fixture.account, "recovery:delay", "0")
+	fixture.store.SetBalance(fixture.guardianA, 54_999)
+	approve := recoveryTx(t, fixture.guardianAKey, fixture.account, 0, map[string]string{
+		"action":    "approve",
+		"new_owner": fixture.newOwner,
+	})
+	rootBefore := fixture.store.Root()
+	if _, err := fixture.executor.ExecuteWithContext(fixture.store, approve, core.ExecutionContext{BlockHeight: 1}); err == nil || err.Error() != "insufficient funds" {
+		t.Fatalf("insufficient guardian fee error = %v", err)
+	}
+	if fixture.store.Root() != rootBefore || fixture.store.GetAccount(fixture.account).Nonce != 0 {
+		t.Fatal("failed guardian fee charge mutated recovery account")
+	}
+	if got := fixture.store.GetStorage(fixture.account, "recovery:pending_owner"); got != "" {
+		t.Fatalf("pending owner after failed fee = %q", got)
+	}
+}
+
+func TestAccountRecoveryVotesConvergeWithoutMinorityTargetBlocking(t *testing.T) {
+	fixture := newRecoveryFixture(t, false)
+	store := fixture.store
+	store.SetStorage(fixture.account, "recovery:guardians", fixture.guardianA+","+fixture.guardianB)
+	store.SetStorage(fixture.account, "recovery:threshold", "2")
+	store.SetStorage(fixture.account, "recovery:delay", "3")
+
+	first := recoveryTx(t, fixture.guardianAKey, fixture.account, 0, map[string]string{
+		"action":    "approve",
+		"new_owner": fixture.newOwner,
+	})
+	if _, err := fixture.executor.ExecuteWithContext(store, first, core.ExecutionContext{BlockHeight: 10}); err != nil {
+		t.Fatal(err)
+	}
+	duplicate := recoveryTx(t, fixture.guardianAKey, fixture.account, 1, map[string]string{
+		"action":    "approve",
+		"new_owner": fixture.newOwner,
+	})
+	rootBeforeDuplicate := store.Root()
+	if _, err := fixture.executor.ExecuteWithContext(store, duplicate, core.ExecutionContext{BlockHeight: 11}); err == nil || err.Error() != "recovery approval already recorded" {
+		t.Fatalf("duplicate approval error = %v", err)
+	}
+	if store.Root() != rootBeforeDuplicate || store.GetAccount(fixture.account).Nonce != 1 {
+		t.Fatal("duplicate approval mutated state")
+	}
+
+	otherOwnerKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherOwner := chaincrypto.AddressFromPrivateKey(otherOwnerKey)
+	competing := recoveryTx(t, fixture.guardianBKey, fixture.account, 1, map[string]string{
+		"action":    "approve",
+		"new_owner": otherOwner,
+	})
+	if _, err := fixture.executor.ExecuteWithContext(store, competing, core.ExecutionContext{BlockHeight: 12}); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.GetStorage(fixture.account, "recovery:pending_owner"); got != "" {
+		t.Fatalf("split vote pending owner = %q", got)
+	}
+	if got := store.GetStorage(fixture.account, "recovery:votes"); got == "" {
+		t.Fatal("split guardian votes were not recorded")
+	}
+	if got := store.GetStorage(fixture.account, "recovery:execute_after"); got != "" {
+		t.Fatalf("split vote execute_after = %q", got)
+	}
+
+	thirdOwnerKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	thirdOwner := chaincrypto.AddressFromPrivateKey(thirdOwnerKey)
+	nonConvergingChange := recoveryTx(t, fixture.guardianAKey, fixture.account, 2, map[string]string{
+		"action":    "approve",
+		"new_owner": thirdOwner,
+	})
+	rootBeforeChange := store.Root()
+	if _, err := fixture.executor.ExecuteWithContext(store, nonConvergingChange, core.ExecutionContext{BlockHeight: 13}); err == nil || err.Error() != "recovery vote change must reach approval threshold" {
+		t.Fatalf("non-converging vote change error = %v", err)
+	}
+	if store.Root() != rootBeforeChange || store.GetAccount(fixture.account).Nonce != 2 {
+		t.Fatal("rejected vote change mutated state")
+	}
+
+	converge := recoveryTx(t, fixture.guardianAKey, fixture.account, 2, map[string]string{
+		"action":    "approve",
+		"new_owner": otherOwner,
+	})
+	converged, err := fixture.executor.ExecuteWithContext(store, converge, core.ExecutionContext{BlockHeight: 13})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if converged.Events[0].Attributes["updated"] != "true" || converged.Events[0].Attributes["pending"] != "true" {
+		t.Fatalf("converged vote event = %#v", converged.Events)
+	}
+	if got := store.GetStorage(fixture.account, "recovery:pending_owner"); got != otherOwner {
+		t.Fatalf("converged pending owner = %q", got)
+	}
+	if got := store.GetStorage(fixture.account, "recovery:approvals"); got != fixture.guardianA+","+fixture.guardianB {
+		t.Fatalf("converged approvals = %q", got)
+	}
+	if got := store.GetStorage(fixture.account, "recovery:execute_after"); got != "16" {
+		t.Fatalf("converged execute_after = %q", got)
+	}
+
+	mismatch := recoveryTx(t, fixture.guardianBKey, fixture.account, 3, map[string]string{
+		"action":    "execute",
+		"new_owner": fixture.newOwner,
+	})
+	if _, err := fixture.executor.ExecuteWithContext(store, mismatch, core.ExecutionContext{BlockHeight: 16}); err == nil || err.Error() != "recovery new owner does not match pending owner" {
+		t.Fatalf("mismatched execute error = %v", err)
+	}
+}
+
+func TestAccountRecoveryVotingRoundExpiresAndConfigureClearsActiveState(t *testing.T) {
+	fixture := newRecoveryFixture(t, false)
+	store := fixture.store
+	store.SetStorage(fixture.account, "recovery:guardians", fixture.guardianA+","+fixture.guardianB)
+	store.SetStorage(fixture.account, "recovery:threshold", "2")
+	store.SetStorage(fixture.account, "recovery:delay", "3")
+
+	first := recoveryTx(t, fixture.guardianAKey, fixture.account, 0, map[string]string{
+		"action":    "approve",
+		"new_owner": fixture.newOwner,
+	})
+	if _, err := fixture.executor.ExecuteWithContext(store, first, core.ExecutionContext{BlockHeight: 10}); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.GetStorage(fixture.account, "recovery:expires_at"); got != "266" {
+		t.Fatalf("voting round expiry = %q", got)
+	}
+
+	otherOwnerKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherOwner := chaincrypto.AddressFromPrivateKey(otherOwnerKey)
+	newRound := recoveryTx(t, fixture.guardianBKey, fixture.account, 1, map[string]string{
+		"action":    "approve",
+		"new_owner": otherOwner,
+	})
+	if _, err := fixture.executor.ExecuteWithContext(store, newRound, core.ExecutionContext{BlockHeight: 267}); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.GetStorage(fixture.account, "recovery:votes"); got != fixture.guardianB+"="+otherOwner {
+		t.Fatalf("new round votes = %q", got)
+	}
+	if got := store.GetStorage(fixture.account, "recovery:expires_at"); got != "523" {
+		t.Fatalf("new round expiry = %q", got)
+	}
+
+	store.SetStorage(fixture.account, "recovery:pending_owner", fixture.newOwner)
+	store.SetStorage(fixture.account, "recovery:execute_after", "600")
+	store.SetStorage(fixture.account, "recovery:approvals", fixture.guardianA+","+fixture.guardianB)
+	reconfigure := recoveryTx(t, fixture.ownerKey, fixture.account, 2, map[string]string{
+		"action":    "configure",
+		"guardians": fixture.guardianA,
+		"threshold": "1",
+		"delay":     "5",
+	})
+	if _, err := fixture.executor.ExecuteWithContext(store, reconfigure, core.ExecutionContext{BlockHeight: 268}); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"recovery:pending_owner", "recovery:execute_after", "recovery:expires_at", "recovery:approvals", "recovery:votes"} {
+		if got := store.GetStorage(fixture.account, key); got != "" {
+			t.Fatalf("reconfigured active key %q = %q", key, got)
+		}
+	}
+	if got := store.GetStorage(fixture.account, "recovery:delay"); got != "5" {
+		t.Fatalf("reconfigured delay = %q", got)
+	}
+}
+
+func TestAccountRecoveryExecutionWindowBoundaryAndRollover(t *testing.T) {
+	t.Run("expiry block is executable", func(t *testing.T) {
+		fixture := newRecoveryFixture(t, false)
+		fixture.store.SetStorage(fixture.account, "recovery:guardians", fixture.guardianA)
+		fixture.store.SetStorage(fixture.account, "recovery:threshold", "1")
+		fixture.store.SetStorage(fixture.account, "recovery:delay", "0")
+		approve := recoveryTx(t, fixture.guardianAKey, fixture.account, 0, map[string]string{"action": "approve", "new_owner": fixture.newOwner})
+		if _, err := fixture.executor.ExecuteWithContext(fixture.store, approve, core.ExecutionContext{BlockHeight: 1}); err != nil {
+			t.Fatal(err)
+		}
+		execute := recoveryTx(t, fixture.guardianAKey, fixture.account, 1, map[string]string{"action": "execute", "new_owner": fixture.newOwner})
+		if _, err := fixture.executor.ExecuteWithContext(fixture.store, execute, core.ExecutionContext{BlockHeight: 257}); err != nil {
+			t.Fatal(err)
+		}
+		if got := fixture.store.GetStorage(fixture.account, "owner"); got != fixture.newOwner {
+			t.Fatalf("owner at expiry boundary = %q", got)
+		}
+	})
+
+	t.Run("expired pending starts a new round", func(t *testing.T) {
+		fixture := newRecoveryFixture(t, false)
+		fixture.store.SetStorage(fixture.account, "recovery:guardians", fixture.guardianA)
+		fixture.store.SetStorage(fixture.account, "recovery:threshold", "1")
+		fixture.store.SetStorage(fixture.account, "recovery:delay", "0")
+		approve := recoveryTx(t, fixture.guardianAKey, fixture.account, 0, map[string]string{"action": "approve", "new_owner": fixture.newOwner})
+		if _, err := fixture.executor.ExecuteWithContext(fixture.store, approve, core.ExecutionContext{BlockHeight: 1}); err != nil {
+			t.Fatal(err)
+		}
+		execute := recoveryTx(t, fixture.guardianAKey, fixture.account, 1, map[string]string{"action": "execute", "new_owner": fixture.newOwner})
+		rootBefore := fixture.store.Root()
+		if _, err := fixture.executor.ExecuteWithContext(fixture.store, execute, core.ExecutionContext{BlockHeight: 258}); err == nil || err.Error() != "recovery proposal has expired" {
+			t.Fatalf("expired execute error = %v", err)
+		}
+		if fixture.store.Root() != rootBefore || fixture.store.GetAccount(fixture.account).Nonce != 1 {
+			t.Fatal("expired execute mutated state")
+		}
+		otherOwnerKey, err := chaincrypto.GenerateKey()
+		if err != nil {
+			t.Fatal(err)
+		}
+		otherOwner := chaincrypto.AddressFromPrivateKey(otherOwnerKey)
+		newRound := recoveryTx(t, fixture.guardianAKey, fixture.account, 1, map[string]string{"action": "approve", "new_owner": otherOwner})
+		if _, err := fixture.executor.ExecuteWithContext(fixture.store, newRound, core.ExecutionContext{BlockHeight: 258}); err != nil {
+			t.Fatal(err)
+		}
+		if got := fixture.store.GetStorage(fixture.account, "recovery:pending_owner"); got != otherOwner {
+			t.Fatalf("rolled over pending owner = %q", got)
+		}
+		if got := fixture.store.GetStorage(fixture.account, "recovery:execute_after"); got != "258" {
+			t.Fatalf("rolled over execute_after = %q", got)
+		}
+	})
+}
+
+func TestAccountRecoveryRejectsInvalidConfigurationAndEnvelope(t *testing.T) {
+	validGuardianKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validGuardian := chaincrypto.AddressFromPrivateKey(validGuardianKey)
+	tooManyGuardians := make([]string, 17)
+	for i := range tooManyGuardians {
+		key, err := chaincrypto.GenerateKey()
+		if err != nil {
+			t.Fatal(err)
+		}
+		tooManyGuardians[i] = chaincrypto.AddressFromPrivateKey(key)
+	}
+
+	tests := []struct {
+		name      string
+		payload   map[string]string
+		mutate    func(*types.Transaction, recoveryFixture)
+		wantError string
+	}{
+		{name: "missing guardians", payload: map[string]string{"action": "configure", "threshold": "1", "delay": "0"}, wantError: "recovery guardians are required"},
+		{name: "duplicate guardians", payload: map[string]string{"action": "configure", "guardians": validGuardian + "," + validGuardian, "threshold": "1", "delay": "0"}, wantError: "recovery guardians must be unique"},
+		{name: "malformed guardian", payload: map[string]string{"action": "configure", "guardians": "0x1234", "threshold": "1", "delay": "0"}, wantError: "recovery guardian must be a 20-byte hex address"},
+		{name: "zero guardian", payload: map[string]string{"action": "configure", "guardians": "0x0000000000000000000000000000000000000000", "threshold": "1", "delay": "0"}, wantError: "recovery guardian must not be the zero address"},
+		{name: "zero threshold", payload: map[string]string{"action": "configure", "guardians": validGuardian, "threshold": "0", "delay": "0"}, wantError: "recovery threshold must be positive"},
+		{name: "high threshold", payload: map[string]string{"action": "configure", "guardians": validGuardian, "threshold": "2", "delay": "0"}, wantError: "recovery threshold exceeds guardian count"},
+		{name: "missing delay", payload: map[string]string{"action": "configure", "guardians": validGuardian, "threshold": "1"}, wantError: "recovery delay is required"},
+		{name: "invalid delay", payload: map[string]string{"action": "configure", "guardians": validGuardian, "threshold": "1", "delay": "-1"}, wantError: "recovery delay must be an unsigned integer"},
+		{name: "too many guardians", payload: map[string]string{"action": "configure", "guardians": strings.Join(tooManyGuardians, ","), "threshold": "1", "delay": "0"}, wantError: "recovery guardian count exceeds 16"},
+		{name: "unknown action", payload: map[string]string{"action": "replace"}, wantError: "account recovery action must be configure, approve, execute, cancel, or clear"},
+		{name: "unsupported payload", payload: map[string]string{"action": "clear", "new_owner": validGuardian}, wantError: "account recovery clear payload contains unsupported fields"},
+		{name: "missing signer", payload: map[string]string{"action": "clear"}, mutate: func(tx *types.Transaction, _ recoveryFixture) { tx.Signer = "" }, wantError: "account recovery requires signer"},
+		{name: "multisig envelope", payload: map[string]string{"action": "clear"}, mutate: func(tx *types.Transaction, fixture recoveryFixture) {
+			tx.Authorizations = []types.Authorization{{Signer: fixture.owner, Signature: tx.Signature}}
+		}, wantError: "account recovery does not support multisig authorizations"},
+		{name: "ethereum envelope", payload: map[string]string{"action": "clear"}, mutate: func(tx *types.Transaction, _ recoveryFixture) { tx.SignatureKind = types.SignatureKindEthereumType2 }, wantError: "account recovery does not support ethereum signatures"},
+		{name: "paymaster envelope", payload: map[string]string{"action": "clear"}, mutate: func(tx *types.Transaction, fixture recoveryFixture) { tx.Paymaster = fixture.guardianA }, wantError: "account recovery does not support paymasters"},
+		{name: "orphan paymaster signature", payload: map[string]string{"action": "clear"}, mutate: func(tx *types.Transaction, _ recoveryFixture) { tx.PaymasterSignature = "0x1234" }, wantError: "account recovery does not support paymasters"},
+		{name: "to field", payload: map[string]string{"action": "clear"}, mutate: func(tx *types.Transaction, fixture recoveryFixture) { tx.To = fixture.receiver }, wantError: "account recovery does not support to, value, or batch fields"},
+		{name: "value field", payload: map[string]string{"action": "clear"}, mutate: func(tx *types.Transaction, _ recoveryFixture) { tx.Value = 1 }, wantError: "account recovery does not support to, value, or batch fields"},
+		{name: "batch field", payload: map[string]string{"action": "clear"}, mutate: func(tx *types.Transaction, fixture recoveryFixture) {
+			tx.Batch = []types.BatchOperation{{Type: types.TxTransfer, To: fixture.receiver, Value: 1}}
+		}, wantError: "account recovery does not support to, value, or batch fields"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newRecoveryFixture(t, false)
+			tx := recoveryTx(t, fixture.ownerKey, fixture.account, 0, test.payload)
+			if test.mutate != nil {
+				test.mutate(&tx, fixture)
+				tx = resignTx(t, fixture.ownerKey, tx)
+			}
+			rootBefore := fixture.store.Root()
+			_, err := fixture.executor.ExecuteWithContext(fixture.store, tx, core.ExecutionContext{BlockHeight: 1})
+			if err == nil || err.Error() != test.wantError {
+				t.Fatalf("error = %v, want %q", err, test.wantError)
+			}
+			if fixture.store.Root() != rootBefore || fixture.store.GetAccount(fixture.account).Nonce != 0 {
+				t.Fatal("invalid recovery transaction mutated state")
+			}
+		})
+	}
+}
+
+func TestAccountRecoveryAcceptsMaximumGuardianSet(t *testing.T) {
+	fixture := newRecoveryFixture(t, false)
+	guardians := make([]string, 16)
+	for i := range guardians {
+		key, err := chaincrypto.GenerateKey()
+		if err != nil {
+			t.Fatal(err)
+		}
+		guardians[i] = chaincrypto.AddressFromPrivateKey(key)
+	}
+	tx := recoveryTx(t, fixture.ownerKey, fixture.account, 0, map[string]string{
+		"action":    "configure",
+		"guardians": strings.Join(guardians, ","),
+		"threshold": "16",
+		"delay":     "0",
+	})
+	if _, err := fixture.executor.Execute(fixture.store, tx); err != nil {
+		t.Fatal(err)
+	}
+	if got := fixture.store.GetStorage(fixture.account, "recovery:guardians"); got != strings.Join(guardians, ",") {
+		t.Fatalf("maximum guardian set = %q", got)
+	}
+}
+
+func TestAccountRecoveryRejectsInvalidAuthorityTargetAndNonceOverflow(t *testing.T) {
+	fixture := newRecoveryFixture(t, false)
+	store := fixture.store
+	store.SetStorage(fixture.account, "recovery:guardians", fixture.guardianA)
+	store.SetStorage(fixture.account, "recovery:threshold", "1")
+	store.SetStorage(fixture.account, "recovery:delay", "0")
+
+	badSignature := recoveryTx(t, fixture.ownerKey, fixture.account, 0, map[string]string{"action": "clear"})
+	badSignature.Signature = "0x1234"
+	if _, err := fixture.executor.Execute(store, badSignature); err == nil || err.Error() != "invalid transaction signature" {
+		t.Fatalf("bad signature error = %v", err)
+	}
+
+	signerMismatch := recoveryTx(t, fixture.ownerKey, fixture.account, 0, map[string]string{"action": "clear"})
+	signerMismatch.Signer = fixture.guardianA
+	signerMismatch = resignTx(t, fixture.ownerKey, signerMismatch)
+	if _, err := fixture.executor.Execute(store, signerMismatch); err == nil || err.Error() != "invalid transaction signature" {
+		t.Fatalf("signer mismatch error = %v", err)
+	}
+
+	currentOwner := recoveryTx(t, fixture.guardianAKey, fixture.account, 0, map[string]string{
+		"action":    "approve",
+		"new_owner": fixture.owner,
+	})
+	if _, err := fixture.executor.Execute(store, currentOwner); err == nil || err.Error() != "recovery new owner must differ from current owner" {
+		t.Fatalf("current owner target error = %v", err)
+	}
+	accountTarget := recoveryTx(t, fixture.guardianAKey, fixture.account, 0, map[string]string{
+		"action":    "approve",
+		"new_owner": fixture.account,
+	})
+	if _, err := fixture.executor.Execute(store, accountTarget); err == nil || err.Error() != "recovery new owner must differ from recovered account" {
+		t.Fatalf("account target error = %v", err)
+	}
+	noPending := recoveryTx(t, fixture.guardianAKey, fixture.account, 0, map[string]string{
+		"action":    "execute",
+		"new_owner": fixture.newOwner,
+	})
+	if _, err := fixture.executor.Execute(store, noPending); err == nil || err.Error() != "recovery has no pending owner" {
+		t.Fatalf("no pending error = %v", err)
+	}
+
+	ownerGuardian := recoveryTx(t, fixture.ownerKey, fixture.account, 0, map[string]string{
+		"action":    "configure",
+		"guardians": fixture.owner,
+		"threshold": "1",
+		"delay":     "0",
+	})
+	if _, err := fixture.executor.Execute(store, ownerGuardian); err == nil || err.Error() != "recovery guardian must differ from current owner" {
+		t.Fatalf("owner guardian error = %v", err)
+	}
+	accountGuardian := recoveryTx(t, fixture.ownerKey, fixture.account, 0, map[string]string{
+		"action":    "configure",
+		"guardians": fixture.account,
+		"threshold": "1",
+		"delay":     "0",
+	})
+	if _, err := fixture.executor.Execute(store, accountGuardian); err == nil || err.Error() != "recovery guardian must differ from recovered account" {
+		t.Fatalf("account guardian error = %v", err)
+	}
+	contractGuardianFixture := newRecoveryFixture(t, false)
+	contractGuardianFixture.store.SetCodeID(contractGuardianFixture.guardianA, contracts.AccountCodeID)
+	contractGuardian := recoveryTx(t, contractGuardianFixture.ownerKey, contractGuardianFixture.account, 0, map[string]string{
+		"action":    "configure",
+		"guardians": contractGuardianFixture.guardianA,
+		"threshold": "1",
+		"delay":     "0",
+	})
+	if _, err := contractGuardianFixture.executor.Execute(contractGuardianFixture.store, contractGuardian); err == nil || err.Error() != "recovery guardian must be an EOA" {
+		t.Fatalf("contract guardian error = %v", err)
+	}
+	contractOwnerFixture := newRecoveryFixture(t, false)
+	contractOwnerFixture.store.SetStorage(contractOwnerFixture.account, "recovery:guardians", contractOwnerFixture.guardianA)
+	contractOwnerFixture.store.SetStorage(contractOwnerFixture.account, "recovery:threshold", "1")
+	contractOwnerFixture.store.SetStorage(contractOwnerFixture.account, "recovery:delay", "0")
+	contractOwnerFixture.store.SetCodeID(contractOwnerFixture.newOwner, contracts.AccountCodeID)
+	contractOwner := recoveryTx(t, contractOwnerFixture.guardianAKey, contractOwnerFixture.account, 0, map[string]string{
+		"action":    "approve",
+		"new_owner": contractOwnerFixture.newOwner,
+	})
+	if _, err := contractOwnerFixture.executor.Execute(contractOwnerFixture.store, contractOwner); err == nil || err.Error() != "recovery new owner must be an EOA" {
+		t.Fatalf("contract new owner error = %v", err)
+	}
+
+	plainStore := state.NewStore()
+	plainStore.SetStorage(fixture.account, "owner", fixture.owner)
+	plainStore.SetBalance(fixture.account, 100_000)
+	plainTx := recoveryTx(t, fixture.ownerKey, fixture.account, 0, map[string]string{"action": "clear"})
+	if _, err := fixture.executor.Execute(plainStore, plainTx); err == nil || err.Error() != "account recovery requires account.v1 from account" {
+		t.Fatalf("plain account error = %v", err)
+	}
+	multisigStore := state.NewStore()
+	multisigStore.SetCodeID(fixture.account, contracts.MultisigCodeID)
+	multisigStore.SetStorage(fixture.account, "owner", fixture.owner)
+	multisigStore.SetBalance(fixture.account, 100_000)
+	if _, err := fixture.executor.Execute(multisigStore, plainTx); err == nil || err.Error() != "account recovery requires account.v1 from account" {
+		t.Fatalf("multisig account error = %v", err)
+	}
+
+	store.SetNonce(fixture.account, ^uint64(0))
+	overflow := recoveryTx(t, fixture.ownerKey, fixture.account, ^uint64(0), map[string]string{"action": "clear"})
+	rootBefore := store.Root()
+	if _, err := fixture.executor.Execute(store, overflow); err == nil || err.Error() != "nonce overflow" {
+		t.Fatalf("nonce overflow error = %v", err)
+	}
+	if store.Root() != rootBefore || store.GetAccount(fixture.account).Nonce != ^uint64(0) {
+		t.Fatal("nonce overflow mutated account state")
+	}
+}
+
+func TestAccountRecoveryRejectsInvalidTargetAndExecuteHeightOverflow(t *testing.T) {
+	fixture := newRecoveryFixture(t, false)
+	store := fixture.store
+	store.SetStorage(fixture.account, "recovery:guardians", fixture.guardianA)
+	store.SetStorage(fixture.account, "recovery:threshold", "1")
+	store.SetStorage(fixture.account, "recovery:delay", "1")
+
+	invalidTarget := recoveryTx(t, fixture.guardianAKey, fixture.account, 0, map[string]string{
+		"action":    "approve",
+		"new_owner": "0x1234",
+	})
+	if _, err := fixture.executor.ExecuteWithContext(store, invalidTarget, core.ExecutionContext{BlockHeight: 1}); err == nil || err.Error() != "recovery new owner must be a 20-byte hex address" {
+		t.Fatalf("invalid target error = %v", err)
+	}
+	zeroTarget := recoveryTx(t, fixture.guardianAKey, fixture.account, 0, map[string]string{
+		"action":    "approve",
+		"new_owner": "0x0000000000000000000000000000000000000000",
+	})
+	if _, err := fixture.executor.ExecuteWithContext(store, zeroTarget, core.ExecutionContext{BlockHeight: 1}); err == nil || err.Error() != "recovery new owner must not be the zero address" {
+		t.Fatalf("zero target error = %v", err)
+	}
+	missingExecuteTarget := recoveryTx(t, fixture.guardianAKey, fixture.account, 0, map[string]string{"action": "execute"})
+	if _, err := fixture.executor.ExecuteWithContext(store, missingExecuteTarget, core.ExecutionContext{BlockHeight: 1}); err == nil || err.Error() != "recovery new owner is required" {
+		t.Fatalf("missing execute target error = %v", err)
+	}
+	overflow := recoveryTx(t, fixture.guardianAKey, fixture.account, 0, map[string]string{
+		"action":    "approve",
+		"new_owner": fixture.newOwner,
+	})
+	rootBefore := store.Root()
+	if _, err := fixture.executor.ExecuteWithContext(store, overflow, core.ExecutionContext{BlockHeight: ^uint64(0)}); err == nil || err.Error() != "recovery execute height overflow" {
+		t.Fatalf("overflow error = %v", err)
+	}
+	if store.Root() != rootBefore || store.GetAccount(fixture.account).Nonce != 0 {
+		t.Fatal("overflowing recovery approval mutated state")
+	}
+}
+
+func TestAccountRecoveryRejectsCorruptedStoredState(t *testing.T) {
+	tests := []struct {
+		name      string
+		setup     func(recoveryFixture)
+		action    string
+		wantError string
+	}{
+		{name: "zero threshold", setup: func(f recoveryFixture) { f.store.SetStorage(f.account, "recovery:threshold", "0") }, action: "approve", wantError: "recovery threshold must be positive"},
+		{name: "malformed guardian set", setup: func(f recoveryFixture) { f.store.SetStorage(f.account, "recovery:guardians", "0x1234") }, action: "approve", wantError: "recovery guardian must be a 20-byte hex address"},
+		{name: "invalid delay", setup: func(f recoveryFixture) { f.store.SetStorage(f.account, "recovery:delay", "invalid") }, action: "approve", wantError: "recovery delay must be an unsigned integer"},
+		{name: "malformed votes", setup: func(f recoveryFixture) { f.store.SetStorage(f.account, "recovery:votes", "invalid") }, action: "approve", wantError: "recovery vote is invalid"},
+		{name: "duplicate vote guardians", setup: func(f recoveryFixture) {
+			vote := f.guardianA + "=" + f.newOwner
+			f.store.SetStorage(f.account, "recovery:votes", vote+","+vote)
+		}, action: "approve", wantError: "recovery guardian votes must be unique"},
+		{name: "unconfigured vote guardian", setup: func(f recoveryFixture) {
+			f.store.SetStorage(f.account, "recovery:votes", f.intruder+"="+f.newOwner)
+		}, action: "approve", wantError: "recovery vote is not from a configured guardian"},
+		{name: "premature execute height", setup: func(f recoveryFixture) {
+			f.store.SetStorage(f.account, "recovery:execute_after", "0")
+		}, action: "approve", wantError: "recovery execute height is set before approval threshold"},
+		{name: "pending without expiry", setup: func(f recoveryFixture) {
+			f.store.SetStorage(f.account, "recovery:pending_owner", f.newOwner)
+		}, action: "approve", wantError: "recovery proposal expiry is not set"},
+		{name: "duplicate approvals", setup: func(f recoveryFixture) {
+			seedPendingRecovery(f, "1", f.guardianA+","+f.guardianA, "5", "261")
+		}, action: "execute", wantError: "recovery approvals must be unique"},
+		{name: "unconfigured approval", setup: func(f recoveryFixture) {
+			seedPendingRecovery(f, "1", f.intruder, "5", "261")
+		}, action: "execute", wantError: "recovery approval is not from a configured guardian"},
+		{name: "threshold not met despite execute height", setup: func(f recoveryFixture) {
+			seedPendingRecovery(f, "2", f.guardianA, "0", "256")
+		}, action: "execute", wantError: "recovery approval threshold not met"},
+		{name: "invalid execute height", setup: func(f recoveryFixture) {
+			seedPendingRecovery(f, "1", f.guardianA, "invalid", "256")
+		}, action: "execute", wantError: "recovery execute height is invalid"},
+		{name: "invalid expiry", setup: func(f recoveryFixture) {
+			seedPendingRecovery(f, "1", f.guardianA, "0", "invalid")
+		}, action: "execute", wantError: "recovery proposal expiry is invalid"},
+		{name: "session epoch overflow", setup: func(f recoveryFixture) {
+			seedPendingRecovery(f, "1", f.guardianA, "0", "256")
+			f.store.SetStorage(f.account, "session:epoch", "18446744073709551615")
+		}, action: "execute", wantError: "session epoch overflow"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newRecoveryFixture(t, false)
+			fixture.store.SetStorage(fixture.account, "recovery:guardians", fixture.guardianA+","+fixture.guardianB)
+			fixture.store.SetStorage(fixture.account, "recovery:threshold", "2")
+			fixture.store.SetStorage(fixture.account, "recovery:delay", "3")
+			test.setup(fixture)
+			payload := map[string]string{"action": test.action, "new_owner": fixture.newOwner}
+			tx := recoveryTx(t, fixture.guardianBKey, fixture.account, 0, payload)
+			rootBefore := fixture.store.Root()
+			_, err := fixture.executor.ExecuteWithContext(fixture.store, tx, core.ExecutionContext{BlockHeight: 5})
+			if err == nil || err.Error() != test.wantError {
+				t.Fatalf("error = %v, want %q", err, test.wantError)
+			}
+			if fixture.store.Root() != rootBefore || fixture.store.GetAccount(fixture.account).Nonce != 0 {
+				t.Fatal("corrupted recovery state attempt mutated state")
+			}
+		})
+	}
+}
+
+func seedPendingRecovery(fixture recoveryFixture, threshold string, approvals string, executeAfter string, expiresAt string) {
+	fixture.store.SetStorage(fixture.account, "recovery:pending_owner", fixture.newOwner)
+	fixture.store.SetStorage(fixture.account, "recovery:threshold", threshold)
+	fixture.store.SetStorage(fixture.account, "recovery:approvals", approvals)
+	fixture.store.SetStorage(fixture.account, "recovery:execute_after", executeAfter)
+	fixture.store.SetStorage(fixture.account, "recovery:expires_at", expiresAt)
+}
+
+type recoveryFixture struct {
+	store        *state.Store
+	executor     *core.Executor
+	account      string
+	ownerKey     chaincrypto.PrivateKey
+	owner        string
+	guardianAKey chaincrypto.PrivateKey
+	guardianA    string
+	guardianBKey chaincrypto.PrivateKey
+	guardianB    string
+	newOwnerKey  chaincrypto.PrivateKey
+	newOwner     string
+	intruderKey  chaincrypto.PrivateKey
+	intruder     string
+	receiver     string
+}
+
+func newRecoveryFixture(t *testing.T, delegated bool) recoveryFixture {
+	t.Helper()
+	keys := make([]chaincrypto.PrivateKey, 5)
+	addresses := make([]string, len(keys))
+	for i := range keys {
+		key, err := chaincrypto.GenerateKey()
+		if err != nil {
+			t.Fatal(err)
+		}
+		keys[i] = key
+		addresses[i] = chaincrypto.AddressFromPrivateKey(key)
+	}
+	account := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	store := state.NewStore()
+	if delegated {
+		account = addresses[4]
+		store.SetDelegatedCodeID(account, contracts.AccountCodeID)
+	} else {
+		store.SetCodeID(account, contracts.AccountCodeID)
+	}
+	store.SetStorage(account, "owner", addresses[0])
+	store.SetBalance(account, 2_000_000)
+	store.SetBalance(addresses[1], 500_000)
+	store.SetBalance(addresses[2], 500_000)
+	return recoveryFixture{
+		store:        store,
+		executor:     core.NewExecutor("chainlab-local", "0xfee0000000000000000000000000000000000000", contracts.NewRuntimeWithDefaults()),
+		account:      account,
+		ownerKey:     keys[0],
+		owner:        addresses[0],
+		guardianAKey: keys[1],
+		guardianA:    addresses[1],
+		guardianBKey: keys[2],
+		guardianB:    addresses[2],
+		newOwnerKey:  keys[3],
+		newOwner:     addresses[3],
+		intruderKey:  keys[4],
+		intruder:     addresses[4],
+		receiver:     "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+	}
+}
+
+func recoveryTx(t *testing.T, key chaincrypto.PrivateKey, account string, nonce uint64, payload map[string]string) types.Transaction {
+	t.Helper()
+	return signedTx(t, key, types.Transaction{
+		ChainID:  "chainlab-local",
+		Type:     types.TxAccountRecovery,
+		From:     account,
+		Signer:   chaincrypto.AddressFromPrivateKey(key),
+		Nonce:    nonce,
+		GasLimit: 55_000,
+		GasPrice: 1,
+		Payload:  payload,
+	})
+}
+
+func resignTx(t *testing.T, key chaincrypto.PrivateKey, tx types.Transaction) types.Transaction {
+	t.Helper()
+	tx.Signature = ""
+	return signedTx(t, key, tx)
 }
 
 func TestSmartAccountRejectsUnauthorizedSigner(t *testing.T) {
