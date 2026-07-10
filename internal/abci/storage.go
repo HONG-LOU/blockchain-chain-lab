@@ -61,22 +61,23 @@ type applicationStoreIdentity struct {
 }
 
 type applicationVersionManifest struct {
-	Protocol       string                `json:"protocol"`
-	GenesisHash    string                `json:"genesis_hash"`
-	Height         int64                 `json:"height"`
-	Initialized    bool                  `json:"initialized"`
-	Commitment     applicationCommitment `json:"commitment"`
-	AppHash        string                `json:"app_hash"`
-	Proposers      map[string]string     `json:"proposers,omitempty"`
-	AccountCount   uint64                `json:"account_count"`
-	CodeCount      uint64                `json:"code_count"`
-	StakeCount     uint64                `json:"stake_count"`
-	ProposalCount  uint64                `json:"proposal_count"`
-	ParamCount     uint64                `json:"param_count"`
-	ValidatorCount uint64                `json:"validator_count"`
-	TxCount        uint64                `json:"tx_count"`
-	ReceiptCount   uint64                `json:"receipt_count"`
-	Checksum       string                `json:"checksum"`
+	Protocol                string                `json:"protocol"`
+	GenesisHash             string                `json:"genesis_hash"`
+	Height                  int64                 `json:"height"`
+	Initialized             bool                  `json:"initialized"`
+	Commitment              applicationCommitment `json:"commitment"`
+	AppHash                 string                `json:"app_hash"`
+	Proposers               map[string]string     `json:"proposers,omitempty"`
+	AccountCount            uint64                `json:"account_count"`
+	CodeCount               uint64                `json:"code_count"`
+	StakeCount              uint64                `json:"stake_count"`
+	ProposalCount           uint64                `json:"proposal_count"`
+	ParamCount              uint64                `json:"param_count"`
+	ValidatorCount          uint64                `json:"validator_count"`
+	ValidatorLifecycleCount uint64                `json:"validator_lifecycle_count,omitempty"`
+	TxCount                 uint64                `json:"tx_count"`
+	ReceiptCount            uint64                `json:"receipt_count"`
+	Checksum                string                `json:"checksum"`
 }
 
 func openApplicationDB(path string) (*applicationDB, error) {
@@ -295,6 +296,9 @@ func (store *applicationDB) manifest(
 		TxCount:        uint64(len(value.txs)),
 		ReceiptCount:   uint64(len(value.receipts)),
 	}
+	if snapshot.ValidatorLifecycle != nil {
+		manifest.ValidatorLifecycleCount = 1
+	}
 	if err := validatePersistedApplicationState(store.genesis, store.genesisHash, value); err != nil {
 		return applicationVersionManifest{}, state.Snapshot{}, err
 	}
@@ -396,7 +400,7 @@ func validatePersistedApplicationState(
 	if value.committed.store == nil {
 		return errors.New("persisted application store is required")
 	}
-	if genesisHash == "" || commitment.Protocol != ProtocolVersion || commitment.ChainID != genesis.ChainID {
+	if genesisHash == "" || commitment.Protocol != genesis.Protocol || commitment.ChainID != genesis.ChainID {
 		return errors.New("persisted application commitment identity is invalid")
 	}
 	if commitment.Height < 0 || commitment.GasLimit != genesis.BlockGasLimit {
@@ -404,6 +408,47 @@ func validatePersistedApplicationState(
 	}
 	if commitment.StateRoot != value.committed.store.Root() {
 		return errors.New("persisted application state root mismatch")
+	}
+	lifecycle, hasLifecycle := value.committed.store.ValidatorLifecycle()
+	if genesis.Protocol == ProtocolVersion {
+		if hasLifecycle || commitment.ValidatorRoot != "" || commitment.Epoch != 0 {
+			return errors.New("protocol version 1 commitment contains validator lifecycle state")
+		}
+	} else if value.initialized {
+		if !hasLifecycle || commitment.ValidatorRoot == "" || commitment.ValidatorRoot != value.committed.store.ValidatorRoot() {
+			return errors.New("protocol version 2 validator root mismatch")
+		}
+		if err := types.ValidateCanonicalHash("persisted validator root", commitment.ValidatorRoot); err != nil {
+			return err
+		}
+		if commitment.Epoch != validatorEpoch(commitment.Height, genesis.ValidatorPolicy.EpochLength) {
+			return errors.New("protocol version 2 validator epoch mismatch")
+		}
+		for _, identity := range lifecycle.Validators {
+			if identity.InactiveHeight != 0 &&
+				(identity.InactiveHeight < 3 || (identity.InactiveHeight-1)%genesis.ValidatorPolicy.EpochLength != 0) {
+				return errors.New("protocol version 2 validator removal is not on an epoch boundary")
+			}
+		}
+		identitiesByAccount := make(map[string]state.ValidatorIdentity, len(lifecycle.Validators))
+		for _, identity := range lifecycle.Validators {
+			identitiesByAccount[identity.Account] = identity
+		}
+		for _, offence := range lifecycle.Offences {
+			if offence.ObservedHeight > commitment.Height {
+				return errors.New("protocol version 2 offence was observed after the committed height")
+			}
+			identity, exists := identitiesByAccount[offence.Validator]
+			if !exists || identity.InactiveHeight != offence.RemovalHeight {
+				return errors.New("protocol version 2 offence removal does not match validator lifecycle")
+			}
+			expectedSlash, err := evidenceSlashBasisPoints(offence.Type, *genesis.ValidatorPolicy)
+			if err != nil || offence.SlashBasisPoints != expectedSlash {
+				return errors.New("protocol version 2 offence slash ratio does not match validator policy")
+			}
+		}
+	} else if hasLifecycle || commitment.ValidatorRoot != "" || commitment.Epoch != 0 {
+		return errors.New("uninitialized protocol version 2 state contains a validator lifecycle")
 	}
 	if err := types.ValidateCanonicalHash("persisted transaction root", commitment.TxRoot); err != nil {
 		return err
@@ -480,6 +525,12 @@ func validatePersistedApplicationState(
 		if _, exists := seenAccounts[account]; exists {
 			return errors.New("persisted proposer account is duplicated")
 		}
+		if genesis.Protocol == ProtocolVersionV2 {
+			identity, exists := lifecycle.Validators[consensusAddress]
+			if !exists || identity.Account != account {
+				return errors.New("persisted proposer binding does not match validator lifecycle identity")
+			}
+		}
 		seenAccounts[account] = struct{}{}
 	}
 	return nil
@@ -514,6 +565,15 @@ func writeApplicationSnapshot(batch *pebble.Batch, prefix []byte, snapshot state
 	for index, validator := range snapshot.Validators {
 		key := []byte(fmt.Sprintf("%08d", index))
 		if err := setCanonicalApplicationValue(batch, applicationVersionKey(prefix, "validator", key), validator); err != nil {
+			return err
+		}
+	}
+	if snapshot.ValidatorLifecycle != nil {
+		if err := setCanonicalApplicationValue(
+			batch,
+			applicationVersionKey(prefix, "validator_lifecycle", []byte("state")),
+			*snapshot.ValidatorLifecycle,
+		); err != nil {
 			return err
 		}
 	}
@@ -567,6 +627,7 @@ func loadApplicationVersion(
 	validators := make(map[int]string)
 	transactions := make(map[int][]byte)
 	receipts := make(map[int]types.Receipt)
+	var validatorLifecycle *state.ValidatorLifecycle
 	iterator, err := db.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: applicationPrefixUpperBound(prefix)})
 	if err != nil {
 		return state.Snapshot{}, nil, nil, fmt.Errorf("iterate application version: %w", err)
@@ -665,6 +726,19 @@ func loadApplicationVersion(
 				return state.Snapshot{}, nil, nil, fmt.Errorf("duplicate persisted validator index %d", index)
 			}
 			validators[index] = validator
+		case "validator_lifecycle":
+			key, err := decodeApplicationKey(encoded)
+			if err != nil {
+				return state.Snapshot{}, nil, nil, err
+			}
+			if key != "state" || validatorLifecycle != nil {
+				return state.Snapshot{}, nil, nil, errors.New("persisted validator lifecycle key is invalid or duplicated")
+			}
+			var lifecycle state.ValidatorLifecycle
+			if err := decodeCanonicalJSON(value, &lifecycle); err != nil {
+				return state.Snapshot{}, nil, nil, fmt.Errorf("decode validator lifecycle: %w", err)
+			}
+			validatorLifecycle = &lifecycle
 		case "tx":
 			index, err := decodeApplicationIndex(encoded)
 			if err != nil {
@@ -700,11 +774,13 @@ func loadApplicationVersion(
 		uint64(len(snapshot.Proposals)) != manifest.ProposalCount ||
 		uint64(len(snapshot.Params)) != manifest.ParamCount ||
 		uint64(len(validators)) != manifest.ValidatorCount ||
+		boolCount(validatorLifecycle != nil) != manifest.ValidatorLifecycleCount ||
 		uint64(len(transactions)) != manifest.TxCount ||
 		uint64(len(receipts)) != manifest.ReceiptCount {
 		return state.Snapshot{}, nil, nil, errors.New("application version entry counts do not match manifest")
 	}
 	snapshot.Validators = make([]string, len(validators))
+	snapshot.ValidatorLifecycle = validatorLifecycle
 	for index := range snapshot.Validators {
 		validator, exists := validators[index]
 		if !exists {
@@ -724,6 +800,13 @@ func loadApplicationVersion(
 		orderedReceipts[index] = receipt
 	}
 	return snapshot, orderedTransactions, orderedReceipts, nil
+}
+
+func boolCount(value bool) uint64 {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func decodeApplicationIndex(encoded string) (int, error) {

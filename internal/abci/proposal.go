@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"chainlab/internal/core"
 	"chainlab/internal/state"
 	"chainlab/internal/types"
 
 	abcitypes "github.com/cometbft/cometbft/abci/types"
+	cmtsecp256k1 "github.com/cometbft/cometbft/crypto/secp256k1"
 )
 
 const maxProposalCandidates = types.MaxTransactionsPerBlock * 2
@@ -21,6 +23,13 @@ type proposalExecution struct {
 	receipts  []types.Receipt
 	txResults []*abcitypes.ExecTxResult
 	gasUsed   uint64
+}
+
+type proposalEvidenceState struct {
+	store    *state.Store
+	records  []evidenceRecord
+	outcomes []evidenceOutcome
+	updates  []abcitypes.ValidatorUpdate
 }
 
 func (a *Application) CheckTx(_ context.Context, req *abcitypes.RequestCheckTx) (*abcitypes.ResponseCheckTx, error) {
@@ -61,11 +70,12 @@ func (a *Application) PrepareProposal(_ context.Context, req *abcitypes.RequestP
 	if err := a.requireProposalRequestLocked(req); err != nil {
 		return nil, err
 	}
-	proposer, err := a.proposerLocked(req.ProposerAddress)
+	proposer, err := a.proposerLocked(req.ProposerAddress, req.Height)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := validateEvidence(req.Misbehavior, req.Height, a.proposers); err != nil {
+	evidenceState, err := a.proposalEvidenceStateLocked(req.Misbehavior, req.Height, req.Time)
+	if err != nil {
 		return nil, err
 	}
 	maxBytes := req.MaxTxBytes
@@ -75,7 +85,7 @@ func (a *Application) PrepareProposal(_ context.Context, req *abcitypes.RequestP
 	if maxBytes > types.MaxProposalTxBytes {
 		maxBytes = types.MaxProposalTxBytes
 	}
-	execution, err := a.executeProposalLocked(req.Txs, req.Height, proposer, maxBytes, false)
+	execution, err := a.executeProposalFromStoreLocked(evidenceState.store, req.Txs, req.Height, proposer, maxBytes, false)
 	if err != nil {
 		return nil, err
 	}
@@ -95,14 +105,15 @@ func (a *Application) ProcessProposal(_ context.Context, req *abcitypes.RequestP
 	if _, err := canonicalBlockHash(req.Hash); err != nil {
 		return reject, nil
 	}
-	proposer, err := a.proposerLocked(req.ProposerAddress)
+	proposer, err := a.proposerLocked(req.ProposerAddress, req.Height)
 	if err != nil {
 		return reject, nil
 	}
-	if _, err := validateEvidence(req.Misbehavior, req.Height, a.proposers); err != nil {
+	evidenceState, err := a.proposalEvidenceStateLocked(req.Misbehavior, req.Height, req.Time)
+	if err != nil {
 		return reject, nil
 	}
-	if _, err := a.executeProposalLocked(req.Txs, req.Height, proposer, types.MaxProposalTxBytes, true); err != nil {
+	if _, err := a.executeProposalFromStoreLocked(evidenceState.store, req.Txs, req.Height, proposer, types.MaxProposalTxBytes, true); err != nil {
 		if isFatal(err) {
 			a.haltErr = err
 			return nil, err
@@ -131,15 +142,15 @@ func (a *Application) FinalizeBlock(_ context.Context, req *abcitypes.RequestFin
 	if err != nil {
 		return nil, err
 	}
-	proposer, err := a.proposerLocked(req.ProposerAddress)
+	proposer, err := a.proposerLocked(req.ProposerAddress, req.Height)
 	if err != nil {
 		return nil, err
 	}
-	evidence, err := validateEvidence(req.Misbehavior, req.Height, a.proposers)
+	evidenceState, err := a.proposalEvidenceStateLocked(req.Misbehavior, req.Height, req.Time)
 	if err != nil {
 		return nil, err
 	}
-	execution, err := a.executeProposalLocked(req.Txs, req.Height, proposer, types.MaxProposalTxBytes, true)
+	execution, err := a.executeProposalFromStoreLocked(evidenceState.store, req.Txs, req.Height, proposer, types.MaxProposalTxBytes, true)
 	if err != nil {
 		if isFatal(err) {
 			a.haltErr = err
@@ -147,7 +158,7 @@ func (a *Application) FinalizeBlock(_ context.Context, req *abcitypes.RequestFin
 		return nil, proposalError("decided block is invalid", err)
 	}
 	commitment := applicationCommitment{
-		Protocol:          ProtocolVersion,
+		Protocol:          a.genesis.Protocol,
 		ChainID:           a.genesis.ChainID,
 		Height:            req.Height,
 		BlockHash:         blockHash,
@@ -158,11 +169,16 @@ func (a *Application) FinalizeBlock(_ context.Context, req *abcitypes.RequestFin
 		NextBaseFeePerGas: core.NextBaseFee(a.committed.commitment.NextBaseFeePerGas, execution.gasUsed, a.genesis.BlockGasLimit),
 		TxRoot:            types.TransactionRoot(execution.txs),
 		ReceiptRoot:       types.ReceiptRoot(execution.receipts),
-		EvidenceRoot:      evidenceRoot(evidence),
+		EvidenceRoot:      evidenceRoot(evidenceState.records),
 		StateRoot:         execution.store.Root(),
 	}
+	if a.genesis.Protocol == ProtocolVersionV2 {
+		commitment.Epoch = validatorEpoch(req.Height, a.genesis.ValidatorPolicy.EpochLength)
+		commitment.ValidatorRoot = execution.store.ValidatorRoot()
+	}
 	blockEvents := []abcitypes.Event{blockEvent(commitment)}
-	blockEvents = append(blockEvents, evidenceEvents(evidence)...)
+	blockEvents = append(blockEvents, evidenceEvents(evidenceState.records)...)
+	blockEvents = append(blockEvents, evidenceOutcomeEvents(evidenceState.outcomes)...)
 	candidate := &blockCandidate{
 		state: committedState{
 			store:      execution.store,
@@ -174,9 +190,10 @@ func (a *Application) FinalizeBlock(_ context.Context, req *abcitypes.RequestFin
 	}
 	a.candidate = candidate
 	return &abcitypes.ResponseFinalizeBlock{
-		Events:    cloneABCIEvents(blockEvents),
-		TxResults: cloneExecTxResults(execution.txResults),
-		AppHash:   cloneBytes(candidate.state.appHash),
+		Events:           cloneABCIEvents(blockEvents),
+		TxResults:        cloneExecTxResults(execution.txResults),
+		ValidatorUpdates: cloneValidatorUpdates(evidenceState.updates),
+		AppHash:          cloneBytes(candidate.state.appHash),
 	}, nil
 }
 
@@ -196,11 +213,43 @@ func (a *Application) requireProposalRequestLocked(req *abcitypes.RequestPrepare
 	return nil
 }
 
-func (a *Application) executeProposalLocked(rawTxs [][]byte, height int64, proposer string, maxBytes int64, strict bool) (proposalExecution, error) {
+func (a *Application) proposalEvidenceStateLocked(
+	input []abcitypes.Misbehavior,
+	height int64,
+	blockTime time.Time,
+) (proposalEvidenceState, error) {
+	if a.genesis.Protocol == ProtocolVersion {
+		records, err := validateEvidence(input, height, a.proposers)
+		return proposalEvidenceState{store: a.committed.store, records: records}, err
+	}
+	lifecycle, exists := a.committed.store.ValidatorLifecycle()
+	if !exists {
+		return proposalEvidenceState{}, errors.New("protocol version 2 validator lifecycle is missing")
+	}
+	records, err := validateEvidenceV2(input, height, blockTime, lifecycle, *a.genesis.ValidatorPolicy)
+	if err != nil {
+		return proposalEvidenceState{}, err
+	}
+	working := a.committed.store.Clone()
+	outcomes, updates, err := applyEvidenceV2(working, records, height, *a.genesis.ValidatorPolicy)
+	if err != nil {
+		return proposalEvidenceState{}, err
+	}
+	return proposalEvidenceState{store: working, records: records, outcomes: outcomes, updates: updates}, nil
+}
+
+func (a *Application) executeProposalFromStoreLocked(
+	base *state.Store,
+	rawTxs [][]byte,
+	height int64,
+	proposer string,
+	maxBytes int64,
+	strict bool,
+) (proposalExecution, error) {
 	if strict && len(rawTxs) > types.MaxTransactionsPerBlock {
 		return proposalExecution{}, fmt.Errorf("proposal exceeds %d transactions", types.MaxTransactionsPerBlock)
 	}
-	working := a.committed.store.Clone()
+	working := base.Clone()
 	executor := core.NewExecutor(a.genesis.ChainID, proposer, a.runtime)
 	result := proposalExecution{
 		store:     working,
@@ -267,6 +316,14 @@ func (a *Application) executeProposalLocked(rawTxs [][]byte, height int64, propo
 		result.txResults = append(result.txResults, txResult)
 	}
 	return result, nil
+}
+
+func cloneValidatorUpdates(updates []abcitypes.ValidatorUpdate) []abcitypes.ValidatorUpdate {
+	cloned := make([]abcitypes.ValidatorUpdate, len(updates))
+	for index, update := range updates {
+		cloned[index] = abcitypes.UpdateValidator(cloneBytes(update.PubKey.GetSecp256K1()), update.Power, cmtsecp256k1.KeyType)
+	}
+	return cloned
 }
 
 var _ abcitypes.Application = (*Application)(nil)

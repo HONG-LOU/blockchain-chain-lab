@@ -20,11 +20,14 @@ import (
 
 	chainabci "chainlab/internal/abci"
 	chaincrypto "chainlab/internal/crypto"
+	"chainlab/internal/state"
 	chaintypes "chainlab/internal/types"
 
+	cmtcrypto "github.com/cometbft/cometbft/crypto"
 	cmtjson "github.com/cometbft/cometbft/libs/json"
 	cmtlog "github.com/cometbft/cometbft/libs/log"
 	"github.com/cometbft/cometbft/privval"
+	cmtproto "github.com/cometbft/cometbft/proto/tendermint/types"
 	rpchttp "github.com/cometbft/cometbft/rpc/client/http"
 	cmttypes "github.com/cometbft/cometbft/types"
 )
@@ -209,6 +212,193 @@ func TestFourValidatorProcessesRestartReplayBlockAndStateSync(t *testing.T) {
 	}
 	broadcastTransfer(t, clients[3], senderKey, network.ChainID, sender, receiver, 3, 4)
 	_ = waitForConsistentNetworkState(t, clients, stateSyncHeight+1, sender, 4, 45*time.Second)
+}
+
+func TestFourValidatorV2EvidenceSlashingAndEpochRemoval(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping multi-process CometBFT evidence network in short mode")
+	}
+	if processRaceEnabled {
+		t.Skip("the process-boundary test is covered by the non-race run; package logic remains race-tested")
+	}
+	basePort := availablePortRange(t, 12)
+	root := filepath.Join(t.TempDir(), "validator-v2-network")
+	policy := chainabci.ValidatorPolicy{
+		EpochLength: 2, DuplicateVoteSlashBasisPoints: 10_000,
+		LightClientAttackSlashBasisPoints: 10_000,
+		EvidenceMaxAgeNumBlocks:           1_000, EvidenceMaxAgeDurationNanos: int64(24 * time.Hour),
+	}
+	network, err := InitializeNetwork(NetworkConfig{
+		OutputRoot: root, ChainID: "chainlab-v2-evidence", ValidatorCount: 4,
+		GenesisTime:  time.Date(2026, time.July, 10, 12, 0, 0, 0, time.UTC),
+		ABCIBasePort: basePort, RPCBasePort: basePort + 4, P2PBasePort: basePort + 8,
+		ApplicationProtocol: chainabci.ProtocolVersionV2, ValidatorPolicy: &policy,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	processes := make([]*helperProcess, 0, len(network.Nodes)*2)
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		for _, process := range processes {
+			t.Logf("%s log:\n%s", process.name, process.tailLog())
+		}
+	})
+	for index, generatedNode := range network.Nodes {
+		home := filepath.Join(root, generatedNode.Home)
+		processes = append(processes, startHelperProcess(t, root, fmt.Sprintf("v2-app-%d", index), map[string]string{
+			processHelperModeEnv: "abci", processHelperGenesisEnv: filepath.Join(home, filepath.FromSlash(AppGenesisPath)),
+			processHelperListenEnv:  generatedNode.ABCIListenAddress,
+			processHelperDataDirEnv: filepath.Join(root, filepath.FromSlash(generatedNode.ApplicationData)),
+		}))
+	}
+	for _, generatedNode := range network.Nodes {
+		waitForTCP(t, generatedNode.ABCIListenAddress, 15*time.Second)
+	}
+	for index, generatedNode := range network.Nodes {
+		processes = append(processes, startHelperProcess(t, root, fmt.Sprintf("v2-comet-%d", index), map[string]string{
+			processHelperModeEnv: "comet", processHelperHomeEnv: filepath.Join(root, generatedNode.Home),
+		}))
+	}
+	clients := make([]*rpchttp.HTTP, len(network.Nodes))
+	for index, generatedNode := range network.Nodes {
+		client, err := rpchttp.New(httpAddress(generatedNode.RPCListenAddress), "/websocket")
+		if err != nil {
+			t.Fatal(err)
+		}
+		clients[index] = client
+	}
+	waitForRPCReady(t, clients, 45*time.Second)
+	waitForPeerMesh(t, clients, 45*time.Second)
+
+	evidenceHeight := stableEvidenceHeight(t, clients[0])
+	targetHome := filepath.Join(root, network.Nodes[3].Home)
+	privateKey := loadCometPrivateValidatorKey(t, filepath.Join(targetHome, "config", "priv_validator_key.json"))
+	evidence := duplicateVoteEvidence(t, clients[0], network.ChainID, evidenceHeight, privateKey)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	broadcast, err := clients[0].BroadcastEvidence(ctx, evidence)
+	cancel()
+	if err != nil || broadcast == nil || len(broadcast.Hash) != 32 {
+		t.Fatalf("broadcast evidence response=%+v err=%v", broadcast, err)
+	}
+
+	targetAccount := network.Nodes[3].ChainLabAddress
+	waitForCondition(t, 60*time.Second, func() (bool, string) {
+		for index, client := range clients {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			query, err := client.ABCIQuery(ctx, "/validator", []byte(targetAccount))
+			cancel()
+			if err != nil || query == nil || query.Response.Code != chainabci.CodeOK {
+				return false, fmt.Sprintf("node %d validator query response=%+v err=%v", index, query, err)
+			}
+			var result struct {
+				Identity state.ValidatorIdentity `json:"identity"`
+				Stake    uint64                  `json:"stake"`
+			}
+			if err := json.Unmarshal(query.Response.Value, &result); err != nil {
+				return false, fmt.Sprintf("node %d validator query decode: %v", index, err)
+			}
+			if result.Stake != 0 || result.Identity.InactiveHeight <= 0 {
+				return false, fmt.Sprintf("node %d stake=%d inactive_height=%d", index, result.Stake, result.Identity.InactiveHeight)
+			}
+			ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+			validators, err := client.Validators(ctx, nil, nil, nil)
+			cancel()
+			if err != nil || validators == nil || validators.Total != 3 {
+				return false, fmt.Sprintf("node %d validators=%+v err=%v", index, validators, err)
+			}
+			for _, validator := range validators.Validators {
+				if bytes.Equal(validator.Address, privateKey.PubKey().Address()) {
+					return false, fmt.Sprintf("node %d still contains removed validator", index)
+				}
+			}
+		}
+		return true, ""
+	})
+}
+
+func stableEvidenceHeight(t *testing.T, client *rpchttp.HTTP) int64 {
+	t.Helper()
+	var height int64
+	waitForCondition(t, 20*time.Second, func() (bool, string) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		status, err := client.Status(ctx)
+		cancel()
+		if err != nil || status == nil || status.SyncInfo.LatestBlockHeight < 3 {
+			return false, fmt.Sprintf("status=%+v err=%v", status, err)
+		}
+		height = status.SyncInfo.LatestBlockHeight - 1
+		return true, ""
+	})
+	return height
+}
+
+func loadCometPrivateValidatorKey(t *testing.T, path string) cmtcrypto.PrivKey {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var key privval.FilePVKey
+	if err := cmtjson.Unmarshal(raw, &key); err != nil {
+		t.Fatal(err)
+	}
+	return key.PrivKey
+}
+
+func duplicateVoteEvidence(
+	t *testing.T,
+	client *rpchttp.HTTP,
+	chainID string,
+	height int64,
+	privateKey cmtcrypto.PrivKey,
+) *cmttypes.DuplicateVoteEvidence {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	block, err := client.Block(ctx, &height)
+	cancel()
+	if err != nil || block == nil || block.Block == nil {
+		t.Fatalf("load evidence block %d response=%+v err=%v", height, block, err)
+	}
+	page, perPage := 1, 100
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	validators, err := client.Validators(ctx, &height, &page, &perPage)
+	cancel()
+	if err != nil || validators == nil || validators.Total != len(validators.Validators) {
+		t.Fatalf("load evidence validators response=%+v err=%v", validators, err)
+	}
+	validatorSet := cmttypes.NewValidatorSet(validators.Validators)
+	validatorIndex, validator := validatorSet.GetByAddress(privateKey.PubKey().Address())
+	if validatorIndex < 0 || validator == nil {
+		t.Fatal("evidence signer is not in the historical validator set")
+	}
+	conflictingHash := bytes.Repeat([]byte{0xee}, 32)
+	if bytes.Equal(conflictingHash, block.BlockID.Hash) {
+		conflictingHash[0] ^= 0xff
+	}
+	first := &cmttypes.Vote{
+		Type: cmtproto.PrevoteType, Height: height, Round: 0, BlockID: block.BlockID,
+		Timestamp: block.Block.Time, ValidatorAddress: privateKey.PubKey().Address(), ValidatorIndex: int32(validatorIndex),
+	}
+	second := first.Copy()
+	second.BlockID = cmttypes.BlockID{Hash: conflictingHash, PartSetHeader: block.BlockID.PartSetHeader}
+	for _, vote := range []*cmttypes.Vote{first, second} {
+		signature, err := privateKey.Sign(cmttypes.VoteSignBytes(chainID, vote.ToProto()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		vote.Signature = signature
+	}
+	evidence, err := cmttypes.NewDuplicateVoteEvidence(first, second, block.Block.Time, validatorSet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := evidence.ValidateBasic(); err != nil {
+		t.Fatal(err)
+	}
+	return evidence
 }
 
 func TestChainLabProcessHelper(t *testing.T) {

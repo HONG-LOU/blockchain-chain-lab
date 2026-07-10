@@ -23,13 +23,14 @@ const (
 var ErrStorageLimit = errors.New("account storage limit exceeded")
 
 type Store struct {
-	accounts     map[string]types.Account
-	storageBytes map[string]int
-	codes        map[string]types.ContractCode
-	stakes       map[string]uint64
-	proposals    map[string]types.Proposal
-	params       map[string]string
-	validators   []string
+	accounts           map[string]types.Account
+	storageBytes       map[string]int
+	codes              map[string]types.ContractCode
+	stakes             map[string]uint64
+	proposals          map[string]types.Proposal
+	params             map[string]string
+	validators         []string
+	validatorLifecycle *ValidatorLifecycle
 }
 
 // Reader is the read-only state capability exposed to contract execution.
@@ -104,12 +105,13 @@ func (v ReadView) SortedStorageKeys(address string) []string {
 }
 
 type Snapshot struct {
-	Accounts   map[string]types.Account      `json:"accounts"`
-	Codes      map[string]types.ContractCode `json:"codes,omitempty"`
-	Stakes     map[string]uint64             `json:"stakes"`
-	Proposals  map[string]types.Proposal     `json:"proposals"`
-	Params     map[string]string             `json:"params,omitempty"`
-	Validators []string                      `json:"validators,omitempty"`
+	Accounts           map[string]types.Account      `json:"accounts"`
+	Codes              map[string]types.ContractCode `json:"codes,omitempty"`
+	Stakes             map[string]uint64             `json:"stakes"`
+	Proposals          map[string]types.Proposal     `json:"proposals"`
+	Params             map[string]string             `json:"params,omitempty"`
+	Validators         []string                      `json:"validators,omitempty"`
+	ValidatorLifecycle *ValidatorLifecycle           `json:"validator_lifecycle,omitempty"`
 }
 
 func NewStore() *Store {
@@ -219,6 +221,11 @@ func NewStoreFromSnapshot(snapshot Snapshot) (*Store, error) {
 		return nil, err
 	}
 	store.validators = validators
+	if snapshot.ValidatorLifecycle != nil {
+		if err := store.SetValidatorLifecycle(*snapshot.ValidatorLifecycle); err != nil {
+			return nil, fmt.Errorf("invalid snapshot validator lifecycle: %w", err)
+		}
+	}
 	return store, nil
 }
 
@@ -394,6 +401,10 @@ func (s *Store) Clone() *Store {
 	}
 	clone.params = cloneStringMap(s.params)
 	clone.validators = cloneStringSlice(s.validators)
+	if s.validatorLifecycle != nil {
+		lifecycle := cloneValidatorLifecycle(*s.validatorLifecycle)
+		clone.validatorLifecycle = &lifecycle
+	}
 	return clone
 }
 
@@ -405,6 +416,10 @@ func (s *Store) Snapshot() Snapshot {
 		Proposals:  make(map[string]types.Proposal, len(s.proposals)),
 		Params:     cloneStringMap(s.params),
 		Validators: cloneStringSlice(s.validators),
+	}
+	if s.validatorLifecycle != nil {
+		lifecycle := cloneValidatorLifecycle(*s.validatorLifecycle)
+		snapshot.ValidatorLifecycle = &lifecycle
 	}
 	for address, account := range s.accounts {
 		account.Storage = cloneStringMap(account.Storage)
@@ -425,6 +440,7 @@ func (s *Store) ReplaceWith(other *Store) {
 	s.proposals = replacement.proposals
 	s.params = replacement.params
 	s.validators = replacement.validators
+	s.validatorLifecycle = replacement.validatorLifecycle
 }
 
 func (s *Store) GetAccount(address string) types.Account {
@@ -774,12 +790,13 @@ func (s *Store) Params() map[string]string {
 
 func (s *Store) Root() string {
 	snapshot := struct {
-		Accounts   map[string]types.Account      `json:"accounts"`
-		Codes      map[string]types.ContractCode `json:"codes"`
-		Stakes     map[string]uint64             `json:"stakes"`
-		Proposals  map[string]types.Proposal     `json:"proposals"`
-		Params     map[string]string             `json:"params"`
-		Validators []string                      `json:"validators"`
+		Accounts           map[string]types.Account      `json:"accounts"`
+		Codes              map[string]types.ContractCode `json:"codes"`
+		Stakes             map[string]uint64             `json:"stakes"`
+		Proposals          map[string]types.Proposal     `json:"proposals"`
+		Params             map[string]string             `json:"params"`
+		Validators         []string                      `json:"validators"`
+		ValidatorLifecycle *ValidatorLifecycle           `json:"validator_lifecycle,omitempty"`
 	}{
 		Accounts:   make(map[string]types.Account, len(s.accounts)),
 		Codes:      cloneContractCodeMap(s.codes),
@@ -787,6 +804,10 @@ func (s *Store) Root() string {
 		Proposals:  make(map[string]types.Proposal, len(s.proposals)),
 		Params:     cloneStringMap(s.params),
 		Validators: cloneStringSlice(s.validators),
+	}
+	if s.validatorLifecycle != nil {
+		lifecycle := cloneValidatorLifecycle(*s.validatorLifecycle)
+		snapshot.ValidatorLifecycle = &lifecycle
 	}
 	for address, account := range s.accounts {
 		account.Storage = cloneStringMap(account.Storage)

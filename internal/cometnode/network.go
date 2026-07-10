@@ -33,15 +33,17 @@ const (
 )
 
 type NetworkConfig struct {
-	OutputRoot       string
-	ChainID          string
-	ValidatorCount   int
-	GenesisTime      time.Time
-	ValidatorBalance uint64
-	BlockGasLimit    uint64
-	ABCIBasePort     int
-	RPCBasePort      int
-	P2PBasePort      int
+	OutputRoot          string
+	ChainID             string
+	ValidatorCount      int
+	GenesisTime         time.Time
+	ValidatorBalance    uint64
+	BlockGasLimit       uint64
+	ABCIBasePort        int
+	RPCBasePort         int
+	P2PBasePort         int
+	ApplicationProtocol string
+	ValidatorPolicy     *chainabci.ValidatorPolicy
 }
 
 type NetworkDocument struct {
@@ -122,8 +124,20 @@ func InitializeNetwork(config NetworkConfig) (NetworkDocument, error) {
 	}
 	for _, validator := range validators {
 		store.SetBalance(validator, config.ValidatorBalance)
+		if config.ApplicationProtocol == chainabci.ProtocolVersionV2 {
+			if err := store.AddStake(validator, config.ValidatorBalance); err != nil {
+				return NetworkDocument{}, err
+			}
+		}
 	}
-	appGenesis, err := chainabci.NewGenesisDocument(config.ChainID, config.BlockGasLimit, store)
+	var appGenesis chainabci.GenesisDocument
+	if config.ApplicationProtocol == chainabci.ProtocolVersionV2 {
+		appGenesis, err = chainabci.NewGenesisDocumentV2(
+			config.ChainID, config.BlockGasLimit, store, *config.ValidatorPolicy,
+		)
+	} else {
+		appGenesis, err = chainabci.NewGenesisDocument(config.ChainID, config.BlockGasLimit, store)
+	}
 	if err != nil {
 		return NetworkDocument{}, err
 	}
@@ -137,6 +151,11 @@ func InitializeNetwork(config NetworkConfig) (NetworkDocument, error) {
 	consensusParams.Evidence.MaxBytes = 1024 * 1024
 	consensusParams.Validator.PubKeyTypes = []string{cmtsecp256k1.KeyType}
 	consensusParams.Version.App = chainabci.AppVersion
+	if appGenesis.Protocol == chainabci.ProtocolVersionV2 {
+		consensusParams.Version.App = chainabci.AppVersionV2
+		consensusParams.Evidence.MaxAgeNumBlocks = appGenesis.ValidatorPolicy.EvidenceMaxAgeNumBlocks
+		consensusParams.Evidence.MaxAgeDuration = time.Duration(appGenesis.ValidatorPolicy.EvidenceMaxAgeDurationNanos)
+	}
 	consensusParams.ABCI.VoteExtensionsEnableHeight = 0
 	cometGenesis := &cmttypes.GenesisDoc{
 		GenesisTime:     config.GenesisTime,
@@ -227,6 +246,9 @@ func withNetworkDefaults(config NetworkConfig) NetworkConfig {
 	if config.BlockGasLimit == 0 {
 		config.BlockGasLimit = chaintypes.DefaultBlockGasLimit
 	}
+	if config.ApplicationProtocol == "" {
+		config.ApplicationProtocol = chainabci.ProtocolVersion
+	}
 	if config.GenesisTime.IsZero() {
 		config.GenesisTime = time.Now().UTC()
 	} else {
@@ -263,6 +285,18 @@ func validateNetworkConfig(config NetworkConfig) (string, error) {
 	}
 	if config.BlockGasLimit == 0 || config.BlockGasLimit > math.MaxInt64 {
 		return "", errors.New("block gas limit must fit a positive int64")
+	}
+	switch config.ApplicationProtocol {
+	case chainabci.ProtocolVersion:
+		if config.ValidatorPolicy != nil {
+			return "", errors.New("protocol version 1 must not define a validator policy")
+		}
+	case chainabci.ProtocolVersionV2:
+		if config.ValidatorPolicy == nil {
+			return "", errors.New("protocol version 2 requires a validator policy")
+		}
+	default:
+		return "", errors.New("application protocol is unsupported")
 	}
 	if config.GenesisTime.IsZero() {
 		return "", errors.New("genesis time is required")

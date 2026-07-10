@@ -322,7 +322,7 @@ func validateNodeFiles(config *cmtcfg.Config, document NodeDocument) error {
 		return errors.New("application genesis chain id does not match node document")
 	}
 	protoParams := genesis.ConsensusParams.ToProto()
-	if err := chainabci.ValidateConsensusParams(&protoParams, applicationGenesis.BlockGasLimit); err != nil {
+	if err := chainabci.ValidateGenesisConsensusParams(&protoParams, applicationGenesis); err != nil {
 		return fmt.Errorf("CometBFT consensus params: %w", err)
 	}
 	appGenesisPath := filepath.Join(config.RootDir, filepath.FromSlash(document.ApplicationGenesis))

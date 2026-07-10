@@ -26,9 +26,11 @@ import (
 )
 
 const (
-	ProtocolVersion = "chainlab-v1"
-	AppVersion      = 1
-	Codespace       = "chainlab"
+	ProtocolVersion   = "chainlab-v1"
+	ProtocolVersionV2 = "chainlab-v2"
+	AppVersion        = 1
+	AppVersionV2      = 2
+	Codespace         = "chainlab"
 
 	CodeOK              uint32 = 0
 	CodeInvalidRequest  uint32 = 1
@@ -37,26 +39,56 @@ const (
 	CodeMempoolFull     uint32 = 4
 	CodeUnsupported     uint32 = 5
 
-	maxMempoolBytes        = 128 * 1024 * 1024
-	maxEvidenceBytes int64 = 1024 * 1024
+	maxMempoolBytes               = 128 * 1024 * 1024
+	maxEvidenceBytes        int64 = 1024 * 1024
+	maxValidatorEpochLength int64 = 1_000_000
 )
 
+type ValidatorPolicy struct {
+	EpochLength                       int64  `json:"epoch_length"`
+	DuplicateVoteSlashBasisPoints     uint32 `json:"duplicate_vote_slash_basis_points"`
+	LightClientAttackSlashBasisPoints uint32 `json:"light_client_attack_slash_basis_points"`
+	EvidenceMaxAgeNumBlocks           int64  `json:"evidence_max_age_num_blocks"`
+	EvidenceMaxAgeDurationNanos       int64  `json:"evidence_max_age_duration_nanos"`
+}
+
 type GenesisDocument struct {
-	Protocol      string         `json:"protocol"`
-	ChainID       string         `json:"chain_id"`
-	BlockGasLimit uint64         `json:"block_gas_limit"`
-	State         state.Snapshot `json:"state"`
+	Protocol        string           `json:"protocol"`
+	ChainID         string           `json:"chain_id"`
+	BlockGasLimit   uint64           `json:"block_gas_limit"`
+	State           state.Snapshot   `json:"state"`
+	ValidatorPolicy *ValidatorPolicy `json:"validator_policy,omitempty"`
 }
 
 func NewGenesisDocument(chainID string, blockGasLimit uint64, store *state.Store) (GenesisDocument, error) {
+	return newGenesisDocument(ProtocolVersion, chainID, blockGasLimit, store, nil)
+}
+
+func NewGenesisDocumentV2(
+	chainID string,
+	blockGasLimit uint64,
+	store *state.Store,
+	policy ValidatorPolicy,
+) (GenesisDocument, error) {
+	return newGenesisDocument(ProtocolVersionV2, chainID, blockGasLimit, store, &policy)
+}
+
+func newGenesisDocument(
+	protocol string,
+	chainID string,
+	blockGasLimit uint64,
+	store *state.Store,
+	policy *ValidatorPolicy,
+) (GenesisDocument, error) {
 	if store == nil {
 		return GenesisDocument{}, errors.New("genesis state is required")
 	}
 	document := GenesisDocument{
-		Protocol:      ProtocolVersion,
-		ChainID:       chainID,
-		BlockGasLimit: blockGasLimit,
-		State:         store.Snapshot(),
+		Protocol:        protocol,
+		ChainID:         chainID,
+		BlockGasLimit:   blockGasLimit,
+		State:           store.Snapshot(),
+		ValidatorPolicy: policy,
 	}
 	if blockGasLimit == 0 {
 		document.BlockGasLimit = types.DefaultBlockGasLimit
@@ -121,6 +153,8 @@ type applicationCommitment struct {
 	ReceiptRoot       string `json:"receipt_root"`
 	EvidenceRoot      string `json:"evidence_root"`
 	StateRoot         string `json:"state_root"`
+	Epoch             uint64 `json:"epoch,omitempty"`
+	ValidatorRoot     string `json:"validator_root,omitempty"`
 }
 
 type blockCandidate struct {
@@ -137,7 +171,7 @@ func NewApplication(config Config) (*Application, error) {
 	genesis := config.Genesis
 	genesis.State = store.Snapshot()
 	commitment := applicationCommitment{
-		Protocol:          ProtocolVersion,
+		Protocol:          genesis.Protocol,
 		ChainID:           genesis.ChainID,
 		Height:            0,
 		Proposer:          "genesis",
@@ -185,8 +219,20 @@ func NewApplication(config Config) (*Application, error) {
 }
 
 func validateGenesisDocument(document GenesisDocument) (*state.Store, error) {
-	if document.Protocol != ProtocolVersion {
-		return nil, fmt.Errorf("genesis protocol must be %q", ProtocolVersion)
+	switch document.Protocol {
+	case ProtocolVersion:
+		if document.ValidatorPolicy != nil {
+			return nil, errors.New("protocol version 1 must not define a validator policy")
+		}
+	case ProtocolVersionV2:
+		if document.ValidatorPolicy == nil {
+			return nil, errors.New("protocol version 2 requires a validator policy")
+		}
+		if err := validateValidatorPolicy(*document.ValidatorPolicy); err != nil {
+			return nil, fmt.Errorf("invalid validator policy: %w", err)
+		}
+	default:
+		return nil, fmt.Errorf("genesis protocol must be %q or %q", ProtocolVersion, ProtocolVersionV2)
 	}
 	if err := types.ValidateChainID(document.ChainID); err != nil {
 		return nil, fmt.Errorf("invalid genesis chain id: %w", err)
@@ -201,7 +247,26 @@ func validateGenesisDocument(document GenesisDocument) (*state.Store, error) {
 	if len(store.Validators()) == 0 {
 		return nil, errors.New("genesis validator set is required")
 	}
+	if _, exists := store.ValidatorLifecycle(); exists {
+		return nil, errors.New("genesis state must not contain an initialized validator lifecycle")
+	}
 	return store, nil
+}
+
+func validateValidatorPolicy(policy ValidatorPolicy) error {
+	if policy.EpochLength < 2 || policy.EpochLength > maxValidatorEpochLength {
+		return fmt.Errorf("epoch length must be between 2 and %d", maxValidatorEpochLength)
+	}
+	if policy.DuplicateVoteSlashBasisPoints == 0 || policy.DuplicateVoteSlashBasisPoints > 10_000 {
+		return errors.New("duplicate-vote slash ratio must be between 1 and 10000 basis points")
+	}
+	if policy.LightClientAttackSlashBasisPoints == 0 || policy.LightClientAttackSlashBasisPoints > 10_000 {
+		return errors.New("light-client-attack slash ratio must be between 1 and 10000 basis points")
+	}
+	if policy.EvidenceMaxAgeNumBlocks <= 0 || policy.EvidenceMaxAgeDurationNanos <= 0 {
+		return errors.New("evidence retention must be positive")
+	}
+	return nil
 }
 
 func decodeGenesisDocument(raw []byte) (GenesisDocument, error) {
@@ -236,7 +301,7 @@ func (a *Application) Info(context.Context, *abcitypes.RequestInfo) (*abcitypes.
 		StateRoot string `json:"state_root"`
 		Halted    bool   `json:"halted"`
 	}{
-		Protocol:  ProtocolVersion,
+		Protocol:  a.genesis.Protocol,
 		StateRoot: a.committed.commitment.StateRoot,
 		Halted:    a.haltErr != nil,
 	})
@@ -246,7 +311,7 @@ func (a *Application) Info(context.Context, *abcitypes.RequestInfo) (*abcitypes.
 	return &abcitypes.ResponseInfo{
 		Data:             string(data),
 		Version:          version.ABCIVersion,
-		AppVersion:       AppVersion,
+		AppVersion:       appVersion(a.genesis.Protocol),
 		LastBlockHeight:  a.committed.commitment.Height,
 		LastBlockAppHash: cloneBytes(a.committed.appHash),
 	}, nil
@@ -280,19 +345,32 @@ func (a *Application) InitChain(_ context.Context, req *abcitypes.RequestInitCha
 	if !sameGenesisDocument(provided, a.genesis) {
 		return nil, errors.New("init chain app state does not match configured genesis")
 	}
-	if err := validateConsensusParams(req.ConsensusParams, a.genesis.BlockGasLimit); err != nil {
+	if err := validateConsensusParamsForGenesis(req.ConsensusParams, a.genesis); err != nil {
 		return nil, err
 	}
-	proposers, err := bindGenesisValidators(req.Validators, a.committed.store.Validators())
+	proposers, identities, err := bindGenesisValidators(req.Validators, a.committed.store.Validators())
 	if err != nil {
 		return nil, err
 	}
-	if err := a.persistLocked(a.committed, true, proposers, nil, nil); err != nil {
+	nextCommitted := a.committed
+	if a.genesis.Protocol == ProtocolVersionV2 {
+		nextStore := a.committed.store.Clone()
+		if err := nextStore.InitializeValidatorLifecycle(identities); err != nil {
+			return nil, err
+		}
+		nextCommitted.store = nextStore
+		nextCommitted.commitment.StateRoot = nextStore.Root()
+		nextCommitted.commitment.ValidatorRoot = nextStore.ValidatorRoot()
+		nextCommitted.appHash = applicationHash(nextCommitted.commitment)
+	}
+	if err := a.persistLocked(nextCommitted, true, proposers, nil, nil); err != nil {
 		a.haltErr = err
 		return nil, err
 	}
+	a.committed = nextCommitted
 	a.proposers = proposers
 	a.initialized = true
+	a.mempool = newAppMempool(nextCommitted.store)
 	return &abcitypes.ResponseInitChain{AppHash: cloneBytes(a.committed.appHash)}, nil
 }
 
@@ -303,26 +381,43 @@ func sameGenesisDocument(left GenesisDocument, right GenesisDocument) bool {
 }
 
 func validateConsensusParams(params *cmtproto.ConsensusParams, blockGasLimit uint64) error {
+	return validateConsensusParamsForGenesis(params, GenesisDocument{Protocol: ProtocolVersion, BlockGasLimit: blockGasLimit})
+}
+
+func validateConsensusParamsForGenesis(params *cmtproto.ConsensusParams, genesis GenesisDocument) error {
 	if params == nil || params.Block == nil {
 		return errors.New("CometBFT block consensus parameters are required")
 	}
 	if params.Block.MaxBytes != types.MaxBlockBytes {
 		return fmt.Errorf("CometBFT max block bytes must equal %d", types.MaxBlockBytes)
 	}
-	if params.Block.MaxGas != int64(blockGasLimit) {
-		return fmt.Errorf("CometBFT max block gas must equal %d", blockGasLimit)
+	if params.Block.MaxGas != int64(genesis.BlockGasLimit) {
+		return fmt.Errorf("CometBFT max block gas must equal %d", genesis.BlockGasLimit)
 	}
 	if params.Validator == nil || len(params.Validator.PubKeyTypes) != 1 || params.Validator.PubKeyTypes[0] != cmtsecp256k1.KeyType {
 		return errors.New("CometBFT validators must use only secp256k1 public keys")
 	}
 	if params.Abci != nil && params.Abci.VoteExtensionsEnableHeight != 0 {
-		return errors.New("vote extensions are disabled in protocol version 1")
+		return fmt.Errorf("vote extensions are disabled in %s", genesis.Protocol)
 	}
 	if params.Evidence == nil || params.Evidence.MaxAgeNumBlocks <= 0 || params.Evidence.MaxAgeDuration <= 0 {
 		return errors.New("positive CometBFT evidence retention is required")
 	}
 	if params.Evidence.MaxBytes <= 0 || params.Evidence.MaxBytes > maxEvidenceBytes {
 		return fmt.Errorf("CometBFT evidence max bytes must be between 1 and %d", maxEvidenceBytes)
+	}
+	if genesis.Protocol == ProtocolVersionV2 {
+		policy := genesis.ValidatorPolicy
+		if policy == nil {
+			return errors.New("protocol version 2 validator policy is missing")
+		}
+		if params.Evidence.MaxAgeNumBlocks != policy.EvidenceMaxAgeNumBlocks ||
+			int64(params.Evidence.MaxAgeDuration) != policy.EvidenceMaxAgeDurationNanos {
+			return errors.New("CometBFT evidence retention does not match the protocol version 2 validator policy")
+		}
+		if params.Version == nil || params.Version.App != AppVersionV2 {
+			return fmt.Errorf("CometBFT application version must equal %d", AppVersionV2)
+		}
 	}
 	return nil
 }
@@ -331,44 +426,59 @@ func ValidateConsensusParams(params *cmtproto.ConsensusParams, blockGasLimit uin
 	return validateConsensusParams(params, blockGasLimit)
 }
 
-func bindGenesisValidators(updates []abcitypes.ValidatorUpdate, expected []string) (map[string]string, error) {
+func ValidateGenesisConsensusParams(params *cmtproto.ConsensusParams, genesis GenesisDocument) error {
+	if _, err := validateGenesisDocument(genesis); err != nil {
+		return err
+	}
+	return validateConsensusParamsForGenesis(params, genesis)
+}
+
+func bindGenesisValidators(
+	updates []abcitypes.ValidatorUpdate,
+	expected []string,
+) (map[string]string, []state.ValidatorIdentity, error) {
 	if len(updates) == 0 || len(updates) != len(expected) {
-		return nil, errors.New("CometBFT genesis validators must exactly match ChainLab validators")
+		return nil, nil, errors.New("CometBFT genesis validators must exactly match ChainLab validators")
 	}
 	if len(updates) > types.MaxValidators {
-		return nil, fmt.Errorf("genesis validator set exceeds %d entries", types.MaxValidators)
+		return nil, nil, fmt.Errorf("genesis validator set exceeds %d entries", types.MaxValidators)
 	}
 	bindings := make(map[string]string, len(updates))
+	identities := make([]state.ValidatorIdentity, 0, len(updates))
 	accounts := make([]string, 0, len(updates))
 	for index, update := range updates {
 		if update.Power != 1 {
-			return nil, fmt.Errorf("genesis validator %d must have voting power 1", index)
+			return nil, nil, fmt.Errorf("genesis validator %d must have voting power 1", index)
 		}
 		compressed := update.PubKey.GetSecp256K1()
 		account, err := chaincrypto.AddressFromCompressedPublicKey(compressed)
 		if err != nil {
-			return nil, fmt.Errorf("genesis validator %d: %w", index, err)
+			return nil, nil, fmt.Errorf("genesis validator %d: %w", index, err)
 		}
 		consensusAddress := cmtsecp256k1.PubKey(compressed).Address()
 		key := hex.EncodeToString(consensusAddress)
 		if _, exists := bindings[key]; exists {
-			return nil, fmt.Errorf("genesis validator %d has a duplicate consensus address", index)
+			return nil, nil, fmt.Errorf("genesis validator %d has a duplicate consensus address", index)
 		}
 		bindings[key] = account
+		identities = append(identities, state.ValidatorIdentity{
+			Account: account, ConsensusAddress: key, PublicKey: hex.EncodeToString(compressed),
+			Power: update.Power, ActiveHeight: 1,
+		})
 		accounts = append(accounts, account)
 	}
 	sort.Strings(accounts)
 	expected = append([]string(nil), expected...)
 	sort.Strings(expected)
 	if len(accounts) != len(expected) {
-		return nil, errors.New("CometBFT genesis validator count does not match ChainLab state")
+		return nil, nil, errors.New("CometBFT genesis validator count does not match ChainLab state")
 	}
 	for index := range accounts {
 		if accounts[index] != expected[index] {
-			return nil, errors.New("CometBFT genesis validator accounts do not match ChainLab state")
+			return nil, nil, errors.New("CometBFT genesis validator accounts do not match ChainLab state")
 		}
 	}
-	return bindings, nil
+	return bindings, identities, nil
 }
 
 func (a *Application) Query(_ context.Context, req *abcitypes.RequestQuery) (*abcitypes.ResponseQuery, error) {
@@ -411,6 +521,33 @@ func (a *Application) Query(_ context.Context, req *abcitypes.RequestQuery) (*ab
 			return response, nil
 		}
 		value, err := hash.CanonicalBytes(a.committed.store.GetAccount(address))
+		if err != nil {
+			return nil, err
+		}
+		response.Key = []byte(address)
+		response.Value = value
+	case "/validator":
+		if a.genesis.Protocol != ProtocolVersionV2 {
+			response.Code = CodeUnsupported
+			response.Log = "validator lifecycle queries require protocol version 2"
+			return response, nil
+		}
+		address, err := chaincrypto.NormalizeAddress(string(req.Data))
+		if err != nil || address != string(req.Data) {
+			response.Code = CodeInvalidRequest
+			response.Log = "validator query requires a canonical account address"
+			return response, nil
+		}
+		identity, found := a.committed.store.ValidatorIdentityByAccount(address)
+		if !found {
+			response.Code = CodeInvalidRequest
+			response.Log = "validator identity is unknown"
+			return response, nil
+		}
+		value, err := hash.CanonicalBytes(struct {
+			Identity state.ValidatorIdentity `json:"identity"`
+			Stake    uint64                  `json:"stake"`
+		}{Identity: identity, Stake: a.committed.store.StakeOf(address)})
 		if err != nil {
 			return nil, err
 		}
@@ -536,7 +673,7 @@ func (a *Application) Close() error {
 	return a.persistence.Close()
 }
 
-func (a *Application) proposerLocked(address []byte) (string, error) {
+func (a *Application) proposerLocked(address []byte, height int64) (string, error) {
 	if len(address) != cmtcrypto.AddressSize {
 		return "", errors.New("proposal has an invalid proposer address")
 	}
@@ -544,7 +681,20 @@ func (a *Application) proposerLocked(address []byte) (string, error) {
 	if !exists {
 		return "", errors.New("proposal proposer is not in the fixed validator set")
 	}
+	if a.genesis.Protocol == ProtocolVersionV2 {
+		identity, exists := a.committed.store.ValidatorIdentityByConsensusAddress(hex.EncodeToString(address))
+		if !exists || !validatorIdentityActive(identity, height) {
+			return "", errors.New("proposal proposer is not active at this height")
+		}
+	}
 	return proposer, nil
+}
+
+func appVersion(protocol string) uint64 {
+	if protocol == ProtocolVersionV2 {
+		return AppVersionV2
+	}
+	return AppVersion
 }
 
 func applicationHash(commitment applicationCommitment) []byte {

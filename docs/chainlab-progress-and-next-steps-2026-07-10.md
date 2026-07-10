@@ -1,6 +1,6 @@
 # ChainLab Progress And Next Steps
 
-Status date: 2026-07-10
+Status date: 2026-07-11
 Branch: `feature/own-chain-mvp`
 Project: `D:\blockchain-chain-lab`
 
@@ -128,7 +128,20 @@ Verification coverage includes smart-account and delegated-EOA end-to-end rotati
 - Snapshot format 1 is canonical, bounded to 512 MiB, split into exact 1 MiB chunks, and binds genesis, height, app hash, state root, content hash, document checksum, proposer bindings, state, transactions, and receipts. Direct tests cover multi-chunk out-of-order import, untrusted app hashes, corrupt content, restore failure, restart, and stable advertised chunks across rotation.
 - Socket mode is deliberately locked to Comet's bounded `flood` mempool. CometBFT v0.39.3 defines `InsertTx`/`ReapTxs` on its interfaces and client but does not dispatch them in the socket server, so app-mempool-over-socket is not claimed. The direct app-side mempool tests remain useful but cover a different transport boundary.
 - The app hash binds height and block identity, so it changes for every empty block. `create_empty_blocks=false` would still trigger unbounded proof-block production; generated nodes instead configure explicit continuous blocks with a 750 ms commit interval. Normal restart keeps Comet's default `double_sign_check_height=0`; setting it positive rejects any retained validator key found in recent valid commits, while monotonic H/R/S protection remains in `priv_validator_state.json`.
-- This is an initial crash-consistent application/network lifecycle, not a completed production network. The current storage writes a complete per-key state version each height and retains all versions; incremental MVCC/deltas, migrations, pruned/full/archive modes, backup/restore drills, evidence-to-slashing, validator epochs, partitions, Byzantine faults, rolling upgrades, remote signing, and Linux load/soak evidence remain open production gates.
+- This is an initial crash-consistent application/network lifecycle, not a completed production network. The current storage writes a complete per-key state version each height and retains all versions; incremental MVCC/deltas, migrations, pruned/full/archive modes, backup/restore drills, partitions, Byzantine faults, rolling upgrades, remote signing, and Linux load/soak evidence remain open production gates.
+
+### ChainLab V2 Evidence Slashing And Epoch Removal
+
+- `chainlab-v2` is an explicit protocol version; `chainlab-v1` retains its fixed-set app-hash and lifecycle semantics.
+- V2 genesis commits epoch length, duplicate-vote and light-client-attack slash ratios, and both Comet evidence-retention dimensions. `InitChain` requires exact retention and app-version agreement.
+- Genesis secp256k1 public keys are persistently bound to Comet consensus addresses, ChainLab accounts, equal voting power, and active/inactive height intervals.
+- Comet-authenticated misbehavior is independently checked against the historical validator set. The application mirrors Comet v0.39.3's expiry rule: evidence expires only after both block and duration limits are exceeded.
+- Evidence runs before transaction simulation, preventing same-block stake movement from escaping punishment. Slash arithmetic is overflow-safe and rounds fractional base units upward.
+- One tombstone per ChainLab validator and offence height prevents proof reordering, evidence-type changes, restart, replay, or state sync from punishing the same offence twice.
+- Removal is scheduled at the first eligible epoch boundary. The power-zero `ValidatorUpdate` is returned exactly two heights earlier because CometBFT applies an update from height `H` at `H+2`; proposer and vote-extension eligibility change at the same effective height.
+- Validator lifecycle, offences, scheduled removals, epoch, and validator root are bound into state/app hashes, Pebble manifests, startup checks, application snapshots, and state sync.
+- Direct tests cover deterministic penalty, repeat evidence, policy/age rejection, epoch timing, removed-proposer rejection, restart, and snapshot restore. A real four-validator network broadcasts a correctly signed duplicate-vote proof through Comet RPC and converges from four active validators to three with identical application state.
+- V2 currently supports evidence-driven removal only. Join, voluntary leave, re-entry, stake-derived power, unbonding, rewards, and governance transitions remain disabled. The normative behavior and exclusions are in `docs/chainlab-v2-validator-lifecycle.md`.
 
 ## Verification Evidence
 
@@ -144,7 +157,9 @@ go test -count=2 -run 'FreshProcess' ./internal/core
 go test -count=1 ./internal/abci
 go test -count=1 ./internal/cometnode
 go test -count=3 -run 'FourValidatorProcessesRestartReplayBlockAndStateSync' ./internal/cometnode
+go test -count=3 -run 'FourValidatorV2EvidenceSlashingAndEpochRemoval' ./internal/cometnode
 go test -count=3 -run 'Snapshot' ./internal/abci
+go test -count=3 -run 'ValidatorV2' ./internal/abci
 go test -count=2 -run 'ABCIExecutionMatchesAcrossFreshProcesses' ./internal/abci
 go build -o $env:TEMP\chainlab-abci-production-verify.exe ./cmd/chainlab-abci
 go build -o $env:TEMP\chainlab-comet-production-verify.exe ./cmd/chainlab-comet
@@ -161,6 +176,8 @@ Coverage includes the 64/65 WASM call-depth boundary, recursion/indirect/tail-ca
 
 The final ABCI++ application tree additionally passed full unit tests, the full race suite, a focused ABCI race run, vet, tidy-diff, production CLI build, demo, two-run ABCI/core fresh-process vectors, and an offline `govulncheck` v1.6.0 scan with zero reachable vulnerabilities. That earlier application-only graph contained advisories in three imported packages and 20 required modules, but no vulnerable symbol was called.
 
+The integrated v2 validator-lifecycle tree passed the full unit and race suites, vet, tidy-diff, all three production builds, demo, three repeated direct v2 lifecycle suites, and three repeated real four-validator evidence/removal process runs. The final fixed `govulncheck` v1.6.0 scan again reports zero reachable vulnerabilities, two imported-package advisories, and 20 required-module advisories whose vulnerable symbols are not called. The first scan attempt failed only because `proxy.golang.org` was unreachable over IPv6; the successful rerun used the signed `sum.golang.org` database through the documented `goproxy.cn` sumdb endpoint.
+
 Adding the complete Comet node initially made three advisories symbol-reachable: QPACK trailer expansion in `quic-go` v0.59.0, gRPC missing-leading-slash authorization bypass in v1.79.2, and an unpatched `pion/dtls/v2` AES-GCM nonce issue pulled through Comet's compiled libp2p/WebRTC path even though ChainLab disables libp2p at runtime. The dependency floor now uses `quic-go` v0.59.1 and gRPC-Go v1.79.3, while `go-libp2p` v0.48.0 migrates the STUN/WebRTC graph to `pion/dtls/v3` and removes `dtls/v2` from the main module. The four-validator process suite, full tests, race, vet, and all builds pass with these overrides. A final fixed `govulncheck` v1.6.0 scan reports zero reachable vulnerabilities; two imported-package and 20 required-module advisories remain without reachable vulnerable symbols.
 
 Windows `go mod verify` is not recorded as green for the CometBFT tree. The signed v0.39.3 module zip contains `.github/workflows/e2e-nightly-38x.yml ` with a trailing space; Windows normalizes the extracted cache path to the no-space name, so Go reports the directory as modified even though the file bytes match. Both `goproxy.cn/sumdb/sum.golang.org` and `sum.golang.google.cn` returned the committed module sums `h1:UegHXskZNomsijmm29nL5NkeXtnzkme6fg+q1hPQnEI=` and `h1:PmNfvtw256BC41ad0FABts236CSZnvZ0kjPOciBwTdM=`. The initial 60 non-Comet ABCI checksum lines match CometBFT v0.39.3's upstream `go.sum`; the larger node graph and security overrides were resolved through signed sumdb. A clean Linux module-cache verification remains part of the Linux/amd64 validator release gate.
@@ -171,8 +188,8 @@ Ordered by consensus and security dependency rather than feature visibility:
 
 1. **Authoritative CometBFT ABCI++ lifecycle**
    - The `chainlab-v1` lifecycle now runs across real socket and Comet node processes. Four-validator tests cover proposal/finalize/commit, full-mesh P2P, transaction gossip, 3-of-4 progress, Comet restart, block sync, durable app restart, fresh-app replay, destructive-data state sync, common-height block/app-hash equality, and current state-root convergence. Keep the local harness for deterministic differential testing only.
-   - Complete validator updates, evidence-to-slashing rules, rolling restart/upgrade, partition, delayed/missing proposer, equivocation, and Byzantine fault tests as one versioned production lifecycle.
-   - Design finalized epoch transitions before enabling validator join/leave.
+   - Preserve the implemented v2 evidence slashing and epoch-removal path while adding certified admission/re-entry, stake-derived power, unbonding/rewards, rolling restart/upgrade, partition, delayed/missing proposer, light-client-attack, and broader Byzantine fault tests.
+   - Keep validator join/leave disabled until their certified transition and economics rules are explicitly activated.
 
 2. **Crash-consistent transactional storage**
    - Preserve the implemented Pebble synchronous-WAL batch that atomically binds versioned per-key state, height, app hash, transactions, receipts, and block index; replace full-state-per-height rewriting with an incremental MVCC/delta design before load testing large state.
@@ -203,9 +220,9 @@ Ordered by consensus and security dependency rather than feature visibility:
 
 ## Next Immediate Work
 
-1. Design certified validator epoch transitions and evidence-to-slashing behavior before enabling validator updates, then exercise them through real Comet processes.
+1. Extend the v2 evidence-removal foundation into certified admission/re-entry, stake-to-power, unbonding/rewards, tombstone retention, governance authority, key rotation, and rolling-upgrade rules without re-enabling ad hoc join/leave transactions.
 2. Replace full-state-per-height persistence with bounded incremental MVCC/deltas and add migrations, pruned/full/archive retention, historical reads, compaction, backup/restore, and broader power-loss evidence.
-3. Extend the multi-process network with partitions, missing proposers, equivocation, rolling restart/upgrade, and Byzantine fault cases.
+3. Extend the multi-process network with partitions, missing proposers, light-client attacks, simultaneous removals, rolling restart/upgrade, and other Byzantine fault cases.
 4. Establish the Linux/amd64 validator release target, remote-signer boundary, JIT/RSS limits, reproducible build artifacts, and baseline operational telemetry.
 
 Asset and deployment work stays downstream of the production core: specify the native gas asset and economics, define a production fungible-token standard and issuer controls, add wallet/indexer/explorer/oracle/DEX interfaces, select an audited IBC/bridge or issuer-native stablecoin path, and size validator/sentry/RPC/archive hardware from Linux multi-process load results rather than estimates.
