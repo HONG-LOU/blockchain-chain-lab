@@ -1,6 +1,6 @@
 # ChainLab
 
-ChainLab is a production-target sovereign blockchain implemented in Go. The repository contains the evolving protocol implementation and a local deterministic network used to verify it before the CometBFT-based production network is activated.
+ChainLab is a production-target sovereign blockchain implemented in Go. The repository contains the evolving protocol implementation and a local PoA development network used to replay and verify its deterministic application state transition before the CometBFT-based production network is activated. Local block timestamps and hashes are not cross-run deterministic.
 
 It currently implements:
 
@@ -14,10 +14,10 @@ It currently implements:
 - transaction, receipt, and state roots
 - native smart-contract runtime with `counter.v1` and `token.v1`
 - sandboxed WASM contract runtime with built-in `wasm.echo.v1` and chain-state uploaded modules through `wasm.upload`
-- deterministic WASM resource metering for uploaded bytecode size, static function-body fuel, and ChainLab host ABI storage/event/arg/return usage, plus a wazero context deadline that interrupts runaway guest execution
+- versioned Wasmtime WASM execution with deterministic guest fuel, shared host gas, fixed declared memory/table resources, bounded host I/O/events/writes, and atomic rollback
 - EIP-1559-style local fee market with block base fee, gas used/limit, base fee burn, priority fee rewards, and legacy `gas_price` compatibility
 - native paymaster-sponsored transactions: the user signs the operation and consumes their own nonce, while a paymaster signs an authorization and pays gas
-- ChainLab-native batched user operations: one signed transaction can atomically execute multiple transfer/call operations with one sender nonce and one fee settlement
+- ChainLab-native batched user operations: one signed transaction can atomically execute up to 128 transfer/call operations with one sender nonce and one fee settlement
 - ChainLab-native smart contract accounts through `account.v1`: a contract account holds the balance and nonce while its stored owner signs with the transaction `signer`
 - ChainLab-native multisig smart accounts through `multisig.v1`: a contract account enforces an owner threshold with multiple transaction authorizations
 - ChainLab-native EIP-7702-style delegated EOAs through `set_code`: an EOA keeps its address, balance, and nonce while delegating authorization to `account.v1`
@@ -29,7 +29,7 @@ It currently implements:
 - EVM-shaped JSON-RPC read subset: `web3_clientVersion`, `net_version`, `net_listening`, `eth_chainId`, `eth_accounts`, `eth_coinbase`, `eth_mining`, `eth_hashrate`, `eth_syncing`, `eth_blockNumber`, `eth_getBalance`, `eth_getTransactionCount`, `eth_getCode`, `eth_getStorageAt`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockReceipts`, `eth_getBlockByNumber`, `eth_getBlockByHash`, block transaction-count/index lookups, `eth_feeHistory`, `eth_getLogs`, `eth_call`, `eth_estimateGas`
 - minimal ABI-compatible `eth_call` support for native read methods, including Solidity-style calldata selectors for `get()`, `symbol()`, `owner()`, and `balanceOf(address)`, plus ABI-shaped `uint256`, `address`, and dynamic `string` return data
 - EVM-style `safe` and `finalized` block tags for block and log reads
-- pending nonce calculation, pending/queued txpool inspection, nonce-gap queued transaction promotion, 10 percent same-sender/same-nonce transaction replacement in pending or queued pools, pending/queued transaction lookup, pending transaction filter polling, and WebSocket pending transaction hash subscriptions for uncommitted transactions
+- bounded pending/queued txpool inspection and nonce promotion: 2 MiB per transaction, 128 MiB/4,096 transactions total, 2,048 queued, 64 per sender, nonce gap 64, plus principal-safe 10 percent same-nonce replacement, pending lookup/filter polling, and WebSocket notifications
 - raw transaction submission for ChainLab-native signed JSON and a limited Ethereum EIP-1559 type-2 transfer subset
 - devnet faucet that creates a normal proposer-signed transfer into the mempool
 - local block explorer pages for head, finality, recent blocks, transactions, accounts, validators, mempool, and indexed recent contract events
@@ -38,9 +38,11 @@ It currently implements:
 - local multi-node devnet sync over HTTP peers: transaction relay, block import, produced-block broadcast, and finality vote relay
 - CLI commands for keys, genesis, nodes, signed transfers, block production, queries, and demos
 
-The current implementation is not yet approved for public mainnet launch. Mainnet requires the production gates in [the production technology roadmap](docs/current-blockchain-tech-roadmap.md): deterministic execution, CometBFT ABCI++ consensus/networking, transactional storage, protocol upgrades, security testing, economics, and operational evidence.
+The current implementation is not yet approved for public mainnet launch. [Mainstream Chain Capability And Production Gates](docs/mainstream-chain-capability-and-production-gates-2026-07-10.md) is the authoritative gate set; [the production technology roadmap](docs/current-blockchain-tech-roadmap.md) orders the implementation work. Mainnet requires deterministic execution, CometBFT ABCI++ consensus/networking, transactional storage, protocol upgrades, security testing, economics, and operational evidence.
 
 ## Verify
+
+The minimum supported toolchain is Go 1.25.12. The patch floor is security-sensitive because earlier Go 1.25 standard libraries contain vulnerabilities reachable from ChainLab's HTTP, TLS, URL, and template paths.
 
 ```powershell
 go test ./...
@@ -239,9 +241,11 @@ go run ./cmd/chainlab query call --rpc http://127.0.0.1:8547 --to <contract-addr
 
 The upload receipt contains `receipt.code_id`; use that value in the deploy command. Use `--wasm-file <path>` or `--bytecode <0x...>` to upload your own module instead of the built-in `--example echo` module. The built-in `wasm.echo.v1` code id is still available for quick local tests without an upload transaction.
 
-Uploaded WASM runs inside a restricted wazero sandbox and only receives ChainLab host functions for args, contract storage, return data, and events. The module must implement ChainLab's current `deploy`, `call`, and `read` exports. This is not CosmWasm compatibility yet.
+Uploaded WASM runs inside the version-pinned Wasmtime-Go v46.0.1 runtime and only receives ChainLab host functions for args, contract storage, return data, and events. Metering version `chainlab-wasm-v1` requires fixed-size memory and tables, rejects start/WASI/unknown ABI, and requires `deploy`, `call`, and `read` exports. This is a ChainLab-specific ABI, not CosmWasm compatibility.
 
-WASM upload gas scales with bytecode size. WASM deploy and write-call receipts include deterministic extra gas for module instantiation, static exported function-body fuel, argument copies, storage reads/writes, return data, and emitted event bytes. Runtime calls also run with wazero context cancellation so an infinite loop is interrupted instead of pinning the node. The timeout is a sandbox safety valve, not deterministic gas accounting.
+WASM upload gas scales with bytecode size. Every invocation charges the admitted original module bytes plus declared memory pages and table elements before instantiation, then uses Wasmtime fuel for guest execution and the same remaining budget for host calls and copied bytes. Infinite loops terminate by deterministic out-of-fuel, not a wall-clock deadline. Direct runtime calls are atomic; transaction execution owns an outer rollback store and avoids a second whole-state copy per contract call.
+
+This runtime implementation is not a mainnet-readiness claim. Production activation still requires a supported Linux/amd64 artifact and golden replay vectors, deterministic call-depth handling or equivalent cross-target proof, hard JIT-memory lifecycle bounds, failed-transaction fee/nonce semantics, versioned native-contract gas, protocol-wide fatal runtime-fault halt and deterministic recovery/upgrade behavior, reproducible builds/checksums/SBOM, fuzz/load evidence, upgrade activation, and external review.
 
 Stake, join, and leave the validator set:
 
@@ -304,6 +308,8 @@ go run ./cmd/chainlab query call --rpc http://127.0.0.1:8547 --to <contract-addr
 go run ./cmd/chainlab query estimate-gas --rpc http://127.0.0.1:8547 --type call --to <contract-address>
 ```
 
+`estimate-gas` / `eth_estimateGas` currently returns static/base schedules plus byte-scaled WASM upload cost. It does not simulate dynamic WASM deploy, call, or batch-call execution, so the 50,000-gas call estimate can be below actual `chainlab-wasm-v1` consumption.
+
 ## HTTP API
 
 - `GET /health`
@@ -322,7 +328,7 @@ go run ./cmd/chainlab query estimate-gas --rpc http://127.0.0.1:8547 --type call
 - `GET /param/{key}`
 - `GET /tx/{hash}`
 - `GET /txpool`
-- `POST /tx` for signed transactions, including `transfer`, `batch`, `set_code`, `account.session_key`, `account.recovery`, `deploy`, `call`, `wasm.upload`, staking, validator, and governance transaction types. Future-nonce transactions are accepted into a node-local queued pool and promoted when earlier nonces arrive. If a pending or queued transaction already has the same sender and nonce, ChainLab accepts a replacement only when the authorization principal matches and the new legacy gas price or both EIP-1559 fee caps are bumped by at least 10 percent.
+- `POST /tx` for signed transactions, including `transfer`, `batch`, `set_code`, `account.session_key`, `account.recovery`, `deploy`, `call`, `wasm.upload`, staking, validator, and governance transaction types. Future-nonce transactions within a gap of 64 are accepted into a bounded node-local queued pool and promoted when earlier nonces arrive. If a pending or queued transaction already has the same sender and nonce, ChainLab accepts a replacement only when the authorization principal matches, the new legacy gas price or both EIP-1559 fee caps are bumped by at least 10 percent, and the replacement remains within the pool byte limit.
 - `POST /tx/raw`
 - `POST /faucet`
 - `POST /chain/produce`
@@ -345,4 +351,4 @@ The production sequence is:
 - protocol upgrades, inclusion proofs, protected validator signing, metrics/alerts, backup/recovery, fuzz/property/race/fault/load/soak validation
 - economics, governance security, wallet/SDK/indexer/token/oracle/interoperability ecosystem and staged public testnets
 
-See [ChainLab Production Technology Roadmap](docs/current-blockchain-tech-roadmap.md) and [Mainstream Chain Capability And Production Gates](docs/mainstream-chain-capability-and-production-gates-2026-07-10.md) for the authoritative gates and upstream references.
+See [Mainstream Chain Capability And Production Gates](docs/mainstream-chain-capability-and-production-gates-2026-07-10.md) for the authoritative gates and upstream references. [ChainLab Production Technology Roadmap](docs/current-blockchain-tech-roadmap.md) is the navigational implementation order.

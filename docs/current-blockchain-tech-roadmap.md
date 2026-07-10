@@ -15,7 +15,7 @@ The detailed mainstream-chain comparison, official version references, and gate-
 - **Application protocol:** ChainLab's deterministic Go state-transition function, versioned transaction/receipt/state formats, account model, gas, governance, and native account abstraction.
 - **Production consensus and networking:** CometBFT ABCI++ for rounds, locks, finality, validator evidence, P2P, mempool proposal flow, block sync, and state sync.
 - **Application storage:** a maintained transactional KV engine with atomic block commits, WAL/reopen guarantees, versioned schemas, checksums, snapshots, and pruned/full/archive profiles.
-- **Execution:** native contracts plus a maintained WASM runtime configured with fully deterministic instruction and resource metering. Wall-clock timeout is never allowed to decide consensus state.
+- **Execution:** native contracts plus version-pinned Wasmtime-Go v46.0.1. Metering version `chainlab-wasm-v1` uses deterministic fuel, a shared host-gas budget, paid fixed memory/table declarations, strict structural/ABI admission, bounded stack/I/O/events/writes, read isolation, and rollback. No wall-clock outcome participates in WASM execution, but native contracts still require a versioned gas schedule before production.
 - **Interoperability:** light-client-based protocols such as IBC or a separately audited bridge design; no ad hoc multisig bridge.
 - **Operations:** protected validator signing, sentry topology, reproducible releases, metrics/alerts, backups, upgrade coordination, incident response, and disaster exercises.
 
@@ -24,7 +24,7 @@ The existing local PoA node remains a fast development/differential-test harness
 ## Gate 1: Protocol Correctness And Determinism
 
 - Complete guardian recovery for `account.v1` and delegated EOAs with role isolation, bounded voting rounds, threshold timelock, guardian-funded actions, session invalidation, replay/persistence, CLI, and indexed events.
-- Replace WASM wall-clock-dependent outcomes with deterministic instruction fuel and explicit memory, table, stack, host-I/O, log, read/write, and storage-growth limits.
+- Complete the remaining WASM production evidence around `chainlab-wasm-v1`: deterministic guest call depth, charged failed transactions, hard JIT-memory lifecycle bounds, protocol-wide fatal runtime-fault halt and deterministic recovery/upgrade behavior, a pinned Linux/amd64 golden replay environment, reproducible native builds/checksums/SBOM, malicious corpora/fuzzing, load tests, activation, and external review. Do not admit other validator targets without matching evidence.
 - Version every consensus encoding and reject non-canonical or ambiguous transactions.
 - Add state/transaction/receipt inclusion proofs and an independent verifier.
 - Add cross-process and supported cross-architecture replay vectors; identical blocks must produce identical receipts and roots.
@@ -49,7 +49,9 @@ The existing local PoA node remains a fast development/differential-test harness
 ## Gate 4: Resource Governance And Security
 
 - Bound transaction/payload/code/storage/event sizes, txpool capacity, per-account quotas, RPC body/batch/log ranges, subscriptions, peers, and internal queues.
-- Add deterministic eviction, txpool journal/restart, authorization-principal-safe replacement, rate limits, timeouts, and WebSocket backpressure.
+- Add deterministic eviction, txpool journal/restart, authorization-principal-safe replacement, incremental byte accounting, orphaned-transaction reinsertion after reorg, rate limits, timeouts, and WebSocket backpressure.
+- Bound imported block/transaction and RPC/peer body bytes before decoding or deep-copying, and cap proposal simulation/revalidation work by a deterministic gas/work budget.
+- Meter native contract work and state-dependent operations, charge included OOG/trap failures, hard-bound compiled native memory, and prevent pending replay from recompiling uploaded modules.
 - Fuzz raw/native/Ethereum decoding, RPC parsing, WASM validation, proposal processing, state transition, snapshot import, and reorg/replay paths.
 - Property-test and race-test consensus-adjacent state. Run fault injection, malicious corpora, benchmarks, sustained load, soak tests, and dependency/vulnerability scans in CI.
 - Maintain a threat model for validator keys, owner/session/guardian/paymaster keys, governance, upgrades, RPC, database, supply, oracles, and interoperability.
@@ -72,7 +74,7 @@ The existing local PoA node remains a fast development/differential-test harness
 
 ## Release Environments
 
-1. **Deterministic local network:** fast protocol and differential tests.
+1. **Local application replay network:** fast deterministic state-transition and differential tests; wall-clock block hashes are not cross-run deterministic.
 2. **Multi-process private network:** CometBFT, durable DB, state sync, faults, upgrades, monitoring.
 3. **Public persistent testnet:** external validators, wallets, indexers, load, security program, repeated upgrades and disaster drills.
 4. **Incentivized adversarial testnet:** economic attacks, validator churn, governance and incident exercises.
