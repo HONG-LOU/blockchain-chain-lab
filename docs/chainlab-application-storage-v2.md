@@ -16,7 +16,7 @@ The database identity binds the protocol, canonical genesis hash, and exact stor
 - `v2/version/<height>/delta_set/` stores changed or created entries.
 - `v2/version/<height>/delta_delete/` stores deleted-entry markers.
 - `v2/version/<height>/checkpoint/` stores a complete flat state at checkpoint heights.
-- Each height manifest binds the commitment, app hash, flat-state root/count, delta root/counts, checkpoint root/count, proposer bindings, transaction count, receipt count, and checksum.
+- Each height manifest binds the commitment, app hash, versioned flat-state root/count, delta root/counts, checkpoint root/count, proposer bindings, transaction count, receipt count, and checksum. Legacy V2/V3 heights use `chainlab-flat-root-v1`; V4 heights use `chainlab-sparse-root-v1`.
 - `meta/current` and `meta/min_history` identify the published height and earliest retained height.
 - `index/block/` maps each retained non-genesis block hash to its height.
 
@@ -26,7 +26,7 @@ Accounts and account-storage keys are separate flat entries. Contract code, stak
 
 The in-memory `state.Store` now keeps a detached semantic mutation journal for account metadata, individual account-storage keys, contract code, stake, proposals, parameters, the validator slice, validator identities, and validator offences. Store clones carry the journal through proposal simulation, failed-transaction ante settlement, and finalization. Only a successful durable application commit resets it.
 
-Ordinary heights encode delta sets/deletes only from that journal and compare each touched entry with the previous flat value, so a write restored to its prior value produces no disk delta. The projected live map reuses immutable prior entry bytes and is published only after the synchronized Pebble batch succeeds. Checkpoint heights still flatten the complete state and compare the journal delta with a complete diff; any omitted or extra mutation fails closed before the batch is committed. Genesis creation, V1 migration, state-sync restore, checkpoints, flat-state integrity roots, and V3 full-state proof roots still require complete-state work. The implementation therefore closes mutation-aware delta generation and write amplification, but does not claim the complete commit path is O(mutations).
+Ordinary heights encode delta sets/deletes only from that journal and compare each touched entry with the previous flat value, so a write restored to its prior value produces no disk delta. The projected live map reuses immutable prior entry bytes and is published only after the synchronized Pebble batch succeeds. V4 also updates a copy-on-write sparse accumulator for touched entries and publishes the overlay only after persistence. Checkpoint heights flatten the complete state, compare the journal delta with a complete diff, rebuild the complete sparse tree, and require the incremental and rebuilt roots to match. Genesis creation, V1 migration, state-sync restore, checkpoints, and legacy V2/V3 flat/proof roots still require complete-state work. Ordinary V4 state-root maintenance is O(mutations * 256), but end-to-end production throughput remains unclaimed.
 
 ## Retention Profiles
 
@@ -80,6 +80,8 @@ Snapshot import is independent of historical retention. Restoring a trusted appl
 
 Startup verifies database identity, profile, current/minimum range, current live state, current version artifacts, and the retained checkpoint boundary. Loading a version verifies canonical keys and values, manifest identity/checksum/counts, disjoint delta sets/deletes, delta root, checkpoint root, transaction and receipt continuity, reconstructed state/app hash, and block index.
 
+Manifests written before root versioning omit `state_flat_root_protocol` and remain canonical legacy flat-root manifests. New V2/V3 and V4 heights can coexist in one retained history, and each height is validated with its recorded protocol. Restart, historical reconstruction, and state-sync restore rebuild the in-memory sparse accumulator from the flat state.
+
 Automated coverage includes:
 
 - single-key mutation delta generation against 1,000 account-storage entries, no-op collapse, deletion, clone/reset isolation, and 200 sequential semantic-write/full-diff comparisons;
@@ -90,7 +92,8 @@ Automated coverage includes:
 - state-sync history rebasing and restart;
 - missing live entries, receipt corruption, corrupt deltas, and invalid history boundaries;
 - abrupt process exit and forced termination around a multi-megabyte synchronized batch.
+- V4 incremental sparse roots versus complete checkpoint rebuilds, mixed V3/V4 archive history, persistence-failure overlay isolation, restart, and snapshot/state-sync restoration.
 
 On Windows/amd64 development hardware, the committed benchmark for one changed storage key measured mutation-journal delta construction at about 1.3–1.7 microseconds and 1.35 KiB/12 allocations for both 1,000 and 4,096 existing entries. The former full snapshot/flatten/diff path measured about 1.46 milliseconds/1.1 MiB/8,054 allocations at 1,000 entries and 6.2 milliseconds/4.7 MiB/about 32,865 allocations at 4,096 entries. These figures isolate delta construction only; they are not Linux capacity, end-to-end commit latency, or mainnet throughput evidence.
 
-Remaining production gates include an incremental authenticated flat-state/proof-root accumulator, nonblocking bounded historical/proof reads, production-size migration/compaction/load/soak evidence on Linux, wider power-loss and disk-full phases, an operator restore drill, external monotonic rollback protection, and metrics/alerts.
+The copy-on-write sparse single-key benchmark is approximately 225-250 microseconds and 96.6 KiB/281 allocations at both 1,000 and 4,096 leaves on the same Windows/amd64 host. This demonstrates state-size-independent update cost at those sizes, not production latency; allocation reduction remains useful. Remaining production gates include nonblocking bounded historical/proof reads, production-size migration/compaction/load/soak evidence on Linux, wider power-loss and disk-full phases, an operator restore drill, external monotonic rollback protection, and metrics/alerts.

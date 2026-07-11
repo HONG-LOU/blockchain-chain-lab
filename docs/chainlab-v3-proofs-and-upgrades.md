@@ -19,7 +19,7 @@ The canonical V2 application genesis can contain:
 The implemented schedule rules are deliberately narrow:
 
 - the source genesis must be `chainlab-v2`;
-- exactly one `chainlab-v3` target is currently supported;
+- the first target must be `chainlab-v3`; an optional later `chainlab-v4` target is supported;
 - activation height `A` must be at least 2;
 - the schedule is part of the canonical genesis hash and application database identity;
 - changing or removing it after database creation fails the genesis-identity check.
@@ -28,7 +28,7 @@ At `FinalizeBlock(A-1)`, the application still commits V2 roots and returns a Co
 
 `Info.AppVersion` reports the version required for the next height. This matters after committing `A-1` and during replay/state sync. A binary whose configured maximum is 2 refuses proposal processing/finalization before publishing the version-3 update, and refuses restart once the next height requires version 3. This models fail-closed incompatible-node behavior; real release compatibility still needs signed binary/version policy and an operator rolling-upgrade runbook.
 
-The current schedule is genesis-committed. Runtime governance scheduling and multiple sequential upgrades remain disabled.
+The current schedule is genesis-committed. Runtime governance scheduling remains disabled. V4 behavior is specified separately in [ChainLab V4 Sparse State](chainlab-v4-sparse-state.md).
 
 ## Merkle Protocol
 
@@ -94,13 +94,12 @@ Automated coverage includes:
 - immutable schedule/policy cloning and modified-genesis database rejection;
 - current and retained-height transaction/receipt/account proofs;
 - Pebble restart and V3 snapshot/state-sync proof recovery;
-- a real four-validator CometBFT network crossing the scheduled height, converging on app version 3, and independently verifying account proofs from all four nodes.
+- a real four-validator CometBFT network crossing V3 and V4 scheduled heights, converging on app version 4, and independently verifying sparse account proofs from all four nodes.
 
 ## Remaining Gates
 
-- Upgrade scheduling is genesis-only; governance authority, deposits/timelocks, multi-upgrade sequencing, binary manifests, rollback windows, and an operator rolling-upgrade drill are not implemented.
-- Public state queries expose account inclusion only. Storage/code/validator proof routes, non-inclusion proofs, sparse authenticated state, proof pagination, and proof-size/load policy remain open.
-- Root/proof construction currently materializes full leaf sets. Mutation-aware authenticated state and an isolated bounded historical proof service are required for production scale.
+- Upgrade scheduling is genesis-only; governance authority, deposits/timelocks, binary manifests, rollback windows, and an operator rolling-upgrade drill are not implemented.
+- V3 state proof construction materializes the full leaf set. V4 provides mutation-aware sparse state and broader state/non-membership routes; an isolated bounded historical proof service and production proof load policy remain open.
 - `chainlab-proof` is a standalone minimal verifier in this repository, not a second independently implemented client or external audit.
 - A trusted-header/light-client, bridge, wallet, and explorer verification path is not yet integrated.
 - External monotonic data-directory rollback protection remains open.

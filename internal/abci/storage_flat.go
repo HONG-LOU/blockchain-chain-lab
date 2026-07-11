@@ -10,6 +10,7 @@ import (
 	"chainlab/internal/hash"
 	"chainlab/internal/state"
 	"chainlab/internal/types"
+	chainproof "chainlab/pkg/proof"
 )
 
 const (
@@ -442,6 +443,155 @@ func flatStateRoot(flat flatState) (string, error) {
 		entries = append(entries, flatCommitmentEntry(entry))
 	}
 	return hash.Hex(entries)
+}
+
+func buildFlatSparseTree(flat flatState) (*chainproof.SparseTree, error) {
+	tree, err := chainproof.NewSparseTree(chainproof.DomainSparseState)
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range flatEntriesSorted(flat) {
+		if err := setFlatSparseEntry(tree, entry); err != nil {
+			return nil, err
+		}
+	}
+	return tree, nil
+}
+
+func buildStoreSparseTree(store *state.Store) (*chainproof.SparseTree, error) {
+	if store == nil {
+		return nil, errors.New("state store is required")
+	}
+	flat, err := flattenStateSnapshot(store.Snapshot())
+	if err != nil {
+		return nil, err
+	}
+	return buildFlatSparseTree(flat)
+}
+
+func applyFlatDeltaToSparseTree(
+	tree *chainproof.SparseTree,
+	sets flatState,
+	deletes []flatStateEntry,
+) error {
+	if tree == nil {
+		return errors.New("sparse state tree is required")
+	}
+	for _, entry := range deletes {
+		if err := tree.Delete(flatStateID(entry.Kind, entry.Key)); err != nil {
+			return err
+		}
+	}
+	for _, entry := range flatEntriesSorted(sets) {
+		if err := setFlatSparseEntry(tree, entry); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applyStoreMutationsToSparseTree(tree *chainproof.SparseTree, store *state.Store) error {
+	if tree == nil || store == nil {
+		return errors.New("sparse state tree and store are required")
+	}
+	mutations := store.Mutations()
+	for _, address := range mutations.Accounts {
+		account, exists := store.AccountMetadata(address)
+		value := persistedAccount{}
+		if exists {
+			value = persistedAccount{
+				Address: account.Address, Balance: account.Balance, Nonce: account.Nonce,
+				CodeID: account.CodeID, DelegatedCodeID: account.DelegatedCodeID,
+			}
+		}
+		if err := setFlatSparseValue(tree, flatKindAccount, []byte(address), value, exists); err != nil {
+			return err
+		}
+	}
+	for _, mutation := range mutations.AccountStorage {
+		key, err := hash.CanonicalBytes(persistedAccountStorageKey{Address: mutation.Address, Key: mutation.Key})
+		if err != nil {
+			return err
+		}
+		value, exists := store.GetStorageWithExists(mutation.Address, mutation.Key)
+		if err := setFlatSparseValue(tree, flatKindAccountStorage, key, value, exists); err != nil {
+			return err
+		}
+	}
+	for _, codeID := range mutations.ContractCodes {
+		value, exists := store.ContractCode(codeID)
+		if err := setFlatSparseValue(tree, flatKindCode, []byte(codeID), value, exists); err != nil {
+			return err
+		}
+	}
+	for _, address := range mutations.Stakes {
+		value, exists := store.StakeWithExists(address)
+		if err := setFlatSparseValue(tree, flatKindStake, []byte(address), value, exists); err != nil {
+			return err
+		}
+	}
+	for _, proposalID := range mutations.Proposals {
+		value, exists := store.ProposalWithExists(proposalID)
+		if err := setFlatSparseValue(tree, flatKindProposal, []byte(proposalID), value, exists); err != nil {
+			return err
+		}
+	}
+	for _, key := range mutations.Params {
+		value, exists := store.ParamWithExists(key)
+		if err := setFlatSparseValue(tree, flatKindParam, []byte(key), value, exists); err != nil {
+			return err
+		}
+	}
+	if mutations.Validators {
+		if err := setFlatSparseValue(
+			tree, flatKindValidators, []byte(flatSingletonKey), store.Validators(), true,
+		); err != nil {
+			return err
+		}
+	}
+	for _, consensusAddress := range mutations.ValidatorIdentities {
+		value, exists := store.ValidatorIdentityByConsensusAddress(consensusAddress)
+		if err := setFlatSparseValue(
+			tree, flatKindValidatorIdentity, []byte(consensusAddress), value, exists,
+		); err != nil {
+			return err
+		}
+	}
+	for _, key := range mutations.ValidatorOffences {
+		value, exists := store.ValidatorOffence(key)
+		if err := setFlatSparseValue(tree, flatKindValidatorOffence, []byte(key), value, exists); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func setFlatSparseValue(
+	tree *chainproof.SparseTree,
+	kind string,
+	key []byte,
+	value any,
+	exists bool,
+) error {
+	if !validFlatStateKind(kind) || len(key) == 0 {
+		return errors.New("sparse state mutation kind or key is invalid")
+	}
+	if !exists {
+		return tree.Delete(flatStateID(kind, key))
+	}
+	raw, err := hash.CanonicalBytes(value)
+	if err != nil {
+		return err
+	}
+	return setFlatSparseEntry(tree, flatStateEntry{Kind: kind, Key: append([]byte(nil), key...), Value: raw})
+}
+
+func setFlatSparseEntry(tree *chainproof.SparseTree, entry flatStateEntry) error {
+	leaf, err := hash.CanonicalBytes(flatCommitmentEntry(entry))
+	if err != nil {
+		return err
+	}
+	return tree.Set(flatStateID(entry.Kind, entry.Key), leaf)
 }
 
 func flatDeltaRoot(sets flatState, deletes []flatStateEntry) (string, error) {

@@ -321,7 +321,7 @@ func TestFourValidatorV2EvidenceSlashingAndEpochRemoval(t *testing.T) {
 	})
 }
 
-func TestFourValidatorV3ScheduledUpgradeAndProofs(t *testing.T) {
+func TestFourValidatorV3V4ScheduledUpgradesAndSparseProofs(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping multi-process CometBFT upgrade network in short mode")
 	}
@@ -329,15 +329,18 @@ func TestFourValidatorV3ScheduledUpgradeAndProofs(t *testing.T) {
 		t.Skip("the process-boundary test is covered by the non-race run; package logic remains race-tested")
 	}
 	basePort := availablePortRange(t, 12)
-	root := filepath.Join(t.TempDir(), "protocol-v3-network")
+	root := filepath.Join(t.TempDir(), "protocol-v4-network")
 	policy := chainabci.DefaultValidatorPolicy()
 	policy.EpochLength = 4
 	network, err := InitializeNetwork(NetworkConfig{
-		OutputRoot: root, ChainID: "chainlab-v3-upgrade", ValidatorCount: 4,
+		OutputRoot: root, ChainID: "chainlab-v4-upgrade", ValidatorCount: 4,
 		GenesisTime:  time.Date(2026, time.July, 10, 12, 0, 0, 0, time.UTC),
 		ABCIBasePort: basePort, RPCBasePort: basePort + 4, P2PBasePort: basePort + 8,
 		ApplicationProtocol: chainabci.ProtocolVersionV2, ValidatorPolicy: &policy,
-		ProtocolUpgrades: []chainabci.ProtocolUpgrade{{Height: 4, Protocol: chainabci.ProtocolVersionV3}},
+		ProtocolUpgrades: []chainabci.ProtocolUpgrade{
+			{Height: 4, Protocol: chainabci.ProtocolVersionV3},
+			{Height: 6, Protocol: chainabci.ProtocolVersionV4},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -353,7 +356,7 @@ func TestFourValidatorV3ScheduledUpgradeAndProofs(t *testing.T) {
 	})
 	for index, generatedNode := range network.Nodes {
 		home := filepath.Join(root, generatedNode.Home)
-		processes = append(processes, startHelperProcess(t, root, fmt.Sprintf("v3-app-%d", index), map[string]string{
+		processes = append(processes, startHelperProcess(t, root, fmt.Sprintf("v4-app-%d", index), map[string]string{
 			processHelperModeEnv: "abci", processHelperGenesisEnv: filepath.Join(home, filepath.FromSlash(AppGenesisPath)),
 			processHelperListenEnv:  generatedNode.ABCIListenAddress,
 			processHelperDataDirEnv: filepath.Join(root, filepath.FromSlash(generatedNode.ApplicationData)),
@@ -363,7 +366,7 @@ func TestFourValidatorV3ScheduledUpgradeAndProofs(t *testing.T) {
 		waitForTCP(t, generatedNode.ABCIListenAddress, 15*time.Second)
 	}
 	for index, generatedNode := range network.Nodes {
-		processes = append(processes, startHelperProcess(t, root, fmt.Sprintf("v3-comet-%d", index), map[string]string{
+		processes = append(processes, startHelperProcess(t, root, fmt.Sprintf("v4-comet-%d", index), map[string]string{
 			processHelperModeEnv: "comet", processHelperHomeEnv: filepath.Join(root, generatedNode.Home),
 		}))
 	}
@@ -377,7 +380,7 @@ func TestFourValidatorV3ScheduledUpgradeAndProofs(t *testing.T) {
 	}
 	waitForRPCReady(t, clients, 45*time.Second)
 	waitForPeerMesh(t, clients, 45*time.Second)
-	_ = waitForConsistentNetworkState(t, clients, 5, network.Nodes[0].ChainLabAddress, 0, 45*time.Second)
+	_ = waitForConsistentNetworkState(t, clients, 7, network.Nodes[0].ChainLabAddress, 0, 45*time.Second)
 
 	for index, client := range clients {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -393,7 +396,7 @@ func TestFourValidatorV3ScheduledUpgradeAndProofs(t *testing.T) {
 		if err := json.Unmarshal(appResult.Response.Value, &commitment); err != nil {
 			t.Fatal(err)
 		}
-		if commitment.Protocol != chainabci.ProtocolVersionV3 {
+		if commitment.Protocol != chainabci.ProtocolVersionV4 {
 			t.Fatalf("node %d protocol = %q", index, commitment.Protocol)
 		}
 		ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
@@ -402,22 +405,22 @@ func TestFourValidatorV3ScheduledUpgradeAndProofs(t *testing.T) {
 		if err != nil || proofResult.Response.Code != chainabci.CodeOK {
 			t.Fatalf("node %d proof query=%+v err=%v", index, proofResult, err)
 		}
-		var envelope chainproof.Envelope
+		var envelope chainproof.SparseEnvelope
 		if err := json.Unmarshal(proofResult.Response.Value, &envelope); err != nil {
 			t.Fatal(err)
 		}
 		expectedStateKey := "account:" + base64.RawURLEncoding.EncodeToString([]byte(network.Nodes[0].ChainLabAddress))
-		if _, err := chainproof.VerifyEnvelope(
+		if _, exists, err := chainproof.VerifySparseEnvelope(
 			commitment.StateRoot, proofResult.Response.Height,
 			chainproof.KindState, expectedStateKey, envelope,
-		); err != nil {
-			t.Fatalf("node %d proof verification: %v", index, err)
+		); err != nil || !exists {
+			t.Fatalf("node %d proof verification exists=%t err=%v", index, exists, err)
 		}
 		proofHeight := proofResult.Response.Height
 		ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
 		params, err := client.ConsensusParams(ctx, &proofHeight)
 		cancel()
-		if err != nil || params == nil || params.ConsensusParams.Version.App != chainabci.AppVersionV3 {
+		if err != nil || params == nil || params.ConsensusParams.Version.App != chainabci.AppVersionV4 {
 			t.Fatalf("node %d consensus params=%+v err=%v", index, params, err)
 		}
 	}

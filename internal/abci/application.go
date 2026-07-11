@@ -17,6 +17,7 @@ import (
 	"chainlab/internal/hash"
 	"chainlab/internal/state"
 	"chainlab/internal/types"
+	chainproof "chainlab/pkg/proof"
 
 	abcitypes "github.com/cometbft/cometbft/abci/types"
 	cmtcrypto "github.com/cometbft/cometbft/crypto"
@@ -29,9 +30,11 @@ const (
 	ProtocolVersion   = "chainlab-v1"
 	ProtocolVersionV2 = "chainlab-v2"
 	ProtocolVersionV3 = "chainlab-v3"
+	ProtocolVersionV4 = "chainlab-v4"
 	AppVersion        = 1
 	AppVersionV2      = 2
 	AppVersionV3      = 3
+	AppVersionV4      = 4
 	Codespace         = "chainlab"
 
 	CodeOK              uint32 = 0
@@ -143,6 +146,7 @@ type Application struct {
 
 type committedState struct {
 	store      *state.Store
+	flatTree   *chainproof.SparseTree
 	commitment applicationCommitment
 	appHash    []byte
 }
@@ -224,6 +228,13 @@ func NewApplication(config Config) (*Application, error) {
 			return nil, err
 		}
 		committed = persisted.committed
+	}
+	committed.flatTree, err = buildStoreSparseTree(committed.store)
+	if err != nil {
+		if persistence != nil {
+			_ = persistence.Close()
+		}
+		return nil, fmt.Errorf("build committed sparse state tree: %w", err)
 	}
 	if required := appVersionAtHeight(genesis, nextApplicationHeight(committed.commitment.Height)); required > maxAppVersion {
 		if persistence != nil {
@@ -392,7 +403,12 @@ func (a *Application) InitChain(_ context.Context, req *abcitypes.RequestInitCha
 		if err := nextStore.InitializeValidatorLifecycle(identities); err != nil {
 			return nil, err
 		}
+		nextTree := a.committed.flatTree.Clone()
+		if err := applyStoreMutationsToSparseTree(nextTree, nextStore); err != nil {
+			return nil, fmt.Errorf("update genesis sparse state tree: %w", err)
+		}
 		nextCommitted.store = nextStore
+		nextCommitted.flatTree = nextTree
 		nextCommitted.commitment.StateRoot = nextStore.Root()
 		nextCommitted.commitment.ValidatorRoot = nextStore.ValidatorRoot()
 		nextCommitted.appHash = applicationHash(nextCommitted.commitment)
@@ -401,6 +417,7 @@ func (a *Application) InitChain(_ context.Context, req *abcitypes.RequestInitCha
 		a.haltErr = err
 		return nil, err
 	}
+	nextCommitted.flatTree = nextCommitted.flatTree.Publish()
 	a.committed = nextCommitted
 	a.proposers = proposers
 	a.initialized = true
@@ -634,10 +651,34 @@ func (a *Application) Query(_ context.Context, req *abcitypes.RequestQuery) (*ab
 		}
 		response.Key = []byte("storage")
 		response.Value = value
-	case "/proof/transaction", "/proof/receipt", "/proof/account":
+	case "/proof/transaction", "/proof/receipt", "/proof/account", "/proof/state":
 		if !protocolUsesMerkleProofs(queryState.commitment.Protocol) {
 			response.Code = CodeUnsupported
-			response.Log = "inclusion proofs require chainlab-v3"
+			response.Log = "inclusion proofs require chainlab-v3 or later"
+			return response, nil
+		}
+		if req.Path == "/proof/state" && !protocolUsesSparseState(queryState.commitment.Protocol) {
+			response.Code = CodeUnsupported
+			response.Log = "general state proofs require chainlab-v4"
+			return response, nil
+		}
+		if protocolUsesSparseState(queryState.commitment.Protocol) &&
+			(req.Path == "/proof/account" || req.Path == "/proof/state") {
+			envelope, key, err := a.buildSparseProofEnvelope(req.Path, req.Data, height, queryState)
+			if err != nil {
+				if errors.Is(err, ErrInvalidProofQuery) {
+					response.Code = CodeInvalidRequest
+					response.Log = err.Error()
+					return response, nil
+				}
+				return nil, err
+			}
+			value, err := hash.CanonicalBytes(envelope)
+			if err != nil {
+				return nil, err
+			}
+			response.Key = key
+			response.Value = value
 			return response, nil
 		}
 		envelope, key, err := a.buildProofEnvelope(
@@ -705,6 +746,7 @@ func (a *Application) Commit(context.Context, *abcitypes.RequestCommit) (*abcity
 		a.haltErr = err
 		return nil, err
 	}
+	a.candidate.state.flatTree = a.candidate.state.flatTree.Publish()
 	a.committed = a.candidate.state
 	a.committedTxs = cloneTransactions(a.candidate.txs)
 	a.committedReceipts = cloneReceipts(a.candidate.receipts)
@@ -828,6 +870,8 @@ func (a *Application) proposerLocked(address []byte, height int64) (string, erro
 
 func appVersion(protocol string) uint64 {
 	switch protocol {
+	case ProtocolVersionV4:
+		return AppVersionV4
 	case ProtocolVersionV3:
 		return AppVersionV3
 	case ProtocolVersionV2:

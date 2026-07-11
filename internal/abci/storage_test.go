@@ -245,14 +245,26 @@ func TestPersistenceFailureHaltsWithoutPublishingCandidate(t *testing.T) {
 	if _, err := application.InitChain(context.Background(), fixture.initRequest()); err != nil {
 		t.Fatal(err)
 	}
+	committedSparseRoot := application.committed.flatTree.Root()
+	receiver := "0x1111111111111111111111111111111111111111"
+	tx := signFixtureTransaction(t, fixture.key, types.Transaction{
+		ChainID: fixture.genesis.ChainID, Type: types.TxTransfer,
+		From: fixture.account, To: receiver, Nonce: 0, Value: 1,
+		GasLimit: 21_000, GasPrice: 1,
+	})
 	finalized, err := application.FinalizeBlock(context.Background(), &abcitypes.RequestFinalizeBlock{
 		Hash: blockHash(1), Height: 1, ProposerAddress: fixture.proposerAddress,
+		Txs: [][]byte{rawFixtureTransaction(t, tx)},
 	})
 	if err != nil || len(finalized.AppHash) != 32 {
 		t.Fatalf("finalize = %+v err=%v", finalized, err)
 	}
 	if _, err := application.Commit(context.Background(), &abcitypes.RequestCommit{}); err == nil || !strings.Contains(err.Error(), "injected persistence failure") {
 		t.Fatalf("commit error = %v", err)
+	}
+	if application.committed.flatTree.Root() != committedSparseRoot ||
+		application.candidate.state.flatTree.Root() == committedSparseRoot {
+		t.Fatal("failed persistence published or failed to isolate the sparse candidate overlay")
 	}
 	info, err := application.Info(context.Background(), &abcitypes.RequestInfo{})
 	if err != nil {

@@ -50,6 +50,7 @@ func runInit(args []string, out io.Writer) error {
 	p2pBasePort := flags.Int("p2p-base-port", 26680, "first P2P port")
 	applicationProtocol := flags.String("application-protocol", chainabci.ProtocolVersion, "application genesis protocol: chainlab-v1 or chainlab-v2")
 	upgradeV3Height := flags.Int64("upgrade-v3-height", 0, "activate chainlab-v3 proof roots at this height")
+	upgradeV4Height := flags.Int64("upgrade-v4-height", 0, "activate chainlab-v4 sparse state roots at this height")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -67,6 +68,11 @@ func runInit(args []string, out io.Writer) error {
 	var upgrades []chainabci.ProtocolUpgrade
 	if *upgradeV3Height != 0 {
 		upgrades = []chainabci.ProtocolUpgrade{{Height: *upgradeV3Height, Protocol: chainabci.ProtocolVersionV3}}
+	}
+	if *upgradeV4Height != 0 {
+		upgrades = append(upgrades, chainabci.ProtocolUpgrade{
+			Height: *upgradeV4Height, Protocol: chainabci.ProtocolVersionV4,
+		})
 	}
 	document, err := cometnode.InitializeNetwork(cometnode.NetworkConfig{
 		OutputRoot:          *output,

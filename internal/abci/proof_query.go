@@ -1,9 +1,11 @@
 package abci
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	chaincrypto "chainlab/internal/crypto"
 	"chainlab/internal/types"
@@ -85,6 +87,68 @@ func (a *Application) buildProofEnvelope(
 		return chainproof.Envelope{}, nil, fmt.Errorf("verify generated inclusion proof: %w", err)
 	}
 	return envelope, responseKey, nil
+}
+
+func (a *Application) buildSparseProofEnvelope(
+	path string,
+	data []byte,
+	height int64,
+	committed committedState,
+) (chainproof.SparseEnvelope, []byte, error) {
+	if committed.flatTree == nil {
+		return chainproof.SparseEnvelope{}, nil, errors.New("sparse state tree is unavailable")
+	}
+	var kind string
+	var key []byte
+	var responseKey []byte
+	switch path {
+	case "/proof/account":
+		address, err := chaincrypto.NormalizeAddress(string(data))
+		if err != nil || address != string(data) {
+			return chainproof.SparseEnvelope{}, nil, fmt.Errorf("%w: account address is not canonical", ErrInvalidProofQuery)
+		}
+		kind = flatKindAccount
+		key = []byte(address)
+		responseKey = []byte(address)
+	case "/proof/state":
+		var err error
+		kind, key, err = parseFlatProofKey(string(data))
+		if err != nil {
+			return chainproof.SparseEnvelope{}, nil, fmt.Errorf("%w: %v", ErrInvalidProofQuery, err)
+		}
+		responseKey = append([]byte(nil), data...)
+	default:
+		return chainproof.SparseEnvelope{}, nil, fmt.Errorf("%w: unsupported sparse proof path", ErrInvalidProofQuery)
+	}
+	sparseKey := flatStateID(kind, key)
+	proof, err := committed.flatTree.Prove(sparseKey)
+	if err != nil {
+		return chainproof.SparseEnvelope{}, nil, err
+	}
+	envelope := chainproof.SparseEnvelope{
+		Protocol: chainproof.SparseEnvelopeProtocol,
+		Kind:     chainproof.KindState, Height: height,
+		Root: committed.commitment.StateRoot, Key: sparseKey, Proof: proof,
+	}
+	if _, _, err := chainproof.VerifySparseEnvelope(
+		envelope.Root, envelope.Height, envelope.Kind, envelope.Key, envelope,
+	); err != nil {
+		return chainproof.SparseEnvelope{}, nil, fmt.Errorf("verify generated sparse state proof: %w", err)
+	}
+	return envelope, responseKey, nil
+}
+
+func parseFlatProofKey(value string) (string, []byte, error) {
+	kind, encoded, found := strings.Cut(value, ":")
+	if !found || !validFlatStateKind(kind) || encoded == "" {
+		return "", nil, errors.New("flat-state proof key must be kind:base64url-key")
+	}
+	key, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil || len(key) == 0 || base64.RawURLEncoding.EncodeToString(key) != encoded ||
+		flatStateID(kind, key) != value {
+		return "", nil, errors.New("flat-state proof key is not canonical")
+	}
+	return kind, key, nil
 }
 
 func proofQueryIndex(data []byte, count int) (uint64, error) {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -63,6 +64,56 @@ func TestLoadProofEnvelopeRejectsUnknownOrNonCanonicalJSON(t *testing.T) {
 			}
 			if _, err := loadProofEnvelope(path); err == nil {
 				t.Fatal("invalid proof JSON was accepted")
+			}
+		})
+	}
+}
+
+func TestRunVerifiesSparseMembershipAndNonMembership(t *testing.T) {
+	tree, err := chainproof.NewSparseTree(chainproof.DomainSparseState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "account:YQ"
+	leaf := []byte(`{"kind":"account","key":"YQ","value":"MQ"}`)
+	if err := tree.Set(key, leaf); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name   string
+		key    string
+		exists bool
+	}{
+		{name: "membership", key: key, exists: true},
+		{name: "non-membership", key: "account:Yg", exists: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			proof, err := tree.Prove(test.key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			envelope := chainproof.SparseEnvelope{
+				Protocol: chainproof.SparseEnvelopeProtocol, Kind: chainproof.KindState,
+				Height: 8, Root: tree.Root(), Key: test.key, Proof: proof,
+			}
+			raw, err := json.Marshal(envelope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "proof.json")
+			if err := os.WriteFile(path, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			err = run([]string{
+				"--proof", path, "--root", tree.Root(), "--height", "8",
+				"--kind", "state", "--key", test.key,
+			}, &out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(out.String(), "exists="+strconv.FormatBool(test.exists)) {
+				t.Fatalf("output = %q", out.String())
 			}
 		})
 	}

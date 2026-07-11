@@ -155,7 +155,16 @@ Verification coverage includes smart-account and delegated-EOA end-to-end rotati
 - `cmd/chainlab-proof` parses a bounded canonical envelope and requires a separately supplied trusted root. It rejects unknown/non-canonical/tampered protocol, domain, index, total, leaf, sibling, and state-key data.
 - Direct tests cover activation timing, app-version negotiation, simulated old-binary rejection, schedule immutability, restart, historical proof replay, and V3 snapshot/state sync. Fixed proof and fresh-process vectors prevent silent root drift.
 - A real four-validator Comet network crosses the scheduled height, reports app version 3 in consensus params, converges on V3 commitments, and returns independently verified account proofs from all nodes.
-- This is a genesis-committed single upgrade and inclusion-proof foundation. Runtime governance scheduling, multi-upgrade/rollback policy, sparse/non-inclusion proofs, public routes beyond account state, trusted light-client integration, a second implementation, and production proof load remain open. Exact behavior is in `docs/chainlab-v3-proofs-and-upgrades.md`.
+- V3 remains the exact-total inclusion-proof layer. The later V4 upgrade adds sparse state and broader proof routes; runtime governance scheduling, rollback policy, trusted light-client integration, a second implementation, and production proof load remain open. Exact V3 behavior is in `docs/chainlab-v3-proofs-and-upgrades.md`.
+
+### ChainLab V4 Mutation-Aware Sparse State
+
+- A canonical V2 genesis may append a later V4 activation after V3. Heights are strictly increasing, the full schedule is bound to genesis/database identity, and version-3 binaries fail closed before publishing the version-4 transition.
+- V4 retains V3 transaction/receipt roots and replaces only state with a fixed-depth, domain-separated sparse Merkle map. Compressed proofs support both membership and non-membership.
+- FinalizeBlock and Store V2 update copy-on-write accumulators from the mutation journal. Overlays publish only after durable persistence succeeds; ordinary commits do not rebuild or sort complete state.
+- Store manifests explicitly distinguish legacy flat roots from V4 sparse roots. Checkpoints validate the mutation journal, rebuild the complete sparse tree, and cross-check the incremental root. Old manifests without a root-protocol field remain valid.
+- `/proof/account` supports existing and absent addresses at V4 heights. `/proof/state` covers account storage, code, stake, proposals, parameters, validators, identities, and offences. `chainlab-proof` automatically verifies V3 inclusion or V4 sparse envelopes.
+- Fixed vectors and direct tests cover incremental/full equivalence, tampering, non-canonical proofs, schedule negotiation, persistence failure isolation, mixed historical roots, restart, snapshot/state sync, and four-validator V3/V4 activation. Exact behavior is in `docs/chainlab-v4-sparse-state.md`.
 
 ## Verification Evidence
 
@@ -206,6 +215,8 @@ The mutation-aware Store V2 tree passed full unit and race suites, a focused sta
 
 Adding the complete Comet node initially made three advisories symbol-reachable: QPACK trailer expansion in `quic-go` v0.59.0, gRPC missing-leading-slash authorization bypass in v1.79.2, and an unpatched `pion/dtls/v2` AES-GCM nonce issue pulled through Comet's compiled libp2p/WebRTC path even though ChainLab disables libp2p at runtime. The dependency floor now uses `quic-go` v0.59.1 and gRPC-Go v1.79.3, while `go-libp2p` v0.48.0 migrates the STUN/WebRTC graph to `pion/dtls/v3` and removes `dtls/v2` from the main module. The four-validator process suite, full tests, race, vet, and all builds pass with these overrides. A final fixed `govulncheck` v1.6.0 scan reports zero reachable vulnerabilities; two imported-package and 20 required-module advisories remain without reachable vulnerable symbols.
 
+The V4 sparse-state tree passed the full unit and race suites, vet, tidy-diff, ten repeated proof/verifier runs, three repeated direct V4/fresh-process suites, three repeated real four-validator V3/V4 upgrade networks, four production builds, demo, and diff checks. Coverage includes old-binary and modified-schedule rejection, membership/non-membership tampering, incremental root versus checkpoint rebuild, persistence-failure overlay isolation, mixed V3/V4 archive history, restart, snapshot/state sync, and fixed sparse/V4 fresh-process vectors. A Windows/amd64 copy-on-write single-leaf benchmark is approximately 225-250 microseconds and 96.6 KiB for both 1,000 and 4,096 leaves, demonstrating state-size-independent update cost at these sizes while leaving allocation optimization and production load/soak open. Fixed `govulncheck` v1.6.0 reports zero reachable vulnerabilities; two imported-package and 20 required-module advisories do not reach vulnerable symbols.
+
 Windows `go mod verify` is not recorded as green for the CometBFT tree. The signed v0.39.3 module zip contains `.github/workflows/e2e-nightly-38x.yml ` with a trailing space; Windows normalizes the extracted cache path to the no-space name, so Go reports the directory as modified even though the file bytes match. Both `goproxy.cn/sumdb/sum.golang.org` and `sum.golang.google.cn` returned the committed module sums `h1:UegHXskZNomsijmm29nL5NkeXtnzkme6fg+q1hPQnEI=` and `h1:PmNfvtw256BC41ad0FABts236CSZnvZ0kjPOciBwTdM=`. The initial 60 non-Comet ABCI checksum lines match CometBFT v0.39.3's upstream `go.sum`; the larger node graph and security overrides were resolved through signed sumdb. A clean Linux module-cache verification remains part of the Linux/amd64 validator release gate.
 
 ## Current Production Blockers
@@ -219,12 +230,12 @@ Ordered by consensus and security dependency rather than feature visibility:
 
 2. **Crash-consistent transactional storage**
    - Preserve the implemented Pebble V2 atomic batch, flat live state, per-height deltas/checkpoints, deterministic migration, explicit profiles, historical reads, compaction, backup/open, state-sync rebase, and corruption/kill recovery evidence.
-   - Preserve mutation-aware delta generation and checkpoint full-diff cross-checks; add incremental authenticated flat/proof roots, production-size compaction/retention measurements, an operational restore drill, additional filesystem power-loss phases, and external rollback protection.
+   - Preserve mutation-aware delta generation, V4 incremental authenticated state, and checkpoint full-diff/root cross-checks; add production-size compaction/retention measurements, an operational restore drill, additional filesystem power-loss phases, and external rollback protection.
    - Replace sticky-halt handling of post-rename directory-sync uncertainty with an authoritative WAL/transaction recovery decision. Avoid rewriting the complete JSON snapshot for every partial vote.
 
 3. **Protocol lifecycle and proofs**
-   - Preserve the implemented genesis-scheduled V2-to-V3 activation, Comet app-version update, deterministic root migration, incompatible-node rejection, transaction/receipt/account proofs, and standalone trusted-root verifier.
-   - Add runtime-authorized multi-upgrade scheduling, binary compatibility manifests, rollback limits, broader sparse/non-inclusion state proofs, light-client integration, a second independent implementation, and operator rolling-upgrade evidence.
+   - Preserve genesis-scheduled V2-to-V3-to-V4 activation, Comet app-version updates, deterministic root migrations, incompatible-node rejection, exact-total and sparse proofs, and the standalone trusted-root verifier.
+   - Add runtime-authorized scheduling, binary compatibility manifests, rollback limits, light-client integration, a second independent implementation, isolated proof serving, and operator rolling-upgrade evidence.
 
 4. **Validator signing and node rollback protection**
    - Add remote signer/HSM support with monotonic last-sign state, single-instance locking, and slashing-safe recovery.

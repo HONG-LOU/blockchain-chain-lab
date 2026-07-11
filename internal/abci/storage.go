@@ -18,6 +18,7 @@ import (
 	"chainlab/internal/hash"
 	"chainlab/internal/state"
 	"chainlab/internal/types"
+	chainproof "chainlab/pkg/proof"
 
 	"github.com/cockroachdb/pebble"
 )
@@ -48,15 +49,16 @@ type applicationPersistence interface {
 }
 
 type applicationDB struct {
-	db            *pebble.DB
-	path          string
-	genesis       GenesisDocument
-	genesisHash   string
-	profile       StorageProfile
-	currentHeight int64
-	minimumHeight int64
-	currentFlat   flatState
-	closed        bool
+	db              *pebble.DB
+	path            string
+	genesis         GenesisDocument
+	genesisHash     string
+	profile         StorageProfile
+	currentHeight   int64
+	minimumHeight   int64
+	currentFlat     flatState
+	currentFlatTree *chainproof.SparseTree
+	closed          bool
 }
 
 type applicationStoreIdentity struct {
@@ -364,7 +366,10 @@ func validatePersistedApplicationState(
 	if commitment.Height < 0 || commitment.GasLimit != genesis.BlockGasLimit {
 		return errors.New("persisted application commitment height or gas limit is invalid")
 	}
-	expectedStateRoot, err := stateRootForProtocol(commitment.Protocol, value.committed.store)
+	expectedStateRoot, err := stateRootForCommitted(commitment.Protocol, value.committed)
+	if err != nil && protocolUsesSparseState(commitment.Protocol) && value.committed.flatTree == nil {
+		expectedStateRoot, err = stateRootForProtocol(commitment.Protocol, value.committed.store)
+	}
 	if err != nil {
 		return err
 	}
@@ -903,6 +908,7 @@ func clonePersistedApplicationState(value persistedApplicationState) persistedAp
 	return persistedApplicationState{
 		committed: committedState{
 			store:      value.committed.store.Clone(),
+			flatTree:   value.committed.flatTree.Clone(),
 			commitment: value.committed.commitment,
 			appHash:    cloneBytes(value.committed.appHash),
 		},

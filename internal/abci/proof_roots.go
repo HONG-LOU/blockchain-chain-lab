@@ -39,11 +39,28 @@ func stateRootForProtocol(protocol string, store *state.Store) (string, error) {
 	if !protocolUsesMerkleProofs(protocol) {
 		return store.Root(), nil
 	}
+	if protocolUsesSparseState(protocol) {
+		tree, err := buildStoreSparseTree(store)
+		if err != nil {
+			return "", err
+		}
+		return tree.Root(), nil
+	}
 	_, leaves, err := stateMerkleLeaves(store)
 	if err != nil {
 		return "", err
 	}
 	return chainproof.Root(chainproof.DomainState, leaves)
+}
+
+func stateRootForCommitted(protocol string, committed committedState) (string, error) {
+	if !protocolUsesSparseState(protocol) {
+		return stateRootForProtocol(protocol, committed.store)
+	}
+	if committed.flatTree == nil {
+		return "", errors.New("sparse state tree is required")
+	}
+	return committed.flatTree.Root(), nil
 }
 
 func stateMerkleProof(store *state.Store, kind string, key []byte) (flatStateCommitmentEntry, chainproof.Proof, error) {

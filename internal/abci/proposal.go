@@ -179,7 +179,12 @@ func (a *Application) FinalizeBlock(_ context.Context, req *abcitypes.RequestFin
 	if err != nil {
 		return nil, err
 	}
-	stateRoot, err := stateRootForProtocol(protocol, execution.store)
+	flatTree := a.committed.flatTree.Clone()
+	if err := applyStoreMutationsToSparseTree(flatTree, execution.store); err != nil {
+		return nil, fmt.Errorf("update sparse state tree: %w", err)
+	}
+	candidateState := committedState{store: execution.store, flatTree: flatTree}
+	stateRoot, err := stateRootForCommitted(protocol, candidateState)
 	if err != nil {
 		return nil, err
 	}
@@ -208,6 +213,7 @@ func (a *Application) FinalizeBlock(_ context.Context, req *abcitypes.RequestFin
 	candidate := &blockCandidate{
 		state: committedState{
 			store:      execution.store,
+			flatTree:   flatTree,
 			commitment: commitment,
 			appHash:    applicationHash(commitment),
 		},

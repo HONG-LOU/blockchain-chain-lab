@@ -15,11 +15,16 @@ import (
 	"chainlab/internal/hash"
 	"chainlab/internal/state"
 	"chainlab/internal/types"
+	chainproof "chainlab/pkg/proof"
 
 	"github.com/cockroachdb/pebble"
 )
 
-const applicationStoreProtocolV2 = "chainlab-app-store-v2"
+const (
+	applicationStoreProtocolV2 = "chainlab-app-store-v2"
+	flatRootProtocolV1         = "chainlab-flat-root-v1"
+	sparseFlatRootProtocolV1   = "chainlab-sparse-root-v1"
+)
 
 var (
 	applicationStoreMinimumHistoryKey = []byte("meta/min_history")
@@ -40,24 +45,25 @@ type applicationStoreIdentityV2 struct {
 }
 
 type applicationVersionManifestV2 struct {
-	Protocol             string                `json:"protocol"`
-	GenesisHash          string                `json:"genesis_hash"`
-	Height               int64                 `json:"height"`
-	Initialized          bool                  `json:"initialized"`
-	Commitment           applicationCommitment `json:"commitment"`
-	AppHash              string                `json:"app_hash"`
-	Proposers            map[string]string     `json:"proposers,omitempty"`
-	StateEntryCount      uint64                `json:"state_entry_count"`
-	StateFlatRoot        string                `json:"state_flat_root"`
-	DeltaSetCount        uint64                `json:"delta_set_count"`
-	DeltaDeleteCount     uint64                `json:"delta_delete_count"`
-	DeltaRoot            string                `json:"delta_root"`
-	Checkpoint           bool                  `json:"checkpoint"`
-	CheckpointEntryCount uint64                `json:"checkpoint_entry_count,omitempty"`
-	CheckpointRoot       string                `json:"checkpoint_root,omitempty"`
-	TxCount              uint64                `json:"tx_count"`
-	ReceiptCount         uint64                `json:"receipt_count"`
-	Checksum             string                `json:"checksum"`
+	Protocol              string                `json:"protocol"`
+	GenesisHash           string                `json:"genesis_hash"`
+	Height                int64                 `json:"height"`
+	Initialized           bool                  `json:"initialized"`
+	Commitment            applicationCommitment `json:"commitment"`
+	AppHash               string                `json:"app_hash"`
+	Proposers             map[string]string     `json:"proposers,omitempty"`
+	StateEntryCount       uint64                `json:"state_entry_count"`
+	StateFlatRootProtocol string                `json:"state_flat_root_protocol,omitempty"`
+	StateFlatRoot         string                `json:"state_flat_root"`
+	DeltaSetCount         uint64                `json:"delta_set_count"`
+	DeltaDeleteCount      uint64                `json:"delta_delete_count"`
+	DeltaRoot             string                `json:"delta_root"`
+	Checkpoint            bool                  `json:"checkpoint"`
+	CheckpointEntryCount  uint64                `json:"checkpoint_entry_count,omitempty"`
+	CheckpointRoot        string                `json:"checkpoint_root,omitempty"`
+	TxCount               uint64                `json:"tx_count"`
+	ReceiptCount          uint64                `json:"receipt_count"`
+	Checksum              string                `json:"checksum"`
 }
 
 type applicationMigrationV2 struct {
@@ -166,6 +172,7 @@ func (store *applicationDB) loadOrCreateV2(
 	store.currentHeight = height
 	store.minimumHeight = minimum
 	store.currentFlat = flat
+	store.currentFlatTree = loaded.committed.flatTree
 	if err := store.validateHistoryBoundaryV2(); err != nil {
 		return persistedApplicationState{}, err
 	}
@@ -186,8 +193,12 @@ func (store *applicationDB) initializeV2(value persistedApplicationState) error 
 	if err != nil {
 		return err
 	}
+	flatTree, err := buildFlatSparseTree(flat)
+	if err != nil {
+		return err
+	}
 	empty := make(flatState)
-	manifest, err := store.manifestV2(value, flat, empty, nil, true)
+	manifest, err := store.manifestV2WithTree(value, flat, flatTree, empty, nil, true)
 	if err != nil {
 		return err
 	}
@@ -220,6 +231,7 @@ func (store *applicationDB) initializeV2(value persistedApplicationState) error 
 	store.currentHeight = 0
 	store.minimumHeight = 0
 	store.currentFlat = cloneFlatState(flat)
+	store.currentFlatTree = flatTree
 	return nil
 }
 
@@ -250,6 +262,13 @@ func (store *applicationDB) saveV2(value persistedApplicationState, forceCheckpo
 	if err != nil {
 		return err
 	}
+	if store.currentFlatTree == nil {
+		return errors.New("current sparse state tree is unavailable")
+	}
+	nextTree := store.currentFlatTree.Clone()
+	if err := applyFlatDeltaToSparseTree(nextTree, sets, deletes); err != nil {
+		return err
+	}
 	if checkpoint {
 		complete, err := flattenStateSnapshot(value.committed.store.Snapshot())
 		if err != nil {
@@ -259,8 +278,16 @@ func (store *applicationDB) saveV2(value persistedApplicationState, forceCheckpo
 			return err
 		}
 		next = complete
+		completeTree, err := buildFlatSparseTree(complete)
+		if err != nil {
+			return err
+		}
+		if completeTree.Root() != nextTree.Root() {
+			return errors.New("incremental sparse state root does not match checkpoint rebuild")
+		}
+		nextTree = completeTree
 	}
-	manifest, err := store.manifestV2(value, next, sets, deletes, checkpoint)
+	manifest, err := store.manifestV2WithTree(value, next, nextTree, sets, deletes, checkpoint)
 	if err != nil {
 		return err
 	}
@@ -318,6 +345,7 @@ func (store *applicationDB) saveV2(value persistedApplicationState, forceCheckpo
 	store.currentHeight = height
 	store.minimumHeight = nextMinimum
 	store.currentFlat = next
+	store.currentFlatTree = nextTree.Publish()
 	return nil
 }
 
@@ -336,8 +364,12 @@ func (store *applicationDB) restoreV2(value persistedApplicationState) error {
 	if err != nil {
 		return err
 	}
+	flatTree, err := buildFlatSparseTree(flat)
+	if err != nil {
+		return err
+	}
 	empty := make(flatState)
-	manifest, err := store.manifestV2(value, flat, empty, nil, true)
+	manifest, err := store.manifestV2WithTree(value, flat, flatTree, empty, nil, true)
 	if err != nil {
 		return err
 	}
@@ -379,6 +411,7 @@ func (store *applicationDB) restoreV2(value persistedApplicationState) error {
 	store.currentHeight = height
 	store.minimumHeight = height
 	store.currentFlat = cloneFlatState(flat)
+	store.currentFlatTree = flatTree
 	return nil
 }
 
@@ -389,7 +422,33 @@ func (store *applicationDB) manifestV2(
 	deletes []flatStateEntry,
 	checkpoint bool,
 ) (applicationVersionManifestV2, error) {
-	stateRoot, err := flatStateRoot(flat)
+	flatTree, err := buildFlatSparseTree(flat)
+	if err != nil {
+		return applicationVersionManifestV2{}, err
+	}
+	return store.manifestV2WithTree(value, flat, flatTree, sets, deletes, checkpoint)
+}
+
+func (store *applicationDB) manifestV2WithTree(
+	value persistedApplicationState,
+	flat flatState,
+	flatTree *chainproof.SparseTree,
+	sets flatState,
+	deletes []flatStateEntry,
+	checkpoint bool,
+) (applicationVersionManifestV2, error) {
+	rootProtocol := flatRootProtocolV1
+	var stateRoot string
+	var err error
+	if protocolUsesSparseState(value.committed.commitment.Protocol) {
+		rootProtocol = sparseFlatRootProtocolV1
+		if flatTree == nil {
+			return applicationVersionManifestV2{}, errors.New("sparse state tree is required")
+		}
+		stateRoot = flatTree.Root()
+	} else {
+		stateRoot, err = flatStateRoot(flat)
+	}
 	if err != nil {
 		return applicationVersionManifestV2{}, err
 	}
@@ -402,7 +461,7 @@ func (store *applicationDB) manifestV2(
 		Height: value.committed.commitment.Height, Initialized: value.initialized,
 		Commitment: value.committed.commitment, AppHash: hex.EncodeToString(value.committed.appHash),
 		Proposers: cloneStringMap(value.proposers), StateEntryCount: uint64(len(flat)),
-		StateFlatRoot: stateRoot, DeltaSetCount: uint64(len(sets)),
+		StateFlatRootProtocol: rootProtocol, StateFlatRoot: stateRoot, DeltaSetCount: uint64(len(sets)),
 		DeltaDeleteCount: uint64(len(deletes)), DeltaRoot: deltaRoot,
 		Checkpoint: checkpoint, TxCount: uint64(len(value.txs)), ReceiptCount: uint64(len(value.receipts)),
 	}
@@ -620,7 +679,25 @@ func (store *applicationDB) persistedStateFromFlatV2(
 	if uint64(len(flat)) != manifest.StateEntryCount {
 		return persistedApplicationState{}, errors.New("application flat state entry count mismatch")
 	}
-	root, err := flatStateRoot(flat)
+	flatTree, err := buildFlatSparseTree(flat)
+	if err != nil {
+		return persistedApplicationState{}, err
+	}
+	rootProtocol := manifest.StateFlatRootProtocol
+	if rootProtocol == "" {
+		rootProtocol = flatRootProtocolV1
+	}
+	wantRootProtocol := flatRootProtocolV1
+	if protocolUsesSparseState(manifest.Commitment.Protocol) {
+		wantRootProtocol = sparseFlatRootProtocolV1
+	}
+	if rootProtocol != wantRootProtocol {
+		return persistedApplicationState{}, errors.New("application flat state root protocol mismatch")
+	}
+	root := flatTree.Root()
+	if rootProtocol == flatRootProtocolV1 {
+		root, err = flatStateRoot(flat)
+	}
 	if err != nil || root != manifest.StateFlatRoot {
 		return persistedApplicationState{}, errors.New("application flat state root mismatch")
 	}
@@ -637,7 +714,9 @@ func (store *applicationDB) persistedStateFromFlatV2(
 		return persistedApplicationState{}, errors.New("application version app hash is not canonical")
 	}
 	value := persistedApplicationState{
-		committed:   committedState{store: stateStore, commitment: manifest.Commitment, appHash: appHash},
+		committed: committedState{
+			store: stateStore, flatTree: flatTree, commitment: manifest.Commitment, appHash: appHash,
+		},
 		initialized: manifest.Initialized, proposers: cloneStringMap(manifest.Proposers),
 		txs: cloneTransactions(artifacts.txs), receipts: cloneReceipts(artifacts.receipts),
 	}
@@ -775,7 +854,17 @@ func (store *applicationDB) loadVersionArtifactsV2(height int64) (applicationVer
 		if uint64(len(artifacts.checkpoint)) != manifest.CheckpointEntryCount {
 			return applicationVersionArtifactsV2{}, errors.New("application checkpoint entry count mismatch")
 		}
-		checkpointRoot, err := flatStateRoot(artifacts.checkpoint)
+		checkpointTree, err := buildFlatSparseTree(artifacts.checkpoint)
+		if err != nil {
+			return applicationVersionArtifactsV2{}, err
+		}
+		checkpointRoot := checkpointTree.Root()
+		rootProtocol := manifest.StateFlatRootProtocol
+		if rootProtocol == "" || rootProtocol == flatRootProtocolV1 {
+			checkpointRoot, err = flatStateRoot(artifacts.checkpoint)
+		} else if rootProtocol != sparseFlatRootProtocolV1 {
+			return applicationVersionArtifactsV2{}, errors.New("application checkpoint root protocol is unsupported")
+		}
 		if err != nil || checkpointRoot != manifest.CheckpointRoot {
 			return applicationVersionArtifactsV2{}, errors.New("application checkpoint root mismatch")
 		}
@@ -938,6 +1027,11 @@ func (store *applicationDB) migrateV1ToV2(currentHeight int64) (persistedApplica
 	cleanup.Close()
 
 	store.currentFlat = make(flatState)
+	currentFlatTree, err := buildFlatSparseTree(store.currentFlat)
+	if err != nil {
+		return persistedApplicationState{}, err
+	}
+	store.currentFlatTree = currentFlatTree
 	store.currentHeight = startHeight - 1
 	store.minimumHeight = startHeight
 	for height := startHeight; height <= currentHeight; height++ {
@@ -951,7 +1045,21 @@ func (store *applicationDB) migrateV1ToV2(currentHeight int64) (persistedApplica
 		}
 		sets, deletes := diffFlatState(store.currentFlat, next)
 		checkpoint := height == startHeight || store.shouldCheckpointV2(height)
-		manifest, err := store.manifestV2(value, next, sets, deletes, checkpoint)
+		nextTree := store.currentFlatTree.Clone()
+		if err := applyFlatDeltaToSparseTree(nextTree, sets, deletes); err != nil {
+			return persistedApplicationState{}, err
+		}
+		if checkpoint {
+			completeTree, err := buildFlatSparseTree(next)
+			if err != nil {
+				return persistedApplicationState{}, err
+			}
+			if completeTree.Root() != nextTree.Root() {
+				return persistedApplicationState{}, errors.New("migration sparse state root mismatch")
+			}
+			nextTree = completeTree
+		}
+		manifest, err := store.manifestV2WithTree(value, next, nextTree, sets, deletes, checkpoint)
 		if err != nil {
 			return persistedApplicationState{}, err
 		}
@@ -989,6 +1097,7 @@ func (store *applicationDB) migrateV1ToV2(currentHeight int64) (persistedApplica
 		}
 		batch.Close()
 		store.currentFlat = cloneFlatState(next)
+		store.currentFlatTree = nextTree.Publish()
 		store.currentHeight = height
 	}
 	identityRaw, err := hash.CanonicalBytes(applicationStoreIdentityV2{
@@ -1029,6 +1138,7 @@ func (store *applicationDB) migrateV1ToV2(currentHeight int64) (persistedApplica
 		return persistedApplicationState{}, err
 	}
 	store.currentFlat = flat
+	store.currentFlatTree = loaded.committed.flatTree
 	return loaded, nil
 }
 

@@ -385,12 +385,18 @@ func decodeApplicationSnapshotDocument(
 	if err != nil {
 		return persistedApplicationState{}, err
 	}
+	flatTree, err := buildStoreSparseTree(store)
+	if err != nil {
+		return persistedApplicationState{}, err
+	}
 	appHash, err := decodeCanonicalSnapshotAppHash(document.AppHash)
 	if err != nil {
 		return persistedApplicationState{}, err
 	}
 	value := persistedApplicationState{
-		committed:   committedState{store: store, commitment: document.Commitment, appHash: appHash},
+		committed: committedState{
+			store: store, flatTree: flatTree, commitment: document.Commitment, appHash: appHash,
+		},
 		initialized: true, proposers: cloneStringMap(document.Proposers),
 		txs: cloneTransactions(document.Txs), receipts: cloneReceipts(document.Receipts),
 	}
