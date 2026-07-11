@@ -4,9 +4,10 @@ Status date: 2026-07-11
 
 ## Scope
 
-ChainLab's production path uses CometBFT v0.39.3 rather than the local PoA harness for Byzantine consensus. The real-process suite now fixes three equal-power four-validator availability boundaries:
+ChainLab's production path uses CometBFT v0.39.3 rather than the local PoA harness for Byzantine consensus. The real-process suite now fixes four equal-power four-validator availability boundaries:
 
 - one validator unavailable: the remaining 3-of-4 commit transactions;
+- the predicted round-0 proposer unavailable: the remaining 3-of-4 advance to a later round, commit, and converge after recovery;
 - two validators unavailable: 2-of-4 cannot advance consensus or committed application state;
 - a symmetric 2+2 P2P topology partition: neither side commits, transaction gossip stays on its originating side, and healing converges without divergent application state.
 
@@ -32,6 +33,14 @@ A transaction broadcast to node0 must appear in only the node0/node1 mempools. N
 
 The partition/heal scenario passed five consecutive real-process runs. The final tree also passed the full unit and race suites, vet, dependency-tidiness diff, four production command builds, height-18 demo, formatting/diff checks, and fixed `govulncheck` v1.6.0 with zero reachable vulnerabilities.
 
+## Missing-Proposer Test
+
+`TestFourValidatorMissingProposerAdvancesRoundAndRecovers` reconstructs Comet's complete validator set from the RPC validator priorities, checks the reconstruction against the current block proposer, and predicts the next two round-0 proposers. It stops the validator predicted for height `H+2` before that height, then broadcasts a transaction through the remaining 3-of-4 network.
+
+Height `H+1` must be produced by its predicted round-0 proposer. At height `H+2`, the offline validator must not produce the block and the commit round must be greater than zero, proving that Comet timed out the missing proposal and advanced rounds while retaining quorum. The three live nodes continue through `H+3`; restarting the target validator must rebuild the full peer mesh and converge all four nodes on common block/application hashes, state root, and sender nonce.
+
+The missing-proposer scenario passed five consecutive real-process runs. It proves round advancement after a targeted validator process outage, not packet-delay or one-way-reachability behavior.
+
 ## Evidence Boundary
 
-The tests cover process outage and a symmetric disjoint P2P topology. They do not emulate dynamic packet delay, drop, duplication, corruption, or reordering; bandwidth exhaustion; asymmetric one-way reachability; a targeted missing proposer; light-client attacks; simultaneous validator-set changes; sentry topology; or sustained load. Those remain production gates and require a controllable network-fault environment rather than relabeling process shutdown as a packet-level fault.
+The tests cover process outage, a targeted missing round-0 proposer, and a symmetric disjoint P2P topology. They do not emulate dynamic packet delay, drop, duplication, corruption, or reordering; bandwidth exhaustion; asymmetric one-way reachability; delayed-but-connected proposers; light-client attacks; simultaneous validator-set changes; sentry topology; or sustained load. Those remain production gates and require a controllable network-fault environment rather than relabeling process shutdown as a packet-level fault.

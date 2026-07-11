@@ -438,6 +438,130 @@ func TestFourValidatorP2PPartitionHaltsAndHeals(t *testing.T) {
 	waitForMempoolCounts(t, clients, []int{0, 0, 0, 0}, 10*time.Second)
 }
 
+func TestFourValidatorMissingProposerAdvancesRoundAndRecovers(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping multi-process CometBFT missing-proposer network in short mode")
+	}
+	if processRaceEnabled {
+		t.Skip("the process-boundary test is covered by the non-race run; package logic remains race-tested")
+	}
+	basePort := availablePortRange(t, 12)
+	root := filepath.Join(t.TempDir(), "missing-proposer-network")
+	network, err := InitializeNetwork(NetworkConfig{
+		OutputRoot: root, ChainID: "chainlab-missing-proposer", ValidatorCount: 4,
+		GenesisTime:  time.Date(2026, time.July, 10, 12, 0, 0, 0, time.UTC),
+		ABCIBasePort: basePort, RPCBasePort: basePort + 4, P2PBasePort: basePort + 8,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	processes := make([]*helperProcess, 0, len(network.Nodes)*3)
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		for _, process := range processes {
+			t.Logf("%s log:\n%s", process.name, process.tailLog())
+		}
+	})
+	apps := make([]*helperProcess, len(network.Nodes))
+	cometNodes := make([]*helperProcess, len(network.Nodes))
+	for index, generatedNode := range network.Nodes {
+		home := filepath.Join(root, generatedNode.Home)
+		apps[index] = startHelperProcess(t, root, fmt.Sprintf("missing-proposer-app-%d", index), map[string]string{
+			processHelperModeEnv: "abci", processHelperGenesisEnv: filepath.Join(home, filepath.FromSlash(AppGenesisPath)),
+			processHelperListenEnv: generatedNode.ABCIListenAddress, processHelperDataDirEnv: filepath.Join(root, filepath.FromSlash(generatedNode.ApplicationData)),
+		})
+		processes = append(processes, apps[index])
+	}
+	for _, generatedNode := range network.Nodes {
+		waitForTCP(t, generatedNode.ABCIListenAddress, 15*time.Second)
+	}
+	for index, generatedNode := range network.Nodes {
+		cometNodes[index] = startHelperProcess(t, root, fmt.Sprintf("missing-proposer-comet-%d", index), map[string]string{
+			processHelperModeEnv: "comet", processHelperHomeEnv: filepath.Join(root, generatedNode.Home),
+		})
+		processes = append(processes, cometNodes[index])
+	}
+	clients := make([]*rpchttp.HTTP, len(network.Nodes))
+	for index, generatedNode := range network.Nodes {
+		client, err := rpchttp.New(httpAddress(generatedNode.RPCListenAddress), "/websocket")
+		if err != nil {
+			t.Fatal(err)
+		}
+		clients[index] = client
+	}
+	waitForRPCReady(t, clients, 45*time.Second)
+	waitForPeerMesh(t, clients, 45*time.Second)
+	senderKey := loadChainPrivateValidatorKey(t, filepath.Join(root, network.Nodes[0].Home, "config", "priv_validator_key.json"))
+	sender := chaincrypto.AddressFromPrivateKey(senderKey)
+	receiver := "0x6666666666666666666666666666666666666666"
+	height := waitForConsistentNetworkState(t, clients, 2, sender, 0, 45*time.Second)
+
+	currentSet := validatorSetAtHeight(t, clients[0], height)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	currentBlock, err := clients[0].Block(ctx, &height)
+	cancel()
+	if err != nil || currentBlock.Block == nil {
+		t.Fatalf("current block=%+v err=%v", currentBlock, err)
+	}
+	if !bytes.Equal(currentSet.GetProposer().Address, currentBlock.Block.ProposerAddress) {
+		t.Fatal("reconstructed validator set differs from the current block proposer")
+	}
+	nextProposer := currentSet.CopyIncrementProposerPriority(1).GetProposer()
+	targetHeight := height + 2
+	targetProposer := currentSet.CopyIncrementProposerPriority(2).GetProposer()
+	targetIndex := validatorNodeIndex(t, network.Nodes, targetProposer.Address)
+	if err := cometNodes[targetIndex].stop(); err != nil {
+		t.Fatal(err)
+	}
+
+	activeClients := clientsExcept(clients, targetIndex)
+	broadcastTransfer(t, activeClients[0], senderKey, network.ChainID, sender, receiver, 0, 1)
+	activeHeight := waitForConsistentNetworkState(t, activeClients, targetHeight+1, sender, 1, 60*time.Second)
+	nextHeight := height + 1
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	nextBlock, err := activeClients[0].Block(ctx, &nextHeight)
+	cancel()
+	if err != nil || nextBlock.Block == nil {
+		t.Fatalf("next block=%+v err=%v", nextBlock, err)
+	}
+	if !bytes.Equal(nextBlock.Block.ProposerAddress, nextProposer.Address) {
+		t.Fatal("next height block differs from the predicted round-0 proposer")
+	}
+	targetSet := validatorSetAtHeight(t, activeClients[0], nextHeight)
+	if !bytes.Equal(targetSet.GetProposer().Address, nextProposer.Address) {
+		t.Fatal("next height validator set differs from its block proposer")
+	}
+	if !bytes.Equal(targetSet.CopyIncrementProposerPriority(1).GetProposer().Address, targetProposer.Address) {
+		t.Fatal("target height round-0 proposer differs from the predicted proposer")
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	targetBlock, err := activeClients[0].Block(ctx, &targetHeight)
+	cancel()
+	if err != nil || targetBlock.Block == nil {
+		t.Fatalf("target block=%+v err=%v", targetBlock, err)
+	}
+	if bytes.Equal(targetBlock.Block.ProposerAddress, targetProposer.Address) {
+		t.Fatal("offline round-0 proposer produced the target block")
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	targetCommit, err := activeClients[0].Commit(ctx, &targetHeight)
+	cancel()
+	if err != nil || targetCommit.Commit == nil || targetCommit.Commit.Round <= 0 {
+		t.Fatalf("target commit=%+v err=%v", targetCommit, err)
+	}
+
+	targetHome := filepath.Join(root, network.Nodes[targetIndex].Home)
+	cometNodes[targetIndex] = startHelperProcess(t, root, "missing-proposer-recovered", map[string]string{
+		processHelperModeEnv: "comet", processHelperHomeEnv: targetHome,
+	})
+	processes = append(processes, cometNodes[targetIndex])
+	waitForRPCReady(t, []*rpchttp.HTTP{clients[targetIndex]}, 45*time.Second)
+	waitForPeerMesh(t, clients, 45*time.Second)
+	_ = waitForConsistentNetworkState(t, clients, activeHeight, sender, 1, 60*time.Second)
+}
+
 func TestFourValidatorV2EvidenceSlashingAndEpochRemoval(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping multi-process CometBFT evidence network in short mode")
@@ -810,6 +934,34 @@ func loadCometPrivateValidatorKey(t *testing.T, path string) cmtcrypto.PrivKey {
 		t.Fatal(err)
 	}
 	return key.PrivKey
+}
+
+func validatorSetAtHeight(t *testing.T, client *rpchttp.HTTP, height int64) *cmttypes.ValidatorSet {
+	t.Helper()
+	page, perPage := 1, 100
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	result, err := client.Validators(ctx, &height, &page, &perPage)
+	cancel()
+	if err != nil || result == nil || result.Count != result.Total || result.Total == 0 {
+		t.Fatalf("validators at height %d=%+v err=%v", height, result, err)
+	}
+	validatorSet, err := cmttypes.ValidatorSetFromExistingValidators(result.Validators)
+	if err != nil {
+		t.Fatalf("reconstruct validators at height %d: %v", height, err)
+	}
+	return validatorSet
+}
+
+func validatorNodeIndex(t *testing.T, nodes []NetworkNode, address []byte) int {
+	t.Helper()
+	want := hex.EncodeToString(address)
+	for index, node := range nodes {
+		if node.ConsensusAddress == want {
+			return index
+		}
+	}
+	t.Fatalf("validator %s is not in the generated network", want)
+	return -1
 }
 
 func duplicateVoteEvidence(
