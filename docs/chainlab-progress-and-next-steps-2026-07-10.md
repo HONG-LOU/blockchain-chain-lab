@@ -104,6 +104,7 @@ Verification coverage includes smart-account and delegated-EOA end-to-end rotati
 - Published canonical state is immutable. Commits switch a state pointer, and `state.ReadView` exposes a read-only capability.
 - `eth_call` captures an O(1) immutable view under the node lock, then executes outside it. Long concurrent reads no longer block block production/reorg and continue to observe their original snapshot.
 - All ordinary HTTP paths share 32 execution slots, with liveness and valid WebSocket upgrades on independent bounded paths. POST bodies are capped at 16 MiB. JSON-RPC is additionally limited to 32 concurrent requests, 100 batch items, a 5 MiB request body, and a 16 MiB batch response enforced while each child response is recorded. Txpool content is rejected above an 8 MiB source budget before cloning.
+- Txpool admission maintains an incremental canonical-byte total across pending/queued insertion, replacement, promotion, block removal, canonical reorg, and rollback paths; the 128 MiB admission check no longer rescans the complete pool.
 - `eth_feeHistory` is limited to 1,024 blocks. Log queries are limited to a 10,000-block range, 1,000 results, an 8 MiB HTTP response, 256 addresses, four topics, and 256 alternatives per topic. Filter cursors advance only after successful delivery.
 - `eth_call` explicitly supports only `latest`. Pending nonce calculation no longer replays the entire mempool while holding the global node lock.
 - Installed filters use unpredictable IDs, are capped at 1,024, actively expire after five idle minutes, limit log definitions to 64 KiB, and return at most 1,000 block hashes per poll. Pending filters are separately capped at 64 and collectively retain at most 65,536 hashes.
@@ -242,7 +243,7 @@ Ordered by consensus and security dependency rather than feature visibility:
    - Protect the entire data directory against rollback to an older but internally valid snapshot; the current checksums detect corruption but cannot prove external monotonicity.
 
 5. **Resource and RPC governance**
-   - Add gas-bounded/lazy proposal simulation, incremental txpool accounting, deterministic eviction/TTL/journal/restart, and orphaned-transaction reinsertion.
+   - Add gas-bounded/lazy proposal simulation, deterministic eviction/TTL/journal/restart, and orphaned-transaction reinsertion; preserve the implemented incremental txpool byte accounting across every mutation and rollback path.
    - Add hard JIT/compiled-code RSS and lifecycle limits plus Linux multi-process load evidence.
    - Preserve the implemented all-request/POST/filter/WebSocket/txpool bounds, active expiry, pending-hash accounting, heartbeat/write deadlines, bounded queues, and log-work budget; add subscription TTL, principal-aware rate limiting, measured disconnect/backpressure policy, pagination, and sustained abuse tests.
 

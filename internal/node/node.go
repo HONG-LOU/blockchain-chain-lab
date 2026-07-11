@@ -63,6 +63,7 @@ type Node struct {
 	mempool            []types.Transaction
 	txPoolRevision     uint64
 	queued             []types.Transaction
+	txPoolBytes        uint64
 	txIndex            map[string]types.TransactionRecord
 	eventIndex         []types.EventRecord
 	dataDir            string
@@ -445,7 +446,8 @@ func (n *Node) submitTxLocked(tx types.Transaction) (err error) {
 		if err := canReplacePendingTransaction(n.mempool[pendingReplacementIndex], tx); err != nil {
 			return err
 		}
-		if err := n.validateReplacementTxPoolBytesLocked(n.mempool[pendingReplacementIndex], txSize); err != nil {
+		previous := n.mempool[pendingReplacementIndex]
+		if err := n.validateReplacementTxPoolBytesLocked(previous, txSize); err != nil {
 			return err
 		}
 		candidateMempool := append([]types.Transaction(nil), n.mempool...)
@@ -462,8 +464,7 @@ func (n *Node) submitTxLocked(tx types.Transaction) (err error) {
 		if err != nil {
 			return err
 		}
-		n.setMempoolLocked(nextMempool)
-		n.queued = nextQueued
+		n.setTxPoolLocked(nextMempool, nextQueued, n.replacementTxPoolBytesLocked(previous, txSize))
 		return nil
 	}
 	if queuedReplacementIndex < 0 {
@@ -483,7 +484,7 @@ func (n *Node) submitTxLocked(tx types.Transaction) (err error) {
 		if err := n.validateReplacementTxPoolBytesLocked(n.queued[queuedReplacementIndex], txSize); err != nil {
 			return err
 		}
-		if err := n.submitQueuedReplacementLocked(queuedReplacementIndex, tx, working); err != nil {
+		if err := n.submitQueuedReplacementLocked(queuedReplacementIndex, tx, txSize, working); err != nil {
 			return err
 		}
 		return nil
@@ -502,7 +503,7 @@ func (n *Node) submitTxLocked(tx types.Transaction) (err error) {
 		if err := n.validateQueuedTransactionLocked(tx, working); err != nil {
 			return err
 		}
-		n.queued = append(n.queued, tx)
+		n.appendQueuedLocked(tx, txSize)
 		return nil
 	}
 	if _, err := n.executor.ExecuteWithContext(working, tx, core.ExecutionContext{BlockHeight: blockHeight, BaseFeePerGas: baseFee}); err != nil {
@@ -520,24 +521,39 @@ func (n *Node) submitTxLocked(tx types.Transaction) (err error) {
 	if err != nil {
 		return err
 	}
-	n.setMempoolLocked(nextMempool)
-	n.queued = nextQueued
+	n.setTxPoolLocked(nextMempool, nextQueued, n.txPoolBytes+txSize)
 	return nil
 }
 
-func (n *Node) setMempoolLocked(mempool []types.Transaction) {
+func (n *Node) setTxPoolLocked(mempool []types.Transaction, queued []types.Transaction, poolBytes uint64) {
 	if n.txPoolRevision == math.MaxUint64 {
 		panic("transaction pool revision exhausted")
 	}
 	n.mempool = mempool
+	n.queued = queued
+	n.txPoolBytes = poolBytes
 	n.txPoolRevision++
+}
+
+func (n *Node) appendQueuedLocked(tx types.Transaction, txSize uint64) {
+	n.queued = append(n.queued, tx)
+	n.txPoolBytes += txSize
+}
+
+func (n *Node) replaceQueuedLocked(index int, tx types.Transaction, txSize uint64) {
+	previousSize := uint64(len(hash.MustCanonicalBytes(n.queued[index])))
+	if n.txPoolBytes < previousSize {
+		panic("transaction pool byte accounting underflow")
+	}
+	n.queued[index] = tx
+	n.txPoolBytes = n.txPoolBytes - previousSize + txSize
 }
 
 func (n *Node) validateNewTxPoolCapacityLocked(tx types.Transaction, txSize uint64) error {
 	if len(n.mempool)+len(n.queued) >= maxTxPoolTransactions {
 		return fmt.Errorf("transaction pool limit %d reached", maxTxPoolTransactions)
 	}
-	currentBytes := n.txPoolBytesLocked()
+	currentBytes := n.txPoolBytes
 	if currentBytes >= maxTxPoolBytes || txSize > maxTxPoolBytes-currentBytes {
 		return fmt.Errorf("transaction pool byte limit %d reached", maxTxPoolBytes)
 	}
@@ -561,7 +577,7 @@ func (n *Node) validateNewTxPoolCapacityLocked(tx types.Transaction, txSize uint
 
 func (n *Node) validateReplacementTxPoolBytesLocked(previous types.Transaction, replacementSize uint64) error {
 	previousSize := uint64(len(hash.MustCanonicalBytes(previous)))
-	currentSize := n.txPoolBytesLocked()
+	currentSize := n.txPoolBytes
 	if currentSize < previousSize {
 		return errors.New("transaction pool byte accounting underflow")
 	}
@@ -572,12 +588,21 @@ func (n *Node) validateReplacementTxPoolBytesLocked(previous types.Transaction, 
 	return nil
 }
 
+func (n *Node) replacementTxPoolBytesLocked(previous types.Transaction, replacementSize uint64) uint64 {
+	previousSize := uint64(len(hash.MustCanonicalBytes(previous)))
+	return n.txPoolBytes - previousSize + replacementSize
+}
+
 func (n *Node) txPoolBytesLocked() uint64 {
+	return n.txPoolBytes
+}
+
+func transactionPoolBytes(mempool []types.Transaction, queued []types.Transaction) uint64 {
 	var total uint64
-	for _, tx := range n.mempool {
+	for _, tx := range mempool {
 		total += uint64(len(hash.MustCanonicalBytes(tx)))
 	}
-	for _, tx := range n.queued {
+	for _, tx := range queued {
 		total += uint64(len(hash.MustCanonicalBytes(tx)))
 	}
 	return total
@@ -751,8 +776,7 @@ func (n *Node) ProduceBlock() (types.Block, error) {
 	n.refreshConsensusLocked()
 	n.blocks = candidateBlocks
 	n.indexBlock(block)
-	n.setMempoolLocked(nextMempool)
-	n.queued = candidateQueued
+	n.setTxPoolLocked(nextMempool, candidateQueued, transactionPoolBytes(nextMempool, candidateQueued))
 	return cloneBlock(block), nil
 }
 
@@ -925,6 +949,7 @@ func (n *Node) ImportBlock(block types.Block) error {
 	previousEvidence := cloneFinalityEvidence(n.finalityEvidence)
 	previousMempool := append([]types.Transaction(nil), n.mempool...)
 	previousQueued := append([]types.Transaction(nil), n.queued...)
+	previousTxPoolBytes := n.txPoolBytes
 	n.knownBlocks[blockHash] = block
 	if !hadPreviousKnown {
 		n.knownBlockHeights[block.Header.Height]++
@@ -943,8 +968,7 @@ func (n *Node) ImportBlock(block types.Block) error {
 		n.finalityVotes = previousVotes
 		n.finalityVoteIndex = previousVoteIndex
 		n.finalityEvidence = previousEvidence
-		n.setMempoolLocked(previousMempool)
-		n.queued = previousQueued
+		n.setTxPoolLocked(previousMempool, previousQueued, previousTxPoolBytes)
 	}
 	if !n.blockCompatibleWithFinalityLockLocked(blockHash) {
 		rollbackKnownAndLock()
@@ -1011,8 +1035,7 @@ func (n *Node) ImportBlock(block types.Block) error {
 		n.state = candidateState
 		n.refreshConsensusLocked()
 		n.rebuildTxIndex()
-		n.setMempoolLocked(nextMempool)
-		n.queued = nextQueued
+		n.setTxPoolLocked(nextMempool, nextQueued, transactionPoolBytes(nextMempool, nextQueued))
 	} else if canonicalEnvelopeChange {
 		n.blocks = candidateBlocks
 	}
@@ -1227,14 +1250,14 @@ func (n *Node) SubmitFinalityVote(vote types.FinalitySignature) (err error) {
 	previousEvidence := cloneFinalityEvidence(n.finalityEvidence)
 	previousMempool := append([]types.Transaction(nil), n.mempool...)
 	previousQueued := append([]types.Transaction(nil), n.queued...)
+	previousTxPoolBytes := n.txPoolBytes
 	previousLock := n.finalityLock
 	previousKnown := n.knownBlocks[blockHash]
 	rollback := func() {
 		n.finalityVotes = previousVotes
 		n.finalityVoteIndex = previousVoteIndex
 		n.finalityEvidence = previousEvidence
-		n.setMempoolLocked(previousMempool)
-		n.queued = previousQueued
+		n.setTxPoolLocked(previousMempool, previousQueued, previousTxPoolBytes)
 		n.finalityLock = previousLock
 		n.knownBlocks[blockHash] = previousKnown
 	}
@@ -1927,7 +1950,7 @@ func transactionReplacementIndex(txs []types.Transaction, tx types.Transaction) 
 	return -1
 }
 
-func (n *Node) submitQueuedReplacementLocked(index int, replacement types.Transaction, working *state.Store) error {
+func (n *Node) submitQueuedReplacementLocked(index int, replacement types.Transaction, replacementSize uint64, working *state.Store) error {
 	pendingAccount := working.GetAccount(replacement.From)
 	if replacement.Nonce == pendingAccount.Nonce {
 		blockHeight := n.blocks[len(n.blocks)-1].Header.Height + 1
@@ -1946,8 +1969,11 @@ func (n *Node) submitQueuedReplacementLocked(index int, replacement types.Transa
 		if err != nil {
 			return err
 		}
-		n.setMempoolLocked(nextMempool)
-		n.queued = nextQueued
+		n.setTxPoolLocked(
+			nextMempool,
+			nextQueued,
+			n.replacementTxPoolBytesLocked(n.queued[index], replacementSize),
+		)
 		return nil
 	}
 	if replacement.Nonce < pendingAccount.Nonce {
@@ -1956,7 +1982,7 @@ func (n *Node) submitQueuedReplacementLocked(index int, replacement types.Transa
 	if err := n.validateQueuedTransactionLocked(replacement, working); err != nil {
 		return err
 	}
-	n.queued[index] = replacement
+	n.replaceQueuedLocked(index, replacement, replacementSize)
 	return nil
 }
 
