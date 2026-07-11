@@ -307,6 +307,137 @@ func TestFourValidatorQuorumLossHaltsAndRecovers(t *testing.T) {
 	_ = waitForConsistentNetworkState(t, clients, recoveredHeight, sender, 1, 60*time.Second)
 }
 
+func TestFourValidatorP2PPartitionHaltsAndHeals(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping multi-process CometBFT P2P partition network in short mode")
+	}
+	if processRaceEnabled {
+		t.Skip("the process-boundary test is covered by the non-race run; package logic remains race-tested")
+	}
+	basePort := availablePortRange(t, 12)
+	root := filepath.Join(t.TempDir(), "p2p-partition-network")
+	network, err := InitializeNetwork(NetworkConfig{
+		OutputRoot: root, ChainID: "chainlab-p2p-partition", ValidatorCount: 4,
+		GenesisTime:  time.Date(2026, time.July, 10, 12, 0, 0, 0, time.UTC),
+		ABCIBasePort: basePort, RPCBasePort: basePort + 4, P2PBasePort: basePort + 8,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	processes := make([]*helperProcess, 0, len(network.Nodes)*4)
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		for _, process := range processes {
+			t.Logf("%s log:\n%s", process.name, process.tailLog())
+		}
+	})
+	apps := make([]*helperProcess, len(network.Nodes))
+	cometNodes := make([]*helperProcess, len(network.Nodes))
+	fullPeers := make([]string, len(network.Nodes))
+	for index, generatedNode := range network.Nodes {
+		home := filepath.Join(root, generatedNode.Home)
+		document, err := LoadNodeDocument(home)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fullPeers[index] = document.PersistentPeers
+		apps[index] = startHelperProcess(t, root, fmt.Sprintf("partition-app-%d", index), map[string]string{
+			processHelperModeEnv: "abci", processHelperGenesisEnv: filepath.Join(home, filepath.FromSlash(AppGenesisPath)),
+			processHelperListenEnv: generatedNode.ABCIListenAddress, processHelperDataDirEnv: filepath.Join(root, filepath.FromSlash(generatedNode.ApplicationData)),
+		})
+		processes = append(processes, apps[index])
+	}
+	for _, generatedNode := range network.Nodes {
+		waitForTCP(t, generatedNode.ABCIListenAddress, 15*time.Second)
+	}
+	for index, generatedNode := range network.Nodes {
+		cometNodes[index] = startHelperProcess(t, root, fmt.Sprintf("partition-full-comet-%d", index), map[string]string{
+			processHelperModeEnv: "comet", processHelperHomeEnv: filepath.Join(root, generatedNode.Home),
+		})
+		processes = append(processes, cometNodes[index])
+	}
+	clients := make([]*rpchttp.HTTP, len(network.Nodes))
+	for index, generatedNode := range network.Nodes {
+		client, err := rpchttp.New(httpAddress(generatedNode.RPCListenAddress), "/websocket")
+		if err != nil {
+			t.Fatal(err)
+		}
+		clients[index] = client
+	}
+	waitForRPCReady(t, clients, 45*time.Second)
+	waitForPeerMesh(t, clients, 45*time.Second)
+	senderKey := loadChainPrivateValidatorKey(t, filepath.Join(root, network.Nodes[0].Home, "config", "priv_validator_key.json"))
+	sender := chaincrypto.AddressFromPrivateKey(senderKey)
+	receiver := "0x5555555555555555555555555555555555555555"
+	_ = waitForConsistentNetworkState(t, clients, 2, sender, 0, 45*time.Second)
+
+	for index := range cometNodes {
+		if err := cometNodes[index].stop(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	partitionPeers := []string{
+		networkPeerAddress(network.Nodes[1]),
+		networkPeerAddress(network.Nodes[0]),
+		networkPeerAddress(network.Nodes[3]),
+		networkPeerAddress(network.Nodes[2]),
+	}
+	for index, generatedNode := range network.Nodes {
+		setNodePersistentPeers(t, filepath.Join(root, generatedNode.Home), partitionPeers[index])
+		cometNodes[index] = startHelperProcess(t, root, fmt.Sprintf("partition-split-comet-%d", index), map[string]string{
+			processHelperModeEnv: "comet", processHelperHomeEnv: filepath.Join(root, generatedNode.Home),
+		})
+		processes = append(processes, cometNodes[index])
+	}
+	waitForRPCReady(t, clients, 45*time.Second)
+	partitionTopology := [][]string{
+		{network.Nodes[1].NodeID}, {network.Nodes[0].NodeID},
+		{network.Nodes[3].NodeID}, {network.Nodes[2].NodeID},
+	}
+	waitForPeerTopology(t, clients, partitionTopology, 45*time.Second)
+	heightA := waitForStableNetworkHeight(t, clients[:2], 2*time.Second, 20*time.Second)
+	heightB := waitForStableNetworkHeight(t, clients[2:], 2*time.Second, 20*time.Second)
+
+	broadcastTransfer(t, clients[0], senderKey, network.ChainID, sender, receiver, 0, 1)
+	waitForMempoolCounts(t, clients, []int{1, 1, 0, 0}, 10*time.Second)
+	waitForPeerTopology(t, clients, partitionTopology, 5*time.Second)
+	assertNetworkHeightUnchanged(t, clients[:2], heightA, 3*time.Second)
+	assertNetworkHeightUnchanged(t, clients[2:], heightB, 3*time.Second)
+
+	for index, generatedNode := range network.Nodes {
+		setNodePersistentPeers(t, filepath.Join(root, generatedNode.Home), fullPeers[index])
+	}
+	if err := cometNodes[1].stop(); err != nil {
+		t.Fatal(err)
+	}
+	home1 := filepath.Join(root, network.Nodes[1].Home)
+	cometNodes[1] = startHelperProcess(t, root, "partition-bridge-comet-1", map[string]string{
+		processHelperModeEnv: "comet", processHelperHomeEnv: home1,
+	})
+	processes = append(processes, cometNodes[1])
+	waitForRPCReady(t, []*rpchttp.HTTP{clients[1]}, 45*time.Second)
+	healedHeight := waitForConsistentNetworkState(
+		t, clients, max(heightA, heightB)+1, sender, 1, 60*time.Second,
+	)
+
+	for _, index := range []int{0, 2, 3} {
+		if err := cometNodes[index].stop(); err != nil {
+			t.Fatal(err)
+		}
+		home := filepath.Join(root, network.Nodes[index].Home)
+		cometNodes[index] = startHelperProcess(t, root, fmt.Sprintf("partition-healed-comet-%d", index), map[string]string{
+			processHelperModeEnv: "comet", processHelperHomeEnv: home,
+		})
+		processes = append(processes, cometNodes[index])
+		waitForRPCReady(t, []*rpchttp.HTTP{clients[index]}, 45*time.Second)
+	}
+	waitForPeerMesh(t, clients, 45*time.Second)
+	_ = waitForConsistentNetworkState(t, clients, healedHeight, sender, 1, 60*time.Second)
+	waitForMempoolCounts(t, clients, []int{0, 0, 0, 0}, 10*time.Second)
+}
+
 func TestFourValidatorV2EvidenceSlashingAndEpochRemoval(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping multi-process CometBFT evidence network in short mode")
@@ -984,6 +1115,100 @@ func waitForPeerMesh(t *testing.T, clients []*rpchttp.HTTP, timeout time.Duratio
 		}
 		return true, ""
 	})
+}
+
+func waitForPeerTopology(
+	t *testing.T,
+	clients []*rpchttp.HTTP,
+	expected [][]string,
+	timeout time.Duration,
+) {
+	t.Helper()
+	if len(expected) != len(clients) {
+		t.Fatal("peer topology size does not match clients")
+	}
+	waitForCondition(t, timeout, func() (bool, string) {
+		for index, client := range clients {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			info, err := client.NetInfo(ctx)
+			cancel()
+			if err != nil {
+				return false, fmt.Sprintf("node %d net info: %v", index, err)
+			}
+			want := make(map[string]struct{}, len(expected[index]))
+			for _, peerID := range expected[index] {
+				want[peerID] = struct{}{}
+			}
+			if info.NPeers != len(want) {
+				return false, fmt.Sprintf("node %d peers=%d want=%d", index, info.NPeers, len(want))
+			}
+			for _, peer := range info.Peers {
+				peerID := string(peer.NodeInfo.ID())
+				if _, exists := want[peerID]; !exists {
+					return false, fmt.Sprintf("node %d has unexpected peer %s", index, peerID)
+				}
+				delete(want, peerID)
+			}
+			if len(want) != 0 {
+				return false, fmt.Sprintf("node %d is missing expected peers", index)
+			}
+		}
+		return true, ""
+	})
+}
+
+func waitForMempoolCounts(
+	t *testing.T,
+	clients []*rpchttp.HTTP,
+	expected []int,
+	timeout time.Duration,
+) {
+	t.Helper()
+	if len(expected) != len(clients) {
+		t.Fatal("mempool count size does not match clients")
+	}
+	waitForCondition(t, timeout, func() (bool, string) {
+		for index, client := range clients {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			result, err := client.NumUnconfirmedTxs(ctx)
+			cancel()
+			if err != nil {
+				return false, fmt.Sprintf("node %d mempool: %v", index, err)
+			}
+			if result.Count != expected[index] || result.Total != expected[index] {
+				return false, fmt.Sprintf(
+					"node %d mempool count=%d total=%d want=%d",
+					index, result.Count, result.Total, expected[index],
+				)
+			}
+		}
+		return true, ""
+	})
+}
+
+func networkPeerAddress(node NetworkNode) string {
+	return node.NodeID + "@" + strings.TrimPrefix(node.P2PListenAddress, "tcp://")
+}
+
+func setNodePersistentPeers(t *testing.T, home string, peers string) {
+	t.Helper()
+	document, err := LoadNodeDocument(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document.PersistentPeers = peers
+	raw, err := document.CanonicalBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(home, filepath.FromSlash(NodeDocumentPath))
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, info.Mode().Perm()); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func waitForStableNetworkHeight(
