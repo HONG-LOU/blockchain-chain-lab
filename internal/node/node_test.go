@@ -1466,6 +1466,9 @@ func TestNodeReorgsToLongerImportedBranch(t *testing.T) {
 	if _, ok := follower.Transaction(txA.Hash()); ok {
 		t.Fatal("old branch transaction should leave canonical tx index after reorg")
 	}
+	if pool := follower.TxPool(); len(pool.Pending) != 0 || len(pool.Queued) != 0 {
+		t.Fatalf("stale orphaned transaction returned to pool = %+v", pool)
+	}
 	if record, ok := follower.Transaction(txB.Hash()); !ok || record.BlockHash != blockB1.Hash() || record.BlockHeight != 1 {
 		t.Fatalf("new canonical transaction record = %+v ok=%v", record, ok)
 	}

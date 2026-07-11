@@ -1081,6 +1081,7 @@ func (n *Node) prepareCanonicalChainLocked(blockHash string) ([]types.Block, *st
 		return nil, nil, nil, nil, err
 	}
 	included := transactionHashSet(transactionsInBlocks(chain))
+	orphaned := orphanedCanonicalTransactions(n.blocks, chain)
 	candidateMempool := filterTransactionsByHash(n.mempool, included)
 	candidateQueued := filterTransactionsByHash(n.queued, included)
 	head := chain[len(chain)-1]
@@ -1114,7 +1115,123 @@ func (n *Node) prepareCanonicalChainLocked(blockHash string) ([]types.Block, *st
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
+	candidateMempool, candidateQueued, err = n.reinsertOrphanedTransactionsForState(
+		working,
+		candidateMempool,
+		candidateQueued,
+		orphaned,
+		included,
+		head.Header.Height+1,
+		NextBaseFee(head, n.blockGasLimit),
+	)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
 	return chain, working, candidateMempool, candidateQueued, nil
+}
+
+func orphanedCanonicalTransactions(previous []types.Block, next []types.Block) []types.Transaction {
+	common := 0
+	for common < len(previous) && common < len(next) && previous[common].Hash() == next[common].Hash() {
+		common++
+	}
+	var orphaned []types.Transaction
+	for index := common; index < len(previous); index++ {
+		orphaned = append(orphaned, previous[index].Transactions...)
+	}
+	return orphaned
+}
+
+func (n *Node) reinsertOrphanedTransactionsForState(
+	base *state.Store,
+	pending []types.Transaction,
+	queued []types.Transaction,
+	orphaned []types.Transaction,
+	included map[string]struct{},
+	blockHeight uint64,
+	baseFee uint64,
+) ([]types.Transaction, []types.Transaction, error) {
+	working := base.Clone()
+	seenHashes := make(map[string]struct{}, len(pending)+len(queued)+len(orphaned))
+	type senderNonce struct {
+		sender string
+		nonce  uint64
+	}
+	seenNonces := make(map[senderNonce]struct{}, len(pending)+len(queued)+len(orphaned))
+	senderCounts := make(map[string]int)
+	poolBytes := transactionPoolBytes(pending, queued)
+	for _, tx := range append(append([]types.Transaction(nil), pending...), queued...) {
+		sender := normalizedAddress(tx.From)
+		seenHashes[tx.Hash()] = struct{}{}
+		seenNonces[senderNonce{sender: sender, nonce: tx.Nonce}] = struct{}{}
+		senderCounts[sender]++
+	}
+	for _, tx := range pending {
+		if _, err := n.executor.ExecuteWithContext(working, tx, core.ExecutionContext{BlockHeight: blockHeight, BaseFeePerGas: baseFee}); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	nextPending := append([]types.Transaction(nil), pending...)
+	nextQueued := append([]types.Transaction(nil), queued...)
+	for _, tx := range orphaned {
+		txHash := tx.Hash()
+		if _, committed := included[txHash]; committed {
+			continue
+		}
+		sender := normalizedAddress(tx.From)
+		nonceKey := senderNonce{sender: sender, nonce: tx.Nonce}
+		if _, duplicate := seenHashes[txHash]; duplicate {
+			continue
+		}
+		if _, collision := seenNonces[nonceKey]; collision {
+			continue
+		}
+		if len(nextPending)+len(nextQueued) >= maxTxPoolTransactions || senderCounts[sender] >= maxTransactionsPerSender {
+			continue
+		}
+		txSize, err := canonicalTransactionSize(tx)
+		if err != nil {
+			return nil, nil, err
+		}
+		if poolBytes >= maxTxPoolBytes || txSize > maxTxPoolBytes-poolBytes {
+			continue
+		}
+
+		account := working.GetAccount(tx.From)
+		switch {
+		case tx.Nonce < account.Nonce:
+			continue
+		case tx.Nonce == account.Nonce:
+			candidate := working.Clone()
+			if _, err := n.executor.ExecuteWithContext(candidate, tx, core.ExecutionContext{BlockHeight: blockHeight, BaseFeePerGas: baseFee}); err != nil {
+				if core.IsFatalExecutionError(err) {
+					return nil, nil, err
+				}
+				continue
+			}
+			working = candidate
+			nextPending = append(nextPending, cloneTransaction(tx))
+		default:
+			if tx.Nonce-account.Nonce > maxQueuedNonceGap || len(nextQueued) >= maxQueuedTransactions {
+				continue
+			}
+			check := working.Clone()
+			check.SetNonce(tx.From, tx.Nonce)
+			if _, err := n.executor.ExecuteWithContext(check, tx, core.ExecutionContext{BlockHeight: blockHeight, BaseFeePerGas: baseFee}); err != nil {
+				if core.IsFatalExecutionError(err) {
+					return nil, nil, err
+				}
+				continue
+			}
+			nextQueued = append(nextQueued, cloneTransaction(tx))
+		}
+		seenHashes[txHash] = struct{}{}
+		seenNonces[nonceKey] = struct{}{}
+		senderCounts[sender]++
+		poolBytes += txSize
+	}
+	return n.promoteQueuedForState(base, nextPending, nextQueued, blockHeight, baseFee)
 }
 
 func (n *Node) blockCompatibleWithFinalityLockLocked(blockHash string) bool {
