@@ -53,10 +53,10 @@ go run ./cmd/chainlab-comet init --out data/comet-v5 --chain-id chainlab-v5 --ap
 
 Automated coverage proves one-dimension retention, dual-expiry deletion, legacy retention, expired-evidence rejection, timestamp schema validation, sparse membership/non-membership, Pebble restart, snapshot/state sync, incompatible-binary rejection, schedule validation, and fixed fresh-process app/state/validator roots.
 
-A real four-validator CometBFT network crosses V3, V4, and V5 activation and converges on app version 5 with valid sparse account proofs.
+A real four-validator CometBFT network crosses V3, V4, and V5 activation and converges on app version 5 with valid sparse account proofs. A second network starts all applications capped at V4, replaces them one at a time before V5 activation, commits a transaction with each 3-of-4 remainder, replays every restarted node to the same block/application state, and then crosses V5.
 
 ## Remaining Work
 
-- Runtime-authorized scheduling, binary manifests, rollback limits, and rolling operator drills.
+- Runtime-authorized scheduling, signed binary manifests, rollback limits, Comet binary upgrades, and staged operator runbook drills.
 - Certified admission/re-entry, stake-to-power, unbonding/rewards, evidence economics, and key rotation.
 - Linux load/soak and state-growth measurements, external security review, remote signing, and staged public networks.

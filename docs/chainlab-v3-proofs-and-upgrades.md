@@ -26,7 +26,7 @@ The implemented schedule rules are deliberately narrow:
 
 At `FinalizeBlock(A-1)`, the application still commits V2 roots and returns a CometBFT consensus-parameter update setting application version 3. CometBFT applies that version to the next height. At height `A`, the application commitment protocol becomes `chainlab-v3` and all three roots use the V3 algorithms.
 
-`Info.AppVersion` reports the version required for the next height. This matters after committing `A-1` and during replay/state sync. A binary whose configured maximum is 2 refuses proposal processing/finalization before publishing the version-3 update, and refuses restart once the next height requires version 3. This models fail-closed incompatible-node behavior; real release compatibility still needs signed binary/version policy and an operator rolling-upgrade runbook.
+`Info.AppVersion` reports the version required for the next height. This matters after committing `A-1` and during replay/state sync. A binary whose configured maximum is 2 refuses proposal processing/finalization before publishing the version-3 update, and refuses restart once the next height requires version 3. This models fail-closed incompatible-node behavior. A real four-validator test now rolls V4-capped applications to V5 one at a time before activation while preserving 3-of-4 progress and replay convergence; signed release compatibility, Comet binary replacement, and a staged operator runbook remain required.
 
 The current schedule is genesis-committed. Runtime governance scheduling remains disabled. V4 and V5 behavior are specified separately in [ChainLab V4 Sparse State](chainlab-v4-sparse-state.md) and [ChainLab V5 Validator Offence Retention](chainlab-v5-offence-retention.md).
 
@@ -98,7 +98,7 @@ Automated coverage includes:
 
 ## Remaining Gates
 
-- Upgrade scheduling is genesis-only; governance authority, deposits/timelocks, binary manifests, rollback windows, and an operator rolling-upgrade drill are not implemented.
+- Upgrade scheduling is genesis-only; governance authority, deposits/timelocks, signed binary manifests, rollback windows, Comet binary replacement, and a staged operator rolling-upgrade drill are not implemented. Automated application replacement is covered separately.
 - V3 state proof construction materializes the full leaf set. V4 provides mutation-aware sparse state and broader state/non-membership routes; an isolated bounded historical proof service and production proof load policy remain open.
 - `chainlab-proof` is a standalone minimal verifier in this repository, not a second independently implemented client or external audit.
 - A trusted-header/light-client, bridge, wallet, and explorer verification path is not yet integrated.

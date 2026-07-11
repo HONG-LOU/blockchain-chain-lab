@@ -35,14 +35,15 @@ import (
 )
 
 const (
-	processHelperModeEnv         = "CHAINLAB_PROCESS_HELPER_MODE"
-	processHelperHomeEnv         = "CHAINLAB_PROCESS_HELPER_HOME"
-	processHelperGenesisEnv      = "CHAINLAB_PROCESS_HELPER_GENESIS"
-	processHelperListenEnv       = "CHAINLAB_PROCESS_HELPER_LISTEN"
-	processHelperDataDirEnv      = "CHAINLAB_PROCESS_HELPER_DATA_DIR"
-	processHelperStateSyncRPCEnv = "CHAINLAB_PROCESS_HELPER_STATE_SYNC_RPC"
-	processHelperTrustHeightEnv  = "CHAINLAB_PROCESS_HELPER_TRUST_HEIGHT"
-	processHelperTrustHashEnv    = "CHAINLAB_PROCESS_HELPER_TRUST_HASH"
+	processHelperModeEnv          = "CHAINLAB_PROCESS_HELPER_MODE"
+	processHelperHomeEnv          = "CHAINLAB_PROCESS_HELPER_HOME"
+	processHelperGenesisEnv       = "CHAINLAB_PROCESS_HELPER_GENESIS"
+	processHelperListenEnv        = "CHAINLAB_PROCESS_HELPER_LISTEN"
+	processHelperDataDirEnv       = "CHAINLAB_PROCESS_HELPER_DATA_DIR"
+	processHelperMaxAppVersionEnv = "CHAINLAB_PROCESS_HELPER_MAX_APP_VERSION"
+	processHelperStateSyncRPCEnv  = "CHAINLAB_PROCESS_HELPER_STATE_SYNC_RPC"
+	processHelperTrustHeightEnv   = "CHAINLAB_PROCESS_HELPER_TRUST_HEIGHT"
+	processHelperTrustHashEnv     = "CHAINLAB_PROCESS_HELPER_TRUST_HASH"
 )
 
 func TestFourValidatorProcessesRestartReplayBlockAndStateSync(t *testing.T) {
@@ -382,6 +383,134 @@ func TestFourValidatorV3V4V5ScheduledUpgradesAndSparseProofs(t *testing.T) {
 	waitForRPCReady(t, clients, 45*time.Second)
 	waitForPeerMesh(t, clients, 45*time.Second)
 	_ = waitForConsistentNetworkState(t, clients, 9, network.Nodes[0].ChainLabAddress, 0, 45*time.Second)
+	assertV5NetworkStateAndProofs(t, clients, network.Nodes[0].ChainLabAddress)
+}
+
+func TestFourValidatorV5RollingApplicationUpgrade(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping multi-process CometBFT rolling upgrade network in short mode")
+	}
+	if processRaceEnabled {
+		t.Skip("the process-boundary test is covered by the non-race run; package logic remains race-tested")
+	}
+	basePort := availablePortRange(t, 12)
+	root := filepath.Join(t.TempDir(), "protocol-v5-rolling-network")
+	policy := chainabci.DefaultValidatorPolicy()
+	policy.EpochLength = 4
+	network, err := InitializeNetwork(NetworkConfig{
+		OutputRoot: root, ChainID: "chainlab-v5-rolling", ValidatorCount: 4,
+		GenesisTime:  time.Date(2026, time.July, 10, 12, 0, 0, 0, time.UTC),
+		ABCIBasePort: basePort, RPCBasePort: basePort + 4, P2PBasePort: basePort + 8,
+		ApplicationProtocol: chainabci.ProtocolVersionV2, ValidatorPolicy: &policy,
+		ProtocolUpgrades: []chainabci.ProtocolUpgrade{
+			{Height: 4, Protocol: chainabci.ProtocolVersionV3},
+			{Height: 6, Protocol: chainabci.ProtocolVersionV4},
+			{Height: 30, Protocol: chainabci.ProtocolVersionV5},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	processes := make([]*helperProcess, 0, len(network.Nodes)*4)
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		for _, process := range processes {
+			t.Logf("%s log:\n%s", process.name, process.tailLog())
+		}
+	})
+	apps := make([]*helperProcess, len(network.Nodes))
+	cometNodes := make([]*helperProcess, len(network.Nodes))
+	for index, generatedNode := range network.Nodes {
+		home := filepath.Join(root, generatedNode.Home)
+		apps[index] = startHelperProcess(t, root, fmt.Sprintf("rolling-v4-app-%d", index), map[string]string{
+			processHelperModeEnv: "abci", processHelperGenesisEnv: filepath.Join(home, filepath.FromSlash(AppGenesisPath)),
+			processHelperListenEnv: generatedNode.ABCIListenAddress, processHelperDataDirEnv: filepath.Join(root, filepath.FromSlash(generatedNode.ApplicationData)),
+			processHelperMaxAppVersionEnv: strconv.FormatUint(chainabci.AppVersionV4, 10),
+		})
+		processes = append(processes, apps[index])
+	}
+	for _, generatedNode := range network.Nodes {
+		waitForTCP(t, generatedNode.ABCIListenAddress, 15*time.Second)
+	}
+	for index, generatedNode := range network.Nodes {
+		cometNodes[index] = startHelperProcess(t, root, fmt.Sprintf("rolling-comet-%d", index), map[string]string{
+			processHelperModeEnv: "comet", processHelperHomeEnv: filepath.Join(root, generatedNode.Home),
+		})
+		processes = append(processes, cometNodes[index])
+	}
+	clients := make([]*rpchttp.HTTP, len(network.Nodes))
+	for index, generatedNode := range network.Nodes {
+		client, err := rpchttp.New(httpAddress(generatedNode.RPCListenAddress), "/websocket")
+		if err != nil {
+			t.Fatal(err)
+		}
+		clients[index] = client
+	}
+	waitForRPCReady(t, clients, 45*time.Second)
+	waitForPeerMesh(t, clients, 45*time.Second)
+	senderKey := loadChainPrivateValidatorKey(t, filepath.Join(root, network.Nodes[0].Home, "config", "priv_validator_key.json"))
+	sender := chaincrypto.AddressFromPrivateKey(senderKey)
+	receiver := "0x3333333333333333333333333333333333333333"
+	height := waitForConsistentNetworkState(t, clients, 8, sender, 0, 45*time.Second)
+
+	for index, generatedNode := range network.Nodes {
+		if err := cometNodes[index].stop(); err != nil {
+			t.Fatal(err)
+		}
+		if err := apps[index].stop(); err != nil {
+			t.Fatal(err)
+		}
+		activeClients := clientsExcept(clients, index)
+		broadcastTransfer(t, activeClients[0], senderKey, network.ChainID, sender, receiver, uint64(index), uint64(index+1))
+		height = waitForConsistentNetworkState(t, activeClients, height+1, sender, uint64(index+1), 45*time.Second)
+
+		home := filepath.Join(root, generatedNode.Home)
+		apps[index] = startHelperProcess(t, root, fmt.Sprintf("rolling-v5-app-%d", index), map[string]string{
+			processHelperModeEnv: "abci", processHelperGenesisEnv: filepath.Join(home, filepath.FromSlash(AppGenesisPath)),
+			processHelperListenEnv: generatedNode.ABCIListenAddress, processHelperDataDirEnv: filepath.Join(root, filepath.FromSlash(generatedNode.ApplicationData)),
+			processHelperMaxAppVersionEnv: strconv.FormatUint(chainabci.AppVersionV5, 10),
+		})
+		processes = append(processes, apps[index])
+		waitForTCP(t, generatedNode.ABCIListenAddress, 15*time.Second)
+		cometNodes[index] = startHelperProcess(t, root, fmt.Sprintf("rolling-v5-comet-%d", index), map[string]string{
+			processHelperModeEnv: "comet", processHelperHomeEnv: home,
+		})
+		processes = append(processes, cometNodes[index])
+		waitForRPCReady(t, []*rpchttp.HTTP{clients[index]}, 45*time.Second)
+		height = waitForConsistentNetworkState(t, clients, height, sender, uint64(index+1), 45*time.Second)
+	}
+
+	assertNetworkProtocol(t, clients, chainabci.ProtocolVersionV4)
+	waitForPeerMesh(t, clients, 45*time.Second)
+	_ = waitForConsistentNetworkState(t, clients, 31, sender, uint64(len(network.Nodes)), 60*time.Second)
+	assertV5NetworkStateAndProofs(t, clients, sender)
+}
+
+func assertNetworkProtocol(t *testing.T, clients []*rpchttp.HTTP, want string) {
+	t.Helper()
+	for index, client := range clients {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		result, err := client.ABCIQuery(ctx, "/app", nil)
+		cancel()
+		if err != nil || result.Response.Code != chainabci.CodeOK {
+			t.Fatalf("node %d app query=%+v err=%v", index, result, err)
+		}
+		var commitment struct {
+			Protocol string `json:"protocol"`
+		}
+		if err := json.Unmarshal(result.Response.Value, &commitment); err != nil {
+			t.Fatal(err)
+		}
+		if commitment.Protocol != want {
+			t.Fatalf("node %d protocol=%q want=%q", index, commitment.Protocol, want)
+		}
+	}
+}
+
+func assertV5NetworkStateAndProofs(t *testing.T, clients []*rpchttp.HTTP, account string) {
+	t.Helper()
 
 	for index, client := range clients {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -401,7 +530,7 @@ func TestFourValidatorV3V4V5ScheduledUpgradesAndSparseProofs(t *testing.T) {
 			t.Fatalf("node %d protocol = %q", index, commitment.Protocol)
 		}
 		ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
-		proofResult, err := client.ABCIQuery(ctx, "/proof/account", []byte(network.Nodes[0].ChainLabAddress))
+		proofResult, err := client.ABCIQuery(ctx, "/proof/account", []byte(account))
 		cancel()
 		if err != nil || proofResult.Response.Code != chainabci.CodeOK {
 			t.Fatalf("node %d proof query=%+v err=%v", index, proofResult, err)
@@ -410,7 +539,7 @@ func TestFourValidatorV3V4V5ScheduledUpgradesAndSparseProofs(t *testing.T) {
 		if err := json.Unmarshal(proofResult.Response.Value, &envelope); err != nil {
 			t.Fatal(err)
 		}
-		expectedStateKey := "account:" + base64.RawURLEncoding.EncodeToString([]byte(network.Nodes[0].ChainLabAddress))
+		expectedStateKey := "account:" + base64.RawURLEncoding.EncodeToString([]byte(account))
 		if _, exists, err := chainproof.VerifySparseEnvelope(
 			commitment.StateRoot, proofResult.Response.Height,
 			chainproof.KindState, expectedStateKey, envelope,
@@ -425,6 +554,12 @@ func TestFourValidatorV3V4V5ScheduledUpgradesAndSparseProofs(t *testing.T) {
 			t.Fatalf("node %d consensus params=%+v err=%v", index, params, err)
 		}
 	}
+}
+
+func clientsExcept(clients []*rpchttp.HTTP, excluded int) []*rpchttp.HTTP {
+	result := make([]*rpchttp.HTTP, 0, len(clients)-1)
+	result = append(result, clients[:excluded]...)
+	return append(result, clients[excluded+1:]...)
 }
 
 func stableEvidenceHeight(t *testing.T, client *rpchttp.HTTP) int64 {
@@ -528,9 +663,15 @@ func TestChainLabProcessHelper(t *testing.T) {
 		if loadErr != nil {
 			t.Fatal(loadErr)
 		}
+		var maxAppVersion uint64
+		if raw := os.Getenv(processHelperMaxAppVersionEnv); raw != "" {
+			maxAppVersion, err = strconv.ParseUint(raw, 10, 64)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
 		err = chainabci.ServeWithConfig(ctx, os.Getenv(processHelperListenEnv), chainabci.Config{
-			Genesis: genesis,
-			DataDir: os.Getenv(processHelperDataDirEnv),
+			Genesis: genesis, DataDir: os.Getenv(processHelperDataDirEnv), MaxAppVersion: maxAppVersion,
 		}, logger)
 	case "comet":
 		options := RunOptions{}

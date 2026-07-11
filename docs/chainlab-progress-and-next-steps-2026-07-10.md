@@ -134,7 +134,7 @@ Verification coverage includes smart-account and delegated-EOA end-to-end rotati
 - Snapshot format 1 is canonical, bounded to 512 MiB, split into exact 1 MiB chunks, and binds genesis, height, app hash, state root, content hash, document checksum, proposer bindings, state, transactions, and receipts. Direct tests cover multi-chunk out-of-order import, untrusted app hashes, corrupt content, restore failure, restart, and stable advertised chunks across rotation.
 - Socket mode is deliberately locked to Comet's bounded `flood` mempool. CometBFT v0.39.3 defines `InsertTx`/`ReapTxs` on its interfaces and client but does not dispatch them in the socket server, so app-mempool-over-socket is not claimed. The direct app-side mempool tests remain useful but cover a different transport boundary.
 - The app hash binds height and block identity, so it changes for every empty block. `create_empty_blocks=false` would still trigger unbounded proof-block production; generated nodes instead configure explicit continuous blocks with a 750 ms commit interval. Normal restart keeps Comet's default `double_sign_check_height=0`; setting it positive rejects any retained validator key found in recent valid commits, while monotonic H/R/S protection remains in `priv_validator_state.json`.
-- This is a crash-consistent incremental application/network lifecycle, not a completed production network. Store V2 removes complete per-height disk copies and full-state delta comparison at ordinary heights, but flat integrity roots, V3 full-state proof roots, and checkpoints still traverse current state. Incremental authenticated roots, wider power-loss phases, operational restore drills, external rollback protection, partitions, Byzantine faults, rolling upgrades, remote signing, and Linux load/soak evidence remain open production gates. The exact storage contract is in `docs/chainlab-application-storage-v2.md`.
+- This is a crash-consistent incremental application/network lifecycle, not a completed production network. Store V2 removes complete per-height disk copies and full-state delta comparison at ordinary heights, but flat integrity roots, V3 full-state proof roots, and checkpoints still traverse current state. Wider power-loss phases, operational restore drills, external rollback protection, partitions, Byzantine faults, signed release/Comet binary rolling drills, remote signing, and Linux load/soak evidence remain open production gates. The exact storage contract is in `docs/chainlab-application-storage-v2.md`.
 
 ### ChainLab V2 Evidence Slashing And Epoch Removal
 
@@ -175,7 +175,7 @@ Verification coverage includes smart-account and delegated-EOA end-to-end rotati
 - V5 offences commit the original evidence Unix seconds/nanoseconds. V2-V4 tombstones omit that data and remain permanent rather than guessing the duration-age condition.
 - Before V5 proposal execution, timestamped offences compact only when block age and duration age are both strictly greater than the genesis evidence policy. One-dimensional expiry retains the tombstone; already expired evidence is rejected before deletion can expose its key.
 - Compaction runs on the detached proposal state, enters mutation deltas, validator/sparse roots, restart/history, snapshot/state sync, and emits deterministic prune events. Sparse offence proofs transition from membership to non-membership.
-- Direct boundary, old-binary, schedule, restart, state-sync, fixed fresh-process, and real four-validator V3/V4/V5 activation tests pass. Exact behavior is in `docs/chainlab-v5-offence-retention.md`.
+- Direct boundary, old-binary, schedule, restart, state-sync, fixed fresh-process, real four-validator V3/V4/V5 activation, and pre-activation rolling application replacement tests pass. Exact behavior is in `docs/chainlab-v5-offence-retention.md`.
 
 ## Verification Evidence
 
@@ -232,7 +232,9 @@ Snapshot V3 txpool restart passed normal pending/queued restart, queued replacem
 
 Canonical-reorg orphan reinsertion passed an end-to-end longer-branch flow through snapshot-v3 restart and subsequent block inclusion, plus stale-nonce suppression, current-pool sender/nonce precedence, and per-sender capacity tests. The focused suite passed ten repetitions; the full unit/race suites, vet, tidy-diff, four builds, demo, and fixed vulnerability scan passed again. Deterministic eviction/TTL and sustained reorg/DoS load remain open.
 
-V5 offence retention passed strict schedule/app-version negotiation, legacy permanence, timestamp schema validation, one-dimension retention, dual-expiry deletion, expired-evidence rejection, mutation-aware sparse membership/non-membership, Pebble restart, application snapshot/state sync, fixed fresh-process app/state/validator roots, and a real four-validator V3/V4/V5 network. The full unit/race suites, vet, tidy-diff, ten repeated V5 runs, four production builds, height-18 demo, and fixed `govulncheck` v1.6.0 scan pass; production load/soak, runtime scheduling, and validator economics remain open.
+V5 offence retention passed strict schedule/app-version negotiation, legacy permanence, timestamp schema validation, one-dimension retention, dual-expiry deletion, expired-evidence rejection, mutation-aware sparse membership/non-membership, Pebble restart, application snapshot/state sync, fixed fresh-process app/state/validator roots, a real four-validator V3/V4/V5 network, and one-at-a-time replacement of V4-capped applications before V5 while each 3-of-4 remainder commits a transaction. The full unit/race suites, vet, tidy-diff, ten repeated V5 runs, four production builds, height-18 demo, and fixed `govulncheck` v1.6.0 scan pass; production load/soak, runtime scheduling, signed releases/Comet binary drills, and validator economics remain open.
+
+The V5 rolling-application network passed three consecutive runs. Every run started four V4-capped applications, crossed V3 and V4, replaced one application and Comet process at a time, committed four transactions while each corresponding validator was offline, replayed each replacement to common block/application state, proved all replacements were complete while the protocol was still V4, and then crossed V5 with app version 5 and valid sparse account proofs. The final tree again passed the full unit/race suites, vet, tidy-diff, four production builds, height-18 demo, and fixed vulnerability scan.
 
 Windows `go mod verify` is not recorded as green for the CometBFT tree. The signed v0.39.3 module zip contains `.github/workflows/e2e-nightly-38x.yml ` with a trailing space; Windows normalizes the extracted cache path to the no-space name, so Go reports the directory as modified even though the file bytes match. Both `goproxy.cn/sumdb/sum.golang.org` and `sum.golang.google.cn` returned the committed module sums `h1:UegHXskZNomsijmm29nL5NkeXtnzkme6fg+q1hPQnEI=` and `h1:PmNfvtw256BC41ad0FABts236CSZnvZ0kjPOciBwTdM=`. The initial 60 non-Comet ABCI checksum lines match CometBFT v0.39.3's upstream `go.sum`; the larger node graph and security overrides were resolved through signed sumdb. A clean Linux module-cache verification remains part of the Linux/amd64 validator release gate.
 
@@ -242,7 +244,7 @@ Ordered by consensus and security dependency rather than feature visibility:
 
 1. **Authoritative CometBFT ABCI++ lifecycle**
    - The `chainlab-v1` lifecycle now runs across real socket and Comet node processes. Four-validator tests cover proposal/finalize/commit, full-mesh P2P, transaction gossip, 3-of-4 progress, Comet restart, block sync, durable app restart, fresh-app replay, destructive-data state sync, common-height block/app-hash equality, and current state-root convergence. Keep the local harness for deterministic differential testing only.
-   - Preserve the implemented v2 evidence slashing and epoch-removal path while adding certified admission/re-entry, stake-derived power, unbonding/rewards, rolling restart/upgrade, partition, delayed/missing proposer, light-client-attack, and broader Byzantine fault tests.
+   - Preserve the implemented v2 evidence slashing, epoch-removal, and rolling application replacement paths while adding certified admission/re-entry, stake-derived power, unbonding/rewards, Comet binary/staged rolling drills, partition, delayed/missing proposer, light-client-attack, and broader Byzantine fault tests.
    - Keep validator join/leave disabled until their certified transition and economics rules are explicitly activated.
 
 2. **Crash-consistent transactional storage**
@@ -252,7 +254,7 @@ Ordered by consensus and security dependency rather than feature visibility:
 
 3. **Protocol lifecycle and proofs**
    - Preserve genesis-scheduled V2-to-V3-to-V4-to-V5 activation, Comet app-version updates, deterministic root/lifecycle migrations, V5 offence retention, incompatible-node rejection, exact-total and sparse proofs, and the standalone trusted-root verifier.
-   - Add runtime-authorized scheduling, binary compatibility manifests, rollback limits, light-client integration, a second independent implementation, isolated proof serving, and operator rolling-upgrade evidence.
+   - Add runtime-authorized scheduling, signed binary compatibility manifests, rollback limits, light-client integration, a second independent implementation, isolated proof serving, Comet binary replacement, and staged operator rolling-upgrade evidence.
 
 4. **Validator signing and node rollback protection**
    - Add remote signer/HSM support with monotonic last-sign state, single-instance locking, and slashing-safe recovery.
@@ -276,7 +278,7 @@ Ordered by consensus and security dependency rather than feature visibility:
 
 1. Extend the V2/V5 evidence-removal foundation into certified admission/re-entry, stake-to-power, unbonding/rewards, governance authority, key rotation, and rolling-upgrade rules without re-enabling ad hoc join/leave transactions; preserve permanent legacy tombstones and V5 forward compaction.
 2. Add incremental Store V2 flat/proof roots, then production-size retention/compaction/load evidence, broader power-loss coverage, an operational restore drill, and external rollback protection.
-3. Extend the multi-process network with partitions, missing proposers, light-client attacks, simultaneous removals, rolling restart/upgrade, and other Byzantine fault cases.
+3. Extend the multi-process network with partitions, missing proposers, light-client attacks, simultaneous removals, Comet binary replacement, staged operator drills, and other Byzantine fault cases while preserving the implemented application rolling upgrade.
 4. Establish the Linux/amd64 validator release target, remote-signer boundary, JIT/RSS limits, reproducible build artifacts, and baseline operational telemetry.
 
 Asset and deployment work stays downstream of the production core: specify the native gas asset and economics, define a production fungible-token standard and issuer controls, add wallet/indexer/explorer/oracle/DEX interfaces, select an audited IBC/bridge or issuer-native stablecoin path, and size validator/sentry/RPC/archive hardware from Linux multi-process load results rather than estimates.

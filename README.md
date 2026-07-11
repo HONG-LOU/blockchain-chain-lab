@@ -405,7 +405,7 @@ All ordinary HTTP routes share 32 execution slots; `/health/live` and valid WebS
 The production sequence is:
 
 - production activation and Linux/amd64 evidence for the implemented deterministic WASM, included-failure, and native-contract metering rules
-- CometBFT evidence slashing, validator updates/epochs, partitions, rolling upgrades, and broader multi-process fault tests on the implemented block/state-sync path
+- CometBFT evidence slashing, validator updates/epochs, partitions, Comet binary rolling upgrades, staged operator drills, and broader multi-process fault tests on the implemented block/state-sync path
 - isolated historical proof reads, Linux retention/migration/compaction/load evidence, restore drills, and rollback protection
 - runtime-authorized upgrades, trusted light-client integration, protected validator signing, metrics/alerts, fuzz/property/race/fault/load/soak validation
 - economics, governance security, wallet/SDK/indexer/token/oracle/interoperability ecosystem and staged public testnets
