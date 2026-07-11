@@ -241,12 +241,25 @@ func (store *applicationDB) saveV2(value persistedApplicationState, forceCheckpo
 	if err := validatePersistedApplicationState(store.genesis, store.genesisHash, value); err != nil {
 		return err
 	}
-	next, err := flattenStateSnapshot(value.committed.store.Snapshot())
+	checkpoint := forceCheckpoint || height == 0 || store.shouldCheckpointV2(height)
+	sets, deletes, err := flatDeltaFromStoreMutations(store.currentFlat, value.committed.store)
 	if err != nil {
 		return err
 	}
-	sets, deletes := diffFlatState(store.currentFlat, next)
-	checkpoint := forceCheckpoint || height == 0 || store.shouldCheckpointV2(height)
+	next, err := projectFlatState(store.currentFlat, sets, deletes)
+	if err != nil {
+		return err
+	}
+	if checkpoint {
+		complete, err := flattenStateSnapshot(value.committed.store.Snapshot())
+		if err != nil {
+			return err
+		}
+		if err := validateFlatMutationDelta(store.currentFlat, complete, sets, deletes); err != nil {
+			return err
+		}
+		next = complete
+	}
 	manifest, err := store.manifestV2(value, next, sets, deletes, checkpoint)
 	if err != nil {
 		return err
@@ -304,7 +317,7 @@ func (store *applicationDB) saveV2(value persistedApplicationState, forceCheckpo
 	}
 	store.currentHeight = height
 	store.minimumHeight = nextMinimum
-	store.currentFlat = cloneFlatState(next)
+	store.currentFlat = next
 	return nil
 }
 

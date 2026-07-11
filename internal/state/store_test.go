@@ -709,3 +709,63 @@ func restoredStore(t *testing.T, snapshot state.Snapshot) *state.Store {
 	}
 	return store
 }
+
+func TestStoreMutationJournalIsDetachedAndTracksSemanticWrites(t *testing.T) {
+	store := restoredStore(t, canonicalSnapshotFixture())
+	if mutations := store.Mutations(); !mutations.Empty() {
+		t.Fatalf("restored store mutations = %+v", mutations)
+	}
+
+	account := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	validator := "0xdddddddddddddddddddddddddddddddddddddddd"
+	proposalID := types.ProposalID("0x" + strings.Repeat("1", 64))
+	store.SetBalance(account, 101)
+	if err := store.SetStorage(account, "profile", "updated"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddStake(account, 1); err != nil {
+		t.Fatal(err)
+	}
+	proposal := store.Proposal(proposalID)
+	proposal.Value = "41000000"
+	store.SetProposal(proposal)
+	store.SetParam("block.gas_limit", "41000000")
+	codes := store.ContractCodes()
+	if len(codes) != 1 {
+		t.Fatalf("contract codes = %#v", codes)
+	}
+	codes[0].Creator = validator
+	store.SetContractCode(codes[0])
+	if err := store.AddValidator(validator); err != nil {
+		t.Fatal(err)
+	}
+
+	mutations := store.Mutations()
+	if !reflect.DeepEqual(mutations.Accounts, []string{account}) {
+		t.Fatalf("account mutations = %#v", mutations.Accounts)
+	}
+	if !reflect.DeepEqual(mutations.AccountStorage, []state.StorageMutation{{Address: account, Key: "profile"}}) {
+		t.Fatalf("storage mutations = %#v", mutations.AccountStorage)
+	}
+	if !reflect.DeepEqual(mutations.Stakes, []string{account}) ||
+		!reflect.DeepEqual(mutations.Proposals, []string{proposalID}) ||
+		!reflect.DeepEqual(mutations.Params, []string{"block.gas_limit"}) || !mutations.Validators {
+		t.Fatalf("semantic mutations = %+v", mutations)
+	}
+	if !reflect.DeepEqual(mutations.ContractCodes, []string{codes[0].CodeID}) {
+		t.Fatalf("contract code mutations = %#v", mutations.ContractCodes)
+	}
+
+	clone := store.Clone()
+	clone.ResetMutations()
+	if !clone.Mutations().Empty() {
+		t.Fatalf("reset clone mutations = %+v", clone.Mutations())
+	}
+	if store.Mutations().Empty() {
+		t.Fatal("resetting clone cleared original mutation journal")
+	}
+	store.ResetMutations()
+	if !store.Mutations().Empty() {
+		t.Fatalf("reset store mutations = %+v", store.Mutations())
+	}
+}

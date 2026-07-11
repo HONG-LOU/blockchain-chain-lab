@@ -31,6 +31,7 @@ type Store struct {
 	params             map[string]string
 	validators         []string
 	validatorLifecycle *ValidatorLifecycle
+	mutations          mutationTracker
 }
 
 // Reader is the read-only state capability exposed to contract execution.
@@ -226,6 +227,7 @@ func NewStoreFromSnapshot(snapshot Snapshot) (*Store, error) {
 			return nil, fmt.Errorf("invalid snapshot validator lifecycle: %w", err)
 		}
 	}
+	store.ResetMutations()
 	return store, nil
 }
 
@@ -405,6 +407,7 @@ func (s *Store) Clone() *Store {
 		lifecycle := cloneValidatorLifecycle(*s.validatorLifecycle)
 		clone.validatorLifecycle = &lifecycle
 	}
+	clone.mutations = cloneMutationTracker(s.mutations)
 	return clone
 }
 
@@ -441,6 +444,7 @@ func (s *Store) ReplaceWith(other *Store) {
 	s.params = replacement.params
 	s.validators = replacement.validators
 	s.validatorLifecycle = replacement.validatorLifecycle
+	s.mutations = replacement.mutations
 }
 
 func (s *Store) GetAccount(address string) types.Account {
@@ -450,28 +454,43 @@ func (s *Store) GetAccount(address string) types.Account {
 }
 
 func (s *Store) SetBalance(address string, amount uint64) {
+	address = normalize(address)
 	account := s.account(address)
+	if prior, exists := s.accounts[address]; exists && prior.Balance == amount {
+		return
+	}
 	account.Balance = amount
-	s.accounts[normalize(address)] = account
+	s.accounts[address] = account
+	s.markAccount(address)
 }
 
 func (s *Store) AddBalance(address string, amount uint64) error {
+	address = normalize(address)
 	account := s.account(address)
 	if math.MaxUint64-account.Balance < amount {
 		return errors.New("balance overflow")
 	}
+	_, existed := s.accounts[address]
 	account.Balance += amount
-	s.accounts[normalize(address)] = account
+	s.accounts[address] = account
+	if amount != 0 || !existed {
+		s.markAccount(address)
+	}
 	return nil
 }
 
 func (s *Store) SubBalance(address string, amount uint64) error {
+	address = normalize(address)
 	account := s.account(address)
 	if account.Balance < amount {
 		return errors.New("insufficient funds")
 	}
+	_, existed := s.accounts[address]
 	account.Balance -= amount
-	s.accounts[normalize(address)] = account
+	s.accounts[address] = account
+	if amount != 0 || !existed {
+		s.markAccount(address)
+	}
 	return nil
 }
 
@@ -490,25 +509,37 @@ func (s *Store) Transfer(from string, to string, amount uint64) error {
 }
 
 func (s *Store) IncrementNonce(address string) error {
+	address = normalize(address)
 	account := s.account(address)
 	if account.Nonce == math.MaxUint64 {
 		return errors.New("nonce overflow")
 	}
 	account.Nonce++
-	s.accounts[normalize(address)] = account
+	s.accounts[address] = account
+	s.markAccount(address)
 	return nil
 }
 
 func (s *Store) SetNonce(address string, nonce uint64) {
+	address = normalize(address)
 	account := s.account(address)
+	if prior, exists := s.accounts[address]; exists && prior.Nonce == nonce {
+		return
+	}
 	account.Nonce = nonce
-	s.accounts[normalize(address)] = account
+	s.accounts[address] = account
+	s.markAccount(address)
 }
 
 func (s *Store) SetCodeID(address string, codeID string) {
+	address = normalize(address)
 	account := s.account(address)
+	if prior, exists := s.accounts[address]; exists && prior.CodeID == codeID {
+		return
+	}
 	account.CodeID = codeID
-	s.accounts[normalize(address)] = account
+	s.accounts[address] = account
+	s.markAccount(address)
 }
 
 func (s *Store) CodeID(address string) string {
@@ -516,15 +547,25 @@ func (s *Store) CodeID(address string) string {
 }
 
 func (s *Store) SetDelegatedCodeID(address string, codeID string) {
+	address = normalize(address)
+	codeID = strings.TrimSpace(codeID)
 	account := s.account(address)
-	account.DelegatedCodeID = strings.TrimSpace(codeID)
-	s.accounts[normalize(address)] = account
+	if prior, exists := s.accounts[address]; exists && prior.DelegatedCodeID == codeID {
+		return
+	}
+	account.DelegatedCodeID = codeID
+	s.accounts[address] = account
+	s.markAccount(address)
 }
 
 func (s *Store) ClearDelegation(address string) {
+	address = normalize(address)
 	account := s.account(address)
-	account.DelegatedCodeID = ""
-	s.accounts[normalize(address)] = account
+	if _, exists := s.accounts[address]; !exists || account.DelegatedCodeID != "" {
+		account.DelegatedCodeID = ""
+		s.accounts[address] = account
+		s.markAccount(address)
+	}
 	s.DeleteStorage(address, "owner")
 	s.DeleteStoragePrefix(address, "session:")
 	s.DeleteStoragePrefix(address, "recovery:")
@@ -560,6 +601,7 @@ func (s *Store) SetStorage(address string, key string, value string) error {
 	account.Storage[key] = value
 	s.accounts[address] = account
 	s.storageBytes[address] = storageBytes + nextEntryBytes
+	s.markAccountStorage(address, key)
 	return nil
 }
 
@@ -591,6 +633,7 @@ func (s *Store) SortedStorageKeys(address string) []string {
 func (s *Store) DeleteStorage(address string, key string) {
 	address = normalize(address)
 	account := s.account(address)
+	_, accountExisted := s.accounts[address]
 	if previous, exists := account.Storage[key]; exists {
 		deletedBytes := len(key) + len(previous)
 		if currentBytes, cached := s.storageBytes[address]; cached && currentBytes >= deletedBytes {
@@ -599,16 +642,21 @@ func (s *Store) DeleteStorage(address string, key string) {
 			s.storageBytes[address] = storageSizeAfterDeleting(account.Storage, key)
 		}
 		delete(account.Storage, key)
+		s.markAccountStorage(address, key)
 	} else if _, cached := s.storageBytes[address]; !cached && len(account.Storage) == 0 {
 		s.storageBytes[address] = 0
 	}
 	s.accounts[address] = account
+	if !accountExisted {
+		s.markAccount(address)
+	}
 }
 
 // DeleteStoragePrefix removes storage entries whose keys start with prefix and returns the number removed.
 func (s *Store) DeleteStoragePrefix(address string, prefix string) int {
 	address = normalize(address)
 	account := s.account(address)
+	_, accountExisted := s.accounts[address]
 	keys := make([]string, 0)
 	deletedBytes := 0
 	for key := range account.Storage {
@@ -620,6 +668,7 @@ func (s *Store) DeleteStoragePrefix(address string, prefix string) int {
 	sort.Strings(keys)
 	for _, key := range keys {
 		delete(account.Storage, key)
+		s.markAccountStorage(address, key)
 	}
 	if currentBytes, cached := s.storageBytes[address]; cached && currentBytes >= deletedBytes {
 		s.storageBytes[address] = currentBytes - deletedBytes
@@ -627,6 +676,9 @@ func (s *Store) DeleteStoragePrefix(address string, prefix string) int {
 		s.storageBytes[address] = storageSize(account.Storage)
 	}
 	s.accounts[address] = account
+	if !accountExisted {
+		s.markAccount(address)
+	}
 	return len(keys)
 }
 
@@ -646,7 +698,11 @@ func (s *Store) SetContractCode(code types.ContractCode) {
 	if code.CodeID == "" {
 		return
 	}
+	if prior, exists := s.codes[code.CodeID]; exists && prior == code {
+		return
+	}
 	s.codes[code.CodeID] = code
+	s.markContractCode(code.CodeID)
 }
 
 func (s *Store) ContractCode(codeID string) (types.ContractCode, bool) {
@@ -667,7 +723,11 @@ func (s *Store) AddStake(address string, amount uint64) error {
 	if math.MaxUint64-s.stakes[address] < amount {
 		return errors.New("stake overflow")
 	}
+	_, existed := s.stakes[address]
 	s.stakes[address] += amount
+	if amount != 0 || !existed {
+		s.markStake(address)
+	}
 	return nil
 }
 
@@ -676,7 +736,11 @@ func (s *Store) SubStake(address string, amount uint64) error {
 	if s.stakes[address] < amount {
 		return errors.New("insufficient stake")
 	}
+	_, existed := s.stakes[address]
 	s.stakes[address] -= amount
+	if amount != 0 || !existed {
+		s.markStake(address)
+	}
 	return nil
 }
 
@@ -698,6 +762,7 @@ func (s *Store) SetValidators(validators []string) error {
 		}
 	}
 	s.validators = next.validators
+	s.mutations.validators = true
 	return nil
 }
 
@@ -716,6 +781,7 @@ func (s *Store) RemoveValidator(address string) error {
 	for i, validator := range s.validators {
 		if validator == address {
 			s.validators = append(s.validators[:i], s.validators[i+1:]...)
+			s.mutations.validators = true
 			return nil
 		}
 	}
@@ -738,6 +804,7 @@ func (s *Store) SetProposal(proposal types.Proposal) {
 		proposal.Voters = make(map[string]string)
 	}
 	s.proposals[proposal.ID] = cloneProposal(proposal)
+	s.markProposal(proposal.ID)
 }
 
 func (s *Store) RecordVote(proposalID string, voter string, choice string, power uint64) error {
@@ -777,7 +844,11 @@ func (s *Store) SetParam(key string, value string) {
 	if key == "" {
 		return
 	}
+	if prior, exists := s.params[key]; exists && prior == value {
+		return
+	}
 	s.params[key] = value
+	s.markParam(key)
 }
 
 func (s *Store) Param(key string) string {
@@ -833,6 +904,7 @@ func (s *Store) addValidator(address string) error {
 		}
 	}
 	s.validators = append(s.validators, address)
+	s.mutations.validators = true
 	return nil
 }
 

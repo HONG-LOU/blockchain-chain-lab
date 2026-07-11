@@ -736,15 +736,15 @@ func (a *Application) persistLocked(
 	txs [][]byte,
 	receipts []types.Receipt,
 ) error {
-	if a.persistence == nil {
-		return nil
+	if a.persistence != nil {
+		if err := a.persistence.Save(persistedApplicationState{
+			committed: committed, initialized: initialized, proposers: cloneStringMap(proposers),
+			txs: cloneTransactions(txs), receipts: cloneReceipts(receipts),
+		}); err != nil {
+			return fmt.Errorf("persist committed application state: %w", err)
+		}
 	}
-	if err := a.persistence.Save(persistedApplicationState{
-		committed: committed, initialized: initialized, proposers: cloneStringMap(proposers),
-		txs: cloneTransactions(txs), receipts: cloneReceipts(receipts),
-	}); err != nil {
-		return fmt.Errorf("persist committed application state: %w", err)
-	}
+	committed.store.ResetMutations()
 	return nil
 }
 

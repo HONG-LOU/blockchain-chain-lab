@@ -68,6 +68,35 @@ func (s *Store) SetValidatorLifecycle(lifecycle ValidatorLifecycle) error {
 		return err
 	}
 	cloned := cloneValidatorLifecycle(lifecycle)
+	if s.validatorLifecycle == nil {
+		for key := range cloned.Validators {
+			s.markValidatorIdentity(key)
+		}
+		for key := range cloned.Offences {
+			s.markValidatorOffence(key)
+		}
+	} else {
+		for key, next := range cloned.Validators {
+			if previous, exists := s.validatorLifecycle.Validators[key]; !exists || previous != next {
+				s.markValidatorIdentity(key)
+			}
+		}
+		for key := range s.validatorLifecycle.Validators {
+			if _, exists := cloned.Validators[key]; !exists {
+				s.markValidatorIdentity(key)
+			}
+		}
+		for key, next := range cloned.Offences {
+			if previous, exists := s.validatorLifecycle.Offences[key]; !exists || previous != next {
+				s.markValidatorOffence(key)
+			}
+		}
+		for key := range s.validatorLifecycle.Offences {
+			if _, exists := cloned.Offences[key]; !exists {
+				s.markValidatorOffence(key)
+			}
+		}
+	}
 	s.validatorLifecycle = &cloned
 	return nil
 }

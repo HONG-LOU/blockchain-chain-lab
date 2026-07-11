@@ -33,6 +33,7 @@ func TestFlatStateDeltaChangesOnlyTouchedStorageEntry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	store.ResetMutations()
 	if err := store.SetStorage(account, storageTestKey(500), "changed"); err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +41,10 @@ func TestFlatStateDeltaChangesOnlyTouchedStorageEntry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sets, deletes := diffFlatState(before, after)
+	sets, deletes, err := flatDeltaFromStoreMutations(before, store)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(sets) != 1 || len(deletes) != 0 {
 		t.Fatalf("delta sets=%d deletes=%d", len(sets), len(deletes))
 	}
@@ -48,6 +52,9 @@ func TestFlatStateDeltaChangesOnlyTouchedStorageEntry(t *testing.T) {
 		if entry.Kind != flatKindAccountStorage {
 			t.Fatalf("changed entry kind = %q", entry.Kind)
 		}
+	}
+	if err := validateFlatMutationDelta(before, after, sets, deletes); err != nil {
+		t.Fatal(err)
 	}
 	restoredSnapshot, err := unflattenStateSnapshot(after)
 	if err != nil {
@@ -59,6 +66,156 @@ func TestFlatStateDeltaChangesOnlyTouchedStorageEntry(t *testing.T) {
 	}
 	if restored.Root() != store.Root() {
 		t.Fatalf("flat round trip root=%s want=%s", restored.Root(), store.Root())
+	}
+}
+
+func TestMutationDeltaCollapsesNoOpAndTracksDeletion(t *testing.T) {
+	store := state.NewStore()
+	account := "0x1111111111111111111111111111111111111111"
+	if err := store.SetValidators([]string{account}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetStorage(account, "key", "value"); err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := flattenStateSnapshot(store.Snapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.ResetMutations()
+	if err := store.SetStorage(account, "key", "value"); err != nil {
+		t.Fatal(err)
+	}
+	sets, deletes, err := flatDeltaFromStoreMutations(baseline, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sets) != 0 || len(deletes) != 0 {
+		t.Fatalf("no-op delta sets=%d deletes=%d", len(sets), len(deletes))
+	}
+
+	store.ResetMutations()
+	store.DeleteStorage(account, "key")
+	sets, deletes, err = flatDeltaFromStoreMutations(baseline, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sets) != 0 || len(deletes) != 1 || deletes[0].Kind != flatKindAccountStorage {
+		t.Fatalf("delete delta sets=%d deletes=%+v", len(sets), deletes)
+	}
+	after, err := flattenStateSnapshot(store.Snapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateFlatMutationDelta(baseline, after, sets, deletes); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMutationDeltaMatchesCompleteStateAcrossStoreWrites(t *testing.T) {
+	store := state.NewStore()
+	account := "0x1111111111111111111111111111111111111111"
+	store.SetBalance(account, 1_000_000)
+	if err := store.SetValidators([]string{account}); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 20; index++ {
+		if err := store.SetStorage(account, storageTestKey(index), "initial"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	previous, err := flattenStateSnapshot(store.Snapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.ResetMutations()
+
+	for step := 1; step <= 200; step++ {
+		switch step % 10 {
+		case 0:
+			store.SetBalance(account, 1_000_000+uint64(step))
+		case 1:
+			store.SetNonce(account, uint64(step))
+		case 2:
+			store.SetCodeID(account, "counter.v1")
+		case 3:
+			store.SetDelegatedCodeID(account, "account.v1")
+		case 4:
+			if err := store.SetStorage(account, storageTestKey(step%20), fmt.Sprintf("value:%d", step)); err != nil {
+				t.Fatal(err)
+			}
+		case 5:
+			store.DeleteStorage(account, storageTestKey(step%20))
+		case 6:
+			if err := store.AddStake(account, uint64(step)); err != nil {
+				t.Fatal(err)
+			}
+		case 7:
+			stake := store.StakeOf(account)
+			if stake > 0 {
+				if err := store.SubStake(account, min(stake, uint64(step))); err != nil {
+					t.Fatal(err)
+				}
+			}
+		case 8:
+			store.SetParam("step", fmt.Sprintf("%d", step))
+		case 9:
+			store.ClearDelegation(account)
+		}
+
+		next, err := flattenStateSnapshot(store.Snapshot())
+		if err != nil {
+			t.Fatal(err)
+		}
+		sets, deletes, err := flatDeltaFromStoreMutations(previous, store)
+		if err != nil {
+			t.Fatalf("step %d mutation delta: %v", step, err)
+		}
+		if err := validateFlatMutationDelta(previous, next, sets, deletes); err != nil {
+			t.Fatalf("step %d: %v", step, err)
+		}
+		previous = next
+		store.ResetMutations()
+	}
+}
+
+func TestCheckpointRejectsIncompleteMutationJournal(t *testing.T) {
+	fixture := newApplicationFixture(t, 1_000_000)
+	profile := ArchiveStorageProfile(2)
+	dataDir := filepath.Join(t.TempDir(), "journal-checkpoint")
+	application := newPersistentApplicationWithProfile(t, fixture, dataDir, profile)
+	commitStorageTransfer(t, application, fixture, 1, 0, 1)
+
+	tx := signFixtureTransaction(t, fixture.key, types.Transaction{
+		ChainID: fixture.genesis.ChainID, Type: types.TxTransfer,
+		From: fixture.account, To: "0x2222222222222222222222222222222222222222",
+		Nonce: 1, Value: 1, GasLimit: 21_000, GasPrice: 1,
+	})
+	if _, err := application.FinalizeBlock(context.Background(), &abcitypes.RequestFinalizeBlock{
+		Txs: [][]byte{rawFixtureTransaction(t, tx)}, Hash: blockHash(2), Height: 2,
+		ProposerAddress: fixture.proposerAddress,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	application.candidate.state.store.ResetMutations()
+	if _, err := application.Commit(context.Background(), &abcitypes.RequestCommit{}); err == nil ||
+		!strings.Contains(err.Error(), "mutation journal") {
+		t.Fatalf("incomplete mutation journal error = %v", err)
+	}
+	if application.persistence.(*applicationDB).currentHeight != 1 {
+		t.Fatalf("failed checkpoint advanced storage to %d", application.persistence.(*applicationDB).currentHeight)
+	}
+	if err := application.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := NewApplication(Config{Genesis: fixture.genesis, DataDir: dataDir, Storage: profile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	info, err := restarted.Info(context.Background(), &abcitypes.RequestInfo{})
+	if err != nil || info.LastBlockHeight != 1 {
+		t.Fatalf("restarted checkpoint info=%+v err=%v", info, err)
 	}
 }
 

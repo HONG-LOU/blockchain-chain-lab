@@ -287,6 +287,138 @@ func diffFlatState(previous flatState, next flatState) (flatState, []flatStateEn
 	return sets, deletes
 }
 
+func flatDeltaFromStoreMutations(previous flatState, next *state.Store) (flatState, []flatStateEntry, error) {
+	if next == nil {
+		return nil, nil, errors.New("next state store is required")
+	}
+	sets := make(flatState)
+	deletes := make(flatState)
+	mutations := next.Mutations()
+	for _, address := range mutations.Accounts {
+		account, exists := next.AccountMetadata(address)
+		core := persistedAccount{}
+		if exists {
+			core = persistedAccount{
+				Address: account.Address, Balance: account.Balance, Nonce: account.Nonce,
+				CodeID: account.CodeID, DelegatedCodeID: account.DelegatedCodeID,
+			}
+		}
+		if err := addFlatMutation(previous, sets, deletes, flatKindAccount, []byte(address), core, exists); err != nil {
+			return nil, nil, err
+		}
+	}
+	for _, mutation := range mutations.AccountStorage {
+		key, err := hash.CanonicalBytes(persistedAccountStorageKey{Address: mutation.Address, Key: mutation.Key})
+		if err != nil {
+			return nil, nil, err
+		}
+		value, exists := next.GetStorageWithExists(mutation.Address, mutation.Key)
+		if err := addFlatMutation(previous, sets, deletes, flatKindAccountStorage, key, value, exists); err != nil {
+			return nil, nil, err
+		}
+	}
+	for _, codeID := range mutations.ContractCodes {
+		value, exists := next.ContractCode(codeID)
+		if err := addFlatMutation(previous, sets, deletes, flatKindCode, []byte(codeID), value, exists); err != nil {
+			return nil, nil, err
+		}
+	}
+	for _, address := range mutations.Stakes {
+		value, exists := next.StakeWithExists(address)
+		if err := addFlatMutation(previous, sets, deletes, flatKindStake, []byte(address), value, exists); err != nil {
+			return nil, nil, err
+		}
+	}
+	for _, proposalID := range mutations.Proposals {
+		value, exists := next.ProposalWithExists(proposalID)
+		if err := addFlatMutation(previous, sets, deletes, flatKindProposal, []byte(proposalID), value, exists); err != nil {
+			return nil, nil, err
+		}
+	}
+	for _, key := range mutations.Params {
+		value, exists := next.ParamWithExists(key)
+		if err := addFlatMutation(previous, sets, deletes, flatKindParam, []byte(key), value, exists); err != nil {
+			return nil, nil, err
+		}
+	}
+	if mutations.Validators {
+		if err := addFlatMutation(
+			previous, sets, deletes, flatKindValidators, []byte(flatSingletonKey), next.Validators(), true,
+		); err != nil {
+			return nil, nil, err
+		}
+	}
+	for _, consensusAddress := range mutations.ValidatorIdentities {
+		value, exists := next.ValidatorIdentityByConsensusAddress(consensusAddress)
+		if err := addFlatMutation(
+			previous, sets, deletes, flatKindValidatorIdentity, []byte(consensusAddress), value, exists,
+		); err != nil {
+			return nil, nil, err
+		}
+	}
+	for _, key := range mutations.ValidatorOffences {
+		value, exists := next.ValidatorOffence(key)
+		if err := addFlatMutation(
+			previous, sets, deletes, flatKindValidatorOffence, []byte(key), value, exists,
+		); err != nil {
+			return nil, nil, err
+		}
+	}
+	orderedDeletes := flatEntriesSorted(deletes)
+	return sets, orderedDeletes, nil
+}
+
+func addFlatMutation(
+	previous flatState,
+	sets flatState,
+	deletes flatState,
+	kind string,
+	key []byte,
+	value any,
+	exists bool,
+) error {
+	if !validFlatStateKind(kind) || len(key) == 0 {
+		return errors.New("flat state mutation kind or key is invalid")
+	}
+	id := flatStateID(kind, key)
+	prior, existed := previous[id]
+	if !exists {
+		if existed {
+			deletes[id] = cloneFlatStateEntry(prior)
+		}
+		return nil
+	}
+	raw, err := hash.CanonicalBytes(value)
+	if err != nil {
+		return err
+	}
+	if existed && bytes.Equal(prior.Value, raw) {
+		return nil
+	}
+	sets[id] = flatStateEntry{Kind: kind, Key: append([]byte(nil), key...), Value: raw}
+	return nil
+}
+
+func validateFlatMutationDelta(previous flatState, next flatState, sets flatState, deletes []flatStateEntry) error {
+	wantSets, wantDeletes := diffFlatState(previous, next)
+	if len(sets) != len(wantSets) || len(deletes) != len(wantDeletes) {
+		return errors.New("state mutation journal does not match the complete state delta")
+	}
+	for id, want := range wantSets {
+		got, exists := sets[id]
+		if !exists || got.Kind != want.Kind || !bytes.Equal(got.Key, want.Key) || !bytes.Equal(got.Value, want.Value) {
+			return errors.New("state mutation journal does not match the complete state delta")
+		}
+	}
+	for index, want := range wantDeletes {
+		got := deletes[index]
+		if got.Kind != want.Kind || !bytes.Equal(got.Key, want.Key) {
+			return errors.New("state mutation journal does not match the complete state delta")
+		}
+	}
+	return nil
+}
+
 func applyFlatDelta(target flatState, sets flatState, deletes []flatStateEntry) error {
 	for _, entry := range deletes {
 		id := flatStateID(entry.Kind, entry.Key)
@@ -355,6 +487,17 @@ func cloneFlatState(input flatState) flatState {
 		cloned[id] = cloneFlatStateEntry(entry)
 	}
 	return cloned
+}
+
+func projectFlatState(input flatState, sets flatState, deletes []flatStateEntry) (flatState, error) {
+	projected := make(flatState, len(input)+len(sets))
+	for id, entry := range input {
+		projected[id] = entry
+	}
+	if err := applyFlatDelta(projected, sets, deletes); err != nil {
+		return nil, err
+	}
+	return projected, nil
 }
 
 func cloneFlatStateEntry(entry flatStateEntry) flatStateEntry {

@@ -6,7 +6,7 @@ Status date: 2026-07-11
 
 `chainlab-app-store-v2` is the durable application-state format used by the CometBFT ABCI++ process. It replaces the V1 complete per-height disk copy with a flat current state, incremental height deltas, and periodic checkpoints while preserving one-batch commit atomicity.
 
-This document specifies implemented behavior. It does not claim production throughput, filesystem-independent rollback protection, or proof-serving state.
+This document specifies implemented behavior. It does not claim production throughput, filesystem-independent rollback protection, or production-scale proof serving.
 
 ## Atomic Layout
 
@@ -24,7 +24,9 @@ One `pebble.Sync` batch updates live entries, writes the new delta/checkpoint an
 
 Accounts and account-storage keys are separate flat entries. Contract code, stake, proposals, parameters, validator identities, validator offences, and the active validator slice also have independent entries. Updating one contract storage key therefore persists one storage delta instead of rewriting its account or every state key.
 
-The implementation currently creates the delta by flattening and comparing the complete in-memory state. Disk growth is incremental, but commit-time delta generation is still O(current state). Mutation-aware dirty tracking and production-size Linux benchmarks remain required.
+The in-memory `state.Store` now keeps a detached semantic mutation journal for account metadata, individual account-storage keys, contract code, stake, proposals, parameters, the validator slice, validator identities, and validator offences. Store clones carry the journal through proposal simulation, failed-transaction ante settlement, and finalization. Only a successful durable application commit resets it.
+
+Ordinary heights encode delta sets/deletes only from that journal and compare each touched entry with the previous flat value, so a write restored to its prior value produces no disk delta. The projected live map reuses immutable prior entry bytes and is published only after the synchronized Pebble batch succeeds. Checkpoint heights still flatten the complete state and compare the journal delta with a complete diff; any omitted or extra mutation fails closed before the batch is committed. Genesis creation, V1 migration, state-sync restore, checkpoints, flat-state integrity roots, and V3 full-state proof roots still require complete-state work. The implementation therefore closes mutation-aware delta generation and write amplification, but does not claim the complete commit path is O(mutations).
 
 ## Retention Profiles
 
@@ -80,7 +82,8 @@ Startup verifies database identity, profile, current/minimum range, current live
 
 Automated coverage includes:
 
-- single-key delta generation against 1,000 account-storage entries;
+- single-key mutation delta generation against 1,000 account-storage entries, no-op collapse, deletion, clone/reset isolation, and 200 sequential semantic-write/full-diff comparisons;
+- checkpoint rejection of an intentionally cleared mutation journal without advancing the database, followed by a successful restart at the previous height;
 - archive historical reads, restart, backup/open, and compaction;
 - bounded full retention and latest-only pruned retention;
 - deterministic V1 migration, interrupted-shadow replacement, pruned migration, and profile mismatch rejection;
@@ -88,4 +91,6 @@ Automated coverage includes:
 - missing live entries, receipt corruption, corrupt deltas, and invalid history boundaries;
 - abrupt process exit and forced termination around a multi-megabyte synchronized batch.
 
-Remaining production gates include mutation-aware delta generation, nonblocking bounded historical reads, production-size migration/compaction/load/soak evidence on Linux, wider power-loss and disk-full phases, an operator restore drill, external monotonic rollback protection, metrics/alerts, and independent state/transaction/receipt proofs.
+On Windows/amd64 development hardware, the committed benchmark for one changed storage key measured mutation-journal delta construction at about 1.3–1.7 microseconds and 1.35 KiB/12 allocations for both 1,000 and 4,096 existing entries. The former full snapshot/flatten/diff path measured about 1.46 milliseconds/1.1 MiB/8,054 allocations at 1,000 entries and 6.2 milliseconds/4.7 MiB/about 32,865 allocations at 4,096 entries. These figures isolate delta construction only; they are not Linux capacity, end-to-end commit latency, or mainnet throughput evidence.
+
+Remaining production gates include an incremental authenticated flat-state/proof-root accumulator, nonblocking bounded historical/proof reads, production-size migration/compaction/load/soak evidence on Linux, wider power-loss and disk-full phases, an operator restore drill, external monotonic rollback protection, and metrics/alerts.
