@@ -4,10 +4,11 @@ Status date: 2026-07-11
 
 ## Scope
 
-ChainLab's production path uses CometBFT v0.39.3 rather than the local PoA harness for Byzantine consensus. The real-process suite now fixes four equal-power four-validator availability boundaries:
+ChainLab's production path uses CometBFT v0.39.3 rather than the local PoA harness for Byzantine consensus. The real-process suite now fixes five equal-power four-validator availability boundaries:
 
 - one validator unavailable: the remaining 3-of-4 commit transactions;
 - the predicted round-0 proposer unavailable: the remaining 3-of-4 advance to a later round, commit, and converge after recovery;
+- the predicted round-0 proposer connected but its proposal construction delayed beyond timeout: the full mesh remains intact while the network advances rounds and commits;
 - two validators unavailable: 2-of-4 cannot advance consensus or committed application state;
 - a symmetric 2+2 P2P topology partition: neither side commits, transaction gossip stays on its originating side, and healing converges without divergent application state.
 
@@ -41,6 +42,12 @@ Height `H+1` must be produced by its predicted round-0 proposer. At height `H+2`
 
 The missing-proposer scenario passed five consecutive real-process runs. It proves round advancement after a targeted validator process outage, not packet-delay or one-way-reachability behavior.
 
+## Delayed Connected Proposer Test
+
+`TestFourValidatorDelayedConnectedProposerAdvancesRound` keeps every validator, Comet process, application process, and P2P connection online. A test-only ABCI wrapper delays exactly one predicted `PrepareProposal(H+2)` response for two seconds, beyond the configured 500 ms round-0 propose timeout.
+
+The full peer mesh must remain present. Height `H+1` must use its predicted proposer; height `H+2` must be produced by a different validator with commit round greater than zero. The transaction must commit and all four nodes must converge. The scenario passed five consecutive runs. This covers validator-local proposal-construction latency, not packet delay or asymmetric network reachability.
+
 ## Evidence Boundary
 
-The tests cover process outage, a targeted missing round-0 proposer, and a symmetric disjoint P2P topology. Separate V2 lifecycle networks cover simultaneous evidence-driven power-zero removals and a Comet-verified same-height light-client equivocation proof. They do not emulate dynamic packet delay, drop, duplication, corruption, or reordering; bandwidth exhaustion; asymmetric one-way reachability; delayed-but-connected proposers; forward/lunatic or amnesia light-client cases; simultaneous admission or non-removal power changes; sentry topology; or sustained load. Those remain production gates and require a controllable network-fault environment rather than relabeling process shutdown as a packet-level fault.
+The tests cover process outage, a targeted missing round-0 proposer, validator-local delayed proposal construction while connected, and a symmetric disjoint P2P topology. Separate V2 lifecycle networks cover simultaneous evidence-driven power-zero removals and a Comet-verified same-height light-client equivocation proof. They do not emulate dynamic packet delay, drop, duplication, corruption, or reordering; bandwidth exhaustion; asymmetric one-way reachability; forward/lunatic or amnesia light-client cases; simultaneous admission or non-removal power changes; sentry topology; or sustained load. Those remain production gates and require a controllable network-fault environment rather than relabeling application delay or process shutdown as a packet-level fault.

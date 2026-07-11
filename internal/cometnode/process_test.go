@@ -25,6 +25,8 @@ import (
 	chaintypes "chainlab/internal/types"
 	chainproof "chainlab/pkg/proof"
 
+	abciserver "github.com/cometbft/cometbft/abci/server"
+	abcitypes "github.com/cometbft/cometbft/abci/types"
 	cmtcrypto "github.com/cometbft/cometbft/crypto"
 	cmtjson "github.com/cometbft/cometbft/libs/json"
 	cmtlog "github.com/cometbft/cometbft/libs/log"
@@ -44,6 +46,7 @@ const (
 	processHelperStateSyncRPCEnv  = "CHAINLAB_PROCESS_HELPER_STATE_SYNC_RPC"
 	processHelperTrustHeightEnv   = "CHAINLAB_PROCESS_HELPER_TRUST_HEIGHT"
 	processHelperTrustHashEnv     = "CHAINLAB_PROCESS_HELPER_TRUST_HASH"
+	processHelperPrepareDelayFile = "CHAINLAB_PROCESS_HELPER_PREPARE_DELAY_FILE"
 )
 
 func TestFourValidatorProcessesRestartReplayBlockAndStateSync(t *testing.T) {
@@ -560,6 +563,100 @@ func TestFourValidatorMissingProposerAdvancesRoundAndRecovers(t *testing.T) {
 	waitForRPCReady(t, []*rpchttp.HTTP{clients[targetIndex]}, 45*time.Second)
 	waitForPeerMesh(t, clients, 45*time.Second)
 	_ = waitForConsistentNetworkState(t, clients, activeHeight, sender, 1, 60*time.Second)
+}
+
+func TestFourValidatorDelayedConnectedProposerAdvancesRound(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping multi-process CometBFT delayed-proposer network in short mode")
+	}
+	if processRaceEnabled {
+		t.Skip("the process-boundary test is covered by the non-race run; package logic remains race-tested")
+	}
+	basePort := availablePortRange(t, 12)
+	root := filepath.Join(t.TempDir(), "delayed-proposer-network")
+	network, err := InitializeNetwork(NetworkConfig{
+		OutputRoot: root, ChainID: "chainlab-delayed-proposer", ValidatorCount: 4,
+		GenesisTime:  time.Date(2026, time.July, 10, 12, 0, 0, 0, time.UTC),
+		ABCIBasePort: basePort, RPCBasePort: basePort + 4, P2PBasePort: basePort + 8,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	processes := make([]*helperProcess, 0, len(network.Nodes)*2)
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		for _, process := range processes {
+			t.Logf("%s log:\n%s", process.name, process.tailLog())
+		}
+	})
+	delayFiles := make([]string, len(network.Nodes))
+	for index, generatedNode := range network.Nodes {
+		home := filepath.Join(root, generatedNode.Home)
+		delayFiles[index] = filepath.Join(root, fmt.Sprintf("prepare-delay-%d", index))
+		processes = append(processes, startHelperProcess(t, root, fmt.Sprintf("delayed-proposer-app-%d", index), map[string]string{
+			processHelperModeEnv: "abci", processHelperGenesisEnv: filepath.Join(home, filepath.FromSlash(AppGenesisPath)),
+			processHelperListenEnv: generatedNode.ABCIListenAddress, processHelperDataDirEnv: filepath.Join(root, filepath.FromSlash(generatedNode.ApplicationData)),
+			processHelperPrepareDelayFile: delayFiles[index],
+		}))
+	}
+	for _, generatedNode := range network.Nodes {
+		waitForTCP(t, generatedNode.ABCIListenAddress, 15*time.Second)
+	}
+	for index, generatedNode := range network.Nodes {
+		processes = append(processes, startHelperProcess(t, root, fmt.Sprintf("delayed-proposer-comet-%d", index), map[string]string{
+			processHelperModeEnv: "comet", processHelperHomeEnv: filepath.Join(root, generatedNode.Home),
+		}))
+	}
+	clients := make([]*rpchttp.HTTP, len(network.Nodes))
+	for index, generatedNode := range network.Nodes {
+		client, err := rpchttp.New(httpAddress(generatedNode.RPCListenAddress), "/websocket")
+		if err != nil {
+			t.Fatal(err)
+		}
+		clients[index] = client
+	}
+	waitForRPCReady(t, clients, 45*time.Second)
+	waitForPeerMesh(t, clients, 45*time.Second)
+	senderKey := loadChainPrivateValidatorKey(t, filepath.Join(root, network.Nodes[0].Home, "config", "priv_validator_key.json"))
+	sender := chaincrypto.AddressFromPrivateKey(senderKey)
+	height := waitForConsistentNetworkState(t, clients, 2, sender, 0, 45*time.Second)
+	currentSet := validatorSetAtHeight(t, clients[0], height)
+	nextProposer := currentSet.CopyIncrementProposerPriority(1).GetProposer()
+	targetHeight := height + 2
+	targetProposer := currentSet.CopyIncrementProposerPriority(2).GetProposer()
+	targetIndex := validatorNodeIndex(t, network.Nodes, targetProposer.Address)
+	if err := os.WriteFile(delayFiles[targetIndex], []byte(strconv.FormatInt(targetHeight, 10)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	broadcastTransfer(t, clients[0], senderKey, network.ChainID, sender, "0x9999999999999999999999999999999999999999", 0, 1)
+	activeHeight := waitForConsistentNetworkState(t, clients, targetHeight+1, sender, 1, 60*time.Second)
+	waitForPeerMesh(t, clients, 10*time.Second)
+	nextHeight := height + 1
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	nextBlock, err := clients[0].Block(ctx, &nextHeight)
+	cancel()
+	if err != nil || nextBlock == nil || nextBlock.Block == nil || !bytes.Equal(nextBlock.Block.ProposerAddress, nextProposer.Address) {
+		t.Fatalf("next block=%+v predicted proposer=%X err=%v", nextBlock, nextProposer.Address, err)
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	targetBlock, err := clients[0].Block(ctx, &targetHeight)
+	cancel()
+	if err != nil || targetBlock == nil || targetBlock.Block == nil {
+		t.Fatalf("target block=%+v err=%v", targetBlock, err)
+	}
+	if bytes.Equal(targetBlock.Block.ProposerAddress, targetProposer.Address) {
+		t.Fatal("delayed round-0 proposer produced the target block")
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	targetCommit, err := clients[0].Commit(ctx, &targetHeight)
+	cancel()
+	if err != nil || targetCommit == nil || targetCommit.Commit == nil || targetCommit.Commit.Round <= 0 {
+		t.Fatalf("target commit=%+v err=%v", targetCommit, err)
+	}
+	_ = waitForConsistentNetworkState(t, clients, activeHeight, sender, 1, 30*time.Second)
 }
 
 func TestFourValidatorV2EvidenceSlashingAndEpochRemoval(t *testing.T) {
@@ -1335,9 +1432,14 @@ func TestChainLabProcessHelper(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		err = chainabci.ServeWithConfig(ctx, os.Getenv(processHelperListenEnv), chainabci.Config{
+		config := chainabci.Config{
 			Genesis: genesis, DataDir: os.Getenv(processHelperDataDirEnv), MaxAppVersion: maxAppVersion,
-		}, logger)
+		}
+		if delayFile := os.Getenv(processHelperPrepareDelayFile); delayFile != "" {
+			err = serveDelayedPrepareApplication(ctx, os.Getenv(processHelperListenEnv), config, delayFile, logger)
+		} else {
+			err = chainabci.ServeWithConfig(ctx, os.Getenv(processHelperListenEnv), config, logger)
+		}
 	case "comet":
 		options := RunOptions{}
 		if rpcServers := os.Getenv(processHelperStateSyncRPCEnv); rpcServers != "" {
@@ -1356,6 +1458,76 @@ func TestChainLabProcessHelper(t *testing.T) {
 	}
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+type delayedPrepareApplication struct {
+	abcitypes.Application
+	heightFile string
+	mu         sync.Mutex
+	delayed    bool
+}
+
+func (application *delayedPrepareApplication) PrepareProposal(
+	ctx context.Context,
+	request *abcitypes.RequestPrepareProposal,
+) (*abcitypes.ResponsePrepareProposal, error) {
+	raw, err := os.ReadFile(application.heightFile)
+	if err == nil && request != nil {
+		height, parseErr := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64)
+		application.mu.Lock()
+		shouldDelay := parseErr == nil && request.Height == height && !application.delayed
+		if shouldDelay {
+			application.delayed = true
+		}
+		application.mu.Unlock()
+		if shouldDelay {
+			timer := time.NewTimer(2 * time.Second)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+	return application.Application.PrepareProposal(ctx, request)
+}
+
+func serveDelayedPrepareApplication(
+	ctx context.Context,
+	listen string,
+	config chainabci.Config,
+	heightFile string,
+	logger cmtlog.Logger,
+) (returnErr error) {
+	application, err := chainabci.NewApplication(config)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		returnErr = errors.Join(returnErr, application.Close())
+	}()
+	server, err := abciserver.NewServer(listen, "socket", &delayedPrepareApplication{
+		Application: application,
+		heightFile:  heightFile,
+	})
+	if err != nil {
+		return err
+	}
+	server.SetLogger(logger)
+	if err := server.Start(); err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		if err := server.Stop(); err != nil {
+			return err
+		}
+		<-server.Quit()
+		return nil
+	case <-server.Quit():
+		return errors.New("delayed ABCI socket server stopped unexpectedly")
 	}
 }
 
