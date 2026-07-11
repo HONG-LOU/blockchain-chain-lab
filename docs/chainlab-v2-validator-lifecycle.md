@@ -44,13 +44,15 @@ For epoch length `L`, epoch starts are heights `1`, `L+1`, `2L+1`, and so on. Ev
 
 CometBFT v0.39.3 applies validator updates returned from `FinalizeBlock(H)` at height `H+2`. ChainLab therefore returns the power-zero update exactly at `T-2`. The validator remains eligible through `T-1` and is rejected as proposer or vote-extension validator from `T` onward.
 
-Updates are sorted by consensus address. A transition that would leave no active validator fails closed instead of returning an invalid empty CometBFT validator set.
+Updates are sorted by consensus address. Multiple authenticated offences may schedule multiple validators for the same epoch boundary; ChainLab returns the complete deterministic power-zero batch at `T-2`. A transition that would leave no active validator fails closed instead of returning an invalid empty CometBFT validator set.
 
 ## Evidence
 
 Automated coverage proves deterministic direct-ABCI slashing, tombstone replay, policy binding, retention, epoch scheduling, `H+2` activation, inactive-proposer rejection, Pebble restart, and snapshot/state-sync recovery.
 
 A real four-validator process test constructs two correctly signed conflicting votes, broadcasts the resulting evidence through Comet RPC, lets CometBFT verify and propagate it, and verifies that all applications slash the same stake and converge from four active validators to three.
+
+A second real-process test constructs valid duplicate-vote evidence for two different validators. Both offences schedule the same epoch boundary; RPC `BlockResults` must expose exactly two sorted power-zero updates at one height, and every node must observe the validator set change atomically from four to two. The remaining two validators then commit a transaction while all four full nodes converge on common block/application hashes, state root, and account nonce. This remains live because those two validators hold all voting power in the newly active set; it does not contradict the separate result that two online validators cannot make quorum while the active set still contains four. This proves simultaneous evidence-driven removals, not general admission, voting-power changes, or governance-controlled membership.
 
 ## Remaining Lifecycle Work
 
