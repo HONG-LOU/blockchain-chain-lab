@@ -217,6 +217,96 @@ func TestFourValidatorProcessesRestartReplayBlockAndStateSync(t *testing.T) {
 	_ = waitForConsistentNetworkState(t, clients, stateSyncHeight+1, sender, 4, 45*time.Second)
 }
 
+func TestFourValidatorQuorumLossHaltsAndRecovers(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping multi-process CometBFT quorum-loss network in short mode")
+	}
+	if processRaceEnabled {
+		t.Skip("the process-boundary test is covered by the non-race run; package logic remains race-tested")
+	}
+	basePort := availablePortRange(t, 12)
+	root := filepath.Join(t.TempDir(), "quorum-loss-network")
+	network, err := InitializeNetwork(NetworkConfig{
+		OutputRoot: root, ChainID: "chainlab-quorum-loss", ValidatorCount: 4,
+		GenesisTime:  time.Date(2026, time.July, 10, 12, 0, 0, 0, time.UTC),
+		ABCIBasePort: basePort, RPCBasePort: basePort + 4, P2PBasePort: basePort + 8,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	processes := make([]*helperProcess, 0, len(network.Nodes)*3)
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		for _, process := range processes {
+			t.Logf("%s log:\n%s", process.name, process.tailLog())
+		}
+	})
+	apps := make([]*helperProcess, len(network.Nodes))
+	cometNodes := make([]*helperProcess, len(network.Nodes))
+	for index, generatedNode := range network.Nodes {
+		home := filepath.Join(root, generatedNode.Home)
+		apps[index] = startHelperProcess(t, root, fmt.Sprintf("quorum-app-%d", index), map[string]string{
+			processHelperModeEnv: "abci", processHelperGenesisEnv: filepath.Join(home, filepath.FromSlash(AppGenesisPath)),
+			processHelperListenEnv: generatedNode.ABCIListenAddress, processHelperDataDirEnv: filepath.Join(root, filepath.FromSlash(generatedNode.ApplicationData)),
+		})
+		processes = append(processes, apps[index])
+	}
+	for _, generatedNode := range network.Nodes {
+		waitForTCP(t, generatedNode.ABCIListenAddress, 15*time.Second)
+	}
+	for index, generatedNode := range network.Nodes {
+		cometNodes[index] = startHelperProcess(t, root, fmt.Sprintf("quorum-comet-%d", index), map[string]string{
+			processHelperModeEnv: "comet", processHelperHomeEnv: filepath.Join(root, generatedNode.Home),
+		})
+		processes = append(processes, cometNodes[index])
+	}
+	clients := make([]*rpchttp.HTTP, len(network.Nodes))
+	for index, generatedNode := range network.Nodes {
+		client, err := rpchttp.New(httpAddress(generatedNode.RPCListenAddress), "/websocket")
+		if err != nil {
+			t.Fatal(err)
+		}
+		clients[index] = client
+	}
+	waitForRPCReady(t, clients, 45*time.Second)
+	waitForPeerMesh(t, clients, 45*time.Second)
+	senderKey := loadChainPrivateValidatorKey(t, filepath.Join(root, network.Nodes[0].Home, "config", "priv_validator_key.json"))
+	sender := chaincrypto.AddressFromPrivateKey(senderKey)
+	receiver := "0x4444444444444444444444444444444444444444"
+	_ = waitForConsistentNetworkState(t, clients, 2, sender, 0, 45*time.Second)
+
+	for _, index := range []int{2, 3} {
+		if err := cometNodes[index].stop(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	haltedHeight := waitForStableNetworkHeight(t, clients[:2], 2*time.Second, 20*time.Second)
+	broadcastTransfer(t, clients[0], senderKey, network.ChainID, sender, receiver, 0, 1)
+	assertNetworkHeightUnchanged(t, clients[:2], haltedHeight, 3*time.Second)
+	if _, ready, detail := consistentNetworkState(clients[:2], haltedHeight, sender, 0); !ready {
+		t.Fatalf("two-validator state changed without quorum: %s", detail)
+	}
+
+	home2 := filepath.Join(root, network.Nodes[2].Home)
+	cometNodes[2] = startHelperProcess(t, root, "quorum-comet-2-recovered", map[string]string{
+		processHelperModeEnv: "comet", processHelperHomeEnv: home2,
+	})
+	processes = append(processes, cometNodes[2])
+	waitForRPCReady(t, []*rpchttp.HTTP{clients[2]}, 45*time.Second)
+	recoveredHeight := waitForConsistentNetworkState(t, clients[:3], haltedHeight+1, sender, 1, 60*time.Second)
+
+	home3 := filepath.Join(root, network.Nodes[3].Home)
+	cometNodes[3] = startHelperProcess(t, root, "quorum-comet-3-recovered", map[string]string{
+		processHelperModeEnv: "comet", processHelperHomeEnv: home3,
+	})
+	processes = append(processes, cometNodes[3])
+	waitForRPCReady(t, []*rpchttp.HTTP{clients[3]}, 45*time.Second)
+	waitForPeerMesh(t, clients, 45*time.Second)
+	_ = waitForConsistentNetworkState(t, clients, recoveredHeight, sender, 1, 60*time.Second)
+}
+
 func TestFourValidatorV2EvidenceSlashingAndEpochRemoval(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping multi-process CometBFT evidence network in short mode")
@@ -894,6 +984,82 @@ func waitForPeerMesh(t *testing.T, clients []*rpchttp.HTTP, timeout time.Duratio
 		}
 		return true, ""
 	})
+}
+
+func waitForStableNetworkHeight(
+	t *testing.T,
+	clients []*rpchttp.HTTP,
+	stableFor time.Duration,
+	timeout time.Duration,
+) int64 {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	stableHeight := int64(-1)
+	stableSince := time.Time{}
+	last := "network height not checked"
+	for time.Now().Before(deadline) {
+		height, err := uniformNetworkHeight(clients)
+		if err != nil {
+			last = err.Error()
+			stableHeight = -1
+			stableSince = time.Time{}
+		} else if height != stableHeight {
+			stableHeight = height
+			stableSince = time.Now()
+			last = fmt.Sprintf("height %d has not been stable for %s", height, stableFor)
+		} else if time.Since(stableSince) >= stableFor {
+			return stableHeight
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("network height did not stabilize within %s: %s", timeout, last)
+	return 0
+}
+
+func assertNetworkHeightUnchanged(
+	t *testing.T,
+	clients []*rpchttp.HTTP,
+	want int64,
+	duration time.Duration,
+) {
+	t.Helper()
+	deadline := time.Now().Add(duration)
+	for time.Now().Before(deadline) {
+		height, err := uniformNetworkHeight(clients)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if height != want {
+			t.Fatalf("network advanced without quorum to height %d, want %d", height, want)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func uniformNetworkHeight(clients []*rpchttp.HTTP) (int64, error) {
+	var height int64 = -1
+	for index, client := range clients {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		status, err := client.Status(ctx)
+		cancel()
+		if err != nil {
+			return 0, fmt.Errorf("node %d status: %w", index, err)
+		}
+		if status.SyncInfo.CatchingUp {
+			return 0, fmt.Errorf("node %d is catching up", index)
+		}
+		if height == -1 {
+			height = status.SyncInfo.LatestBlockHeight
+		} else if status.SyncInfo.LatestBlockHeight != height {
+			return 0, fmt.Errorf(
+				"node %d height=%d differs from %d", index, status.SyncInfo.LatestBlockHeight, height,
+			)
+		}
+	}
+	if height < 0 {
+		return 0, errors.New("network height requires at least one client")
+	}
+	return height, nil
 }
 
 func waitForCondition(t *testing.T, timeout time.Duration, check func() (bool, string)) {
