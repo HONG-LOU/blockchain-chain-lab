@@ -179,6 +179,7 @@ func applyEvidenceV2(
 	records []evidenceRecord,
 	height int64,
 	policy ValidatorPolicy,
+	recordEvidenceTime bool,
 ) ([]evidenceOutcome, []abcitypes.ValidatorUpdate, error) {
 	lifecycle, exists := store.ValidatorLifecycle()
 	if !exists {
@@ -219,11 +220,17 @@ func applyEvidenceV2(
 		} else {
 			removalHeight = identity.InactiveHeight
 		}
-		lifecycle.Offences[key] = state.ValidatorOffence{
+		offence := state.ValidatorOffence{
 			Validator: record.Validator, Height: record.Height, Type: record.Type,
 			ObservedHeight: height, SlashBasisPoints: slashBasisPoints,
 			SlashAmount: slashAmount, RemovalHeight: removalHeight,
 		}
+		if recordEvidenceTime {
+			offence.EvidenceTimePresent = true
+			offence.EvidenceTimeUnix = record.TimeUnix
+			offence.EvidenceTimeNanosecond = int32(record.TimeNanosecond)
+		}
+		lifecycle.Offences[key] = offence
 		outcomes = append(outcomes, evidenceOutcome{
 			record: record, newOffence: true, slashBasisPoints: slashBasisPoints,
 			slashAmount: slashAmount, removalHeight: removalHeight,
@@ -240,6 +247,51 @@ func applyEvidenceV2(
 		return nil, nil, err
 	}
 	return outcomes, updates, nil
+}
+
+func compactValidatorOffencesV5(
+	store *state.Store,
+	height int64,
+	blockTime time.Time,
+	policy ValidatorPolicy,
+) ([]state.ValidatorOffence, error) {
+	if height <= 0 || blockTime.IsZero() {
+		return nil, errors.New("protocol version 5 offence compaction requires height and block time")
+	}
+	lifecycle, exists := store.ValidatorLifecycle()
+	if !exists {
+		return nil, errors.New("protocol version 5 validator lifecycle is missing")
+	}
+	pruned := make([]state.ValidatorOffence, 0)
+	for key, offence := range lifecycle.Offences {
+		if !offence.EvidenceTimePresent {
+			continue
+		}
+		evidenceTime := time.Unix(offence.EvidenceTimeUnix, int64(offence.EvidenceTimeNanosecond)).UTC()
+		if evidenceTime.After(blockTime) {
+			return nil, fmt.Errorf("validator offence %q evidence time is after the current block", key)
+		}
+		ageBlocks := height - offence.Height
+		ageDuration := blockTime.Sub(evidenceTime)
+		if ageBlocks > policy.EvidenceMaxAgeNumBlocks &&
+			ageDuration > time.Duration(policy.EvidenceMaxAgeDurationNanos) {
+			pruned = append(pruned, offence)
+			delete(lifecycle.Offences, key)
+		}
+	}
+	if len(pruned) == 0 {
+		return nil, nil
+	}
+	sort.Slice(pruned, func(left int, right int) bool {
+		if pruned[left].Height != pruned[right].Height {
+			return pruned[left].Height < pruned[right].Height
+		}
+		return pruned[left].Validator < pruned[right].Validator
+	})
+	if err := store.SetValidatorLifecycle(lifecycle); err != nil {
+		return nil, err
+	}
+	return pruned, nil
 }
 
 func sortEvidenceRecords(records []evidenceRecord) {
@@ -371,6 +423,21 @@ func evidenceOutcomeEvents(outcomes []evidenceOutcome) []abcitypes.Event {
 				{Key: "slash_basis_points", Value: strconv.FormatUint(uint64(outcome.slashBasisPoints), 10)},
 				{Key: "slash_amount", Value: strconv.FormatUint(outcome.slashAmount, 10)},
 				{Key: "removal_height", Value: strconv.FormatInt(outcome.removalHeight, 10), Index: true},
+			},
+		})
+	}
+	return events
+}
+
+func validatorOffencePrunedEvents(offences []state.ValidatorOffence) []abcitypes.Event {
+	events := make([]abcitypes.Event, 0, len(offences))
+	for _, offence := range offences {
+		events = append(events, abcitypes.Event{
+			Type: "chainlab.validator_offence_pruned",
+			Attributes: []abcitypes.EventAttribute{
+				{Key: "height", Value: strconv.FormatInt(offence.Height, 10), Index: true},
+				{Key: "validator", Value: offence.Validator, Index: true},
+				{Key: "observed_height", Value: strconv.FormatInt(offence.ObservedHeight, 10), Index: true},
 			},
 		})
 	}

@@ -19,7 +19,7 @@ The canonical V2 application genesis can contain:
 The implemented schedule rules are deliberately narrow:
 
 - the source genesis must be `chainlab-v2`;
-- the first target must be `chainlab-v3`; an optional later `chainlab-v4` target is supported;
+- the targets must follow `chainlab-v3`, optional `chainlab-v4`, optional `chainlab-v5` order;
 - activation height `A` must be at least 2;
 - the schedule is part of the canonical genesis hash and application database identity;
 - changing or removing it after database creation fails the genesis-identity check.
@@ -28,7 +28,7 @@ At `FinalizeBlock(A-1)`, the application still commits V2 roots and returns a Co
 
 `Info.AppVersion` reports the version required for the next height. This matters after committing `A-1` and during replay/state sync. A binary whose configured maximum is 2 refuses proposal processing/finalization before publishing the version-3 update, and refuses restart once the next height requires version 3. This models fail-closed incompatible-node behavior; real release compatibility still needs signed binary/version policy and an operator rolling-upgrade runbook.
 
-The current schedule is genesis-committed. Runtime governance scheduling remains disabled. V4 behavior is specified separately in [ChainLab V4 Sparse State](chainlab-v4-sparse-state.md).
+The current schedule is genesis-committed. Runtime governance scheduling remains disabled. V4 and V5 behavior are specified separately in [ChainLab V4 Sparse State](chainlab-v4-sparse-state.md) and [ChainLab V5 Validator Offence Retention](chainlab-v5-offence-retention.md).
 
 ## Merkle Protocol
 

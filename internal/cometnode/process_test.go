@@ -321,7 +321,7 @@ func TestFourValidatorV2EvidenceSlashingAndEpochRemoval(t *testing.T) {
 	})
 }
 
-func TestFourValidatorV3V4ScheduledUpgradesAndSparseProofs(t *testing.T) {
+func TestFourValidatorV3V4V5ScheduledUpgradesAndSparseProofs(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping multi-process CometBFT upgrade network in short mode")
 	}
@@ -340,6 +340,7 @@ func TestFourValidatorV3V4ScheduledUpgradesAndSparseProofs(t *testing.T) {
 		ProtocolUpgrades: []chainabci.ProtocolUpgrade{
 			{Height: 4, Protocol: chainabci.ProtocolVersionV3},
 			{Height: 6, Protocol: chainabci.ProtocolVersionV4},
+			{Height: 8, Protocol: chainabci.ProtocolVersionV5},
 		},
 	})
 	if err != nil {
@@ -380,7 +381,7 @@ func TestFourValidatorV3V4ScheduledUpgradesAndSparseProofs(t *testing.T) {
 	}
 	waitForRPCReady(t, clients, 45*time.Second)
 	waitForPeerMesh(t, clients, 45*time.Second)
-	_ = waitForConsistentNetworkState(t, clients, 7, network.Nodes[0].ChainLabAddress, 0, 45*time.Second)
+	_ = waitForConsistentNetworkState(t, clients, 9, network.Nodes[0].ChainLabAddress, 0, 45*time.Second)
 
 	for index, client := range clients {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -396,7 +397,7 @@ func TestFourValidatorV3V4ScheduledUpgradesAndSparseProofs(t *testing.T) {
 		if err := json.Unmarshal(appResult.Response.Value, &commitment); err != nil {
 			t.Fatal(err)
 		}
-		if commitment.Protocol != chainabci.ProtocolVersionV4 {
+		if commitment.Protocol != chainabci.ProtocolVersionV5 {
 			t.Fatalf("node %d protocol = %q", index, commitment.Protocol)
 		}
 		ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
@@ -420,7 +421,7 @@ func TestFourValidatorV3V4ScheduledUpgradesAndSparseProofs(t *testing.T) {
 		ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
 		params, err := client.ConsensusParams(ctx, &proofHeight)
 		cancel()
-		if err != nil || params == nil || params.ConsensusParams.Version.App != chainabci.AppVersionV4 {
+		if err != nil || params == nil || params.ConsensusParams.Version.App != chainabci.AppVersionV5 {
 			t.Fatalf("node %d consensus params=%+v err=%v", index, params, err)
 		}
 	}

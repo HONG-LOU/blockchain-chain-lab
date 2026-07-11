@@ -30,6 +30,7 @@ type proposalEvidenceState struct {
 	records  []evidenceRecord
 	outcomes []evidenceOutcome
 	updates  []abcitypes.ValidatorUpdate
+	pruned   []state.ValidatorOffence
 }
 
 func (a *Application) CheckTx(_ context.Context, req *abcitypes.RequestCheckTx) (*abcitypes.ResponseCheckTx, error) {
@@ -210,6 +211,7 @@ func (a *Application) FinalizeBlock(_ context.Context, req *abcitypes.RequestFin
 	blockEvents := []abcitypes.Event{blockEvent(commitment)}
 	blockEvents = append(blockEvents, evidenceEvents(evidenceState.records)...)
 	blockEvents = append(blockEvents, evidenceOutcomeEvents(evidenceState.outcomes)...)
+	blockEvents = append(blockEvents, validatorOffencePrunedEvents(evidenceState.pruned)...)
 	candidate := &blockCandidate{
 		state: committedState{
 			store:      execution.store,
@@ -258,7 +260,17 @@ func (a *Application) proposalEvidenceStateLocked(
 		records, err := validateEvidence(input, height, a.proposers)
 		return proposalEvidenceState{store: a.committed.store, records: records}, err
 	}
-	lifecycle, exists := a.committed.store.ValidatorLifecycle()
+	protocol := protocolAtHeight(a.genesis, height)
+	working := a.committed.store.Clone()
+	var pruned []state.ValidatorOffence
+	if protocol == ProtocolVersionV5 {
+		var err error
+		pruned, err = compactValidatorOffencesV5(working, height, blockTime, *a.genesis.ValidatorPolicy)
+		if err != nil {
+			return proposalEvidenceState{}, err
+		}
+	}
+	lifecycle, exists := working.ValidatorLifecycle()
 	if !exists {
 		return proposalEvidenceState{}, errors.New("protocol version 2 validator lifecycle is missing")
 	}
@@ -266,12 +278,19 @@ func (a *Application) proposalEvidenceStateLocked(
 	if err != nil {
 		return proposalEvidenceState{}, err
 	}
-	working := a.committed.store.Clone()
-	outcomes, updates, err := applyEvidenceV2(working, records, height, *a.genesis.ValidatorPolicy)
+	outcomes, updates, err := applyEvidenceV2(
+		working,
+		records,
+		height,
+		*a.genesis.ValidatorPolicy,
+		protocol == ProtocolVersionV5,
+	)
 	if err != nil {
 		return proposalEvidenceState{}, err
 	}
-	return proposalEvidenceState{store: working, records: records, outcomes: outcomes, updates: updates}, nil
+	return proposalEvidenceState{
+		store: working, records: records, outcomes: outcomes, updates: updates, pruned: pruned,
+	}, nil
 }
 
 func (a *Application) executeProposalFromStoreLocked(

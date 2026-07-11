@@ -169,6 +169,14 @@ Verification coverage includes smart-account and delegated-EOA end-to-end rotati
 - `/proof/account` supports existing and absent addresses at V4 heights. `/proof/state` covers account storage, code, stake, proposals, parameters, validators, identities, and offences. `chainlab-proof` automatically verifies V3 inclusion or V4 sparse envelopes.
 - Fixed vectors and direct tests cover incremental/full equivalence, tampering, non-canonical proofs, schedule negotiation, persistence failure isolation, mixed historical roots, restart, snapshot/state sync, and four-validator V3/V4 activation. Exact behavior is in `docs/chainlab-v4-sparse-state.md`.
 
+### ChainLab V5 Validator Offence Retention
+
+- A canonical V2 genesis may append V5 after V3 and V4. Comet publishes app version 5 one height before activation; version-4 binaries reject before candidate publication.
+- V5 offences commit the original evidence Unix seconds/nanoseconds. V2-V4 tombstones omit that data and remain permanent rather than guessing the duration-age condition.
+- Before V5 proposal execution, timestamped offences compact only when block age and duration age are both strictly greater than the genesis evidence policy. One-dimensional expiry retains the tombstone; already expired evidence is rejected before deletion can expose its key.
+- Compaction runs on the detached proposal state, enters mutation deltas, validator/sparse roots, restart/history, snapshot/state sync, and emits deterministic prune events. Sparse offence proofs transition from membership to non-membership.
+- Direct boundary, old-binary, schedule, restart, state-sync, fixed fresh-process, and real four-validator V3/V4/V5 activation tests pass. Exact behavior is in `docs/chainlab-v5-offence-retention.md`.
+
 ## Verification Evidence
 
 The implementation has passed full unit, race, vet, dependency-tidiness, build, demo, and fresh-process vector runs during this hardening milestone:
@@ -224,6 +232,8 @@ Snapshot V3 txpool restart passed normal pending/queued restart, queued replacem
 
 Canonical-reorg orphan reinsertion passed an end-to-end longer-branch flow through snapshot-v3 restart and subsequent block inclusion, plus stale-nonce suppression, current-pool sender/nonce precedence, and per-sender capacity tests. The focused suite passed ten repetitions; the full unit/race suites, vet, tidy-diff, four builds, demo, and fixed vulnerability scan passed again. Deterministic eviction/TTL and sustained reorg/DoS load remain open.
 
+V5 offence retention passed strict schedule/app-version negotiation, legacy permanence, timestamp schema validation, one-dimension retention, dual-expiry deletion, expired-evidence rejection, mutation-aware sparse membership/non-membership, Pebble restart, application snapshot/state sync, fixed fresh-process app/state/validator roots, and a real four-validator V3/V4/V5 network. The full unit/race suites, vet, tidy-diff, ten repeated V5 runs, four production builds, height-18 demo, and fixed `govulncheck` v1.6.0 scan pass; production load/soak, runtime scheduling, and validator economics remain open.
+
 Windows `go mod verify` is not recorded as green for the CometBFT tree. The signed v0.39.3 module zip contains `.github/workflows/e2e-nightly-38x.yml ` with a trailing space; Windows normalizes the extracted cache path to the no-space name, so Go reports the directory as modified even though the file bytes match. Both `goproxy.cn/sumdb/sum.golang.org` and `sum.golang.google.cn` returned the committed module sums `h1:UegHXskZNomsijmm29nL5NkeXtnzkme6fg+q1hPQnEI=` and `h1:PmNfvtw256BC41ad0FABts236CSZnvZ0kjPOciBwTdM=`. The initial 60 non-Comet ABCI checksum lines match CometBFT v0.39.3's upstream `go.sum`; the larger node graph and security overrides were resolved through signed sumdb. A clean Linux module-cache verification remains part of the Linux/amd64 validator release gate.
 
 ## Current Production Blockers
@@ -237,11 +247,11 @@ Ordered by consensus and security dependency rather than feature visibility:
 
 2. **Crash-consistent transactional storage**
    - Preserve the implemented Pebble V2 atomic batch, flat live state, per-height deltas/checkpoints, deterministic migration, explicit profiles, historical reads, compaction, backup/open, state-sync rebase, and corruption/kill recovery evidence.
-   - Preserve mutation-aware delta generation, V4 incremental authenticated state, and checkpoint full-diff/root cross-checks; add production-size compaction/retention measurements, an operational restore drill, additional filesystem power-loss phases, and external rollback protection.
+   - Preserve mutation-aware delta generation, V4/V5 incremental authenticated state, and checkpoint full-diff/root cross-checks; add production-size compaction/retention measurements, an operational restore drill, additional filesystem power-loss phases, and external rollback protection.
    - Replace sticky-halt handling of post-rename directory-sync uncertainty with an authoritative WAL/transaction recovery decision. Avoid rewriting the complete JSON snapshot for every partial vote.
 
 3. **Protocol lifecycle and proofs**
-   - Preserve genesis-scheduled V2-to-V3-to-V4 activation, Comet app-version updates, deterministic root migrations, incompatible-node rejection, exact-total and sparse proofs, and the standalone trusted-root verifier.
+   - Preserve genesis-scheduled V2-to-V3-to-V4-to-V5 activation, Comet app-version updates, deterministic root/lifecycle migrations, V5 offence retention, incompatible-node rejection, exact-total and sparse proofs, and the standalone trusted-root verifier.
    - Add runtime-authorized scheduling, binary compatibility manifests, rollback limits, light-client integration, a second independent implementation, isolated proof serving, and operator rolling-upgrade evidence.
 
 4. **Validator signing and node rollback protection**
@@ -264,7 +274,7 @@ Ordered by consensus and security dependency rather than feature visibility:
 
 ## Next Immediate Work
 
-1. Extend the v2 evidence-removal foundation into certified admission/re-entry, stake-to-power, unbonding/rewards, tombstone retention, governance authority, key rotation, and rolling-upgrade rules without re-enabling ad hoc join/leave transactions.
+1. Extend the V2/V5 evidence-removal foundation into certified admission/re-entry, stake-to-power, unbonding/rewards, governance authority, key rotation, and rolling-upgrade rules without re-enabling ad hoc join/leave transactions; preserve permanent legacy tombstones and V5 forward compaction.
 2. Add incremental Store V2 flat/proof roots, then production-size retention/compaction/load evidence, broader power-loss coverage, an operational restore drill, and external rollback protection.
 3. Extend the multi-process network with partitions, missing proposers, light-client attacks, simultaneous removals, rolling restart/upgrade, and other Byzantine fault cases.
 4. Establish the Linux/amd64 validator release target, remote-signer boundary, JIT/RSS limits, reproducible build artifacts, and baseline operational telemetry.

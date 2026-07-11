@@ -19,6 +19,7 @@ func TestInitializeNetworkPersistsProtocolUpgradeSchedule(t *testing.T) {
 		ProtocolUpgrades: []chainabci.ProtocolUpgrade{
 			{Height: 10, Protocol: chainabci.ProtocolVersionV3},
 			{Height: 20, Protocol: chainabci.ProtocolVersionV4},
+			{Height: 30, Protocol: chainabci.ProtocolVersionV5},
 		},
 	})
 	if err != nil {
@@ -30,9 +31,10 @@ func TestInitializeNetworkPersistsProtocolUpgradeSchedule(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(genesis.Upgrades) != 2 || genesis.Upgrades[0].Height != 10 ||
+	if len(genesis.Upgrades) != 3 || genesis.Upgrades[0].Height != 10 ||
 		genesis.Upgrades[0].Protocol != chainabci.ProtocolVersionV3 ||
-		genesis.Upgrades[1].Height != 20 || genesis.Upgrades[1].Protocol != chainabci.ProtocolVersionV4 {
+		genesis.Upgrades[1].Height != 20 || genesis.Upgrades[1].Protocol != chainabci.ProtocolVersionV4 ||
+		genesis.Upgrades[2].Height != 30 || genesis.Upgrades[2].Protocol != chainabci.ProtocolVersionV5 {
 		t.Fatalf("generated upgrades = %+v", genesis.Upgrades)
 	}
 }

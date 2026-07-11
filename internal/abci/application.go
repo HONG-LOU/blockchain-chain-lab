@@ -31,10 +31,12 @@ const (
 	ProtocolVersionV2 = "chainlab-v2"
 	ProtocolVersionV3 = "chainlab-v3"
 	ProtocolVersionV4 = "chainlab-v4"
+	ProtocolVersionV5 = "chainlab-v5"
 	AppVersion        = 1
 	AppVersionV2      = 2
 	AppVersionV3      = 3
 	AppVersionV4      = 4
+	AppVersionV5      = 5
 	Codespace         = "chainlab"
 
 	CodeOK              uint32 = 0
@@ -870,6 +872,8 @@ func (a *Application) proposerLocked(address []byte, height int64) (string, erro
 
 func appVersion(protocol string) uint64 {
 	switch protocol {
+	case ProtocolVersionV5:
+		return AppVersionV5
 	case ProtocolVersionV4:
 		return AppVersionV4
 	case ProtocolVersionV3:

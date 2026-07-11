@@ -28,13 +28,16 @@ type ValidatorIdentity struct {
 }
 
 type ValidatorOffence struct {
-	Validator        string `json:"validator"`
-	Height           int64  `json:"height"`
-	Type             int32  `json:"type"`
-	ObservedHeight   int64  `json:"observed_height"`
-	SlashBasisPoints uint32 `json:"slash_basis_points"`
-	SlashAmount      uint64 `json:"slash_amount"`
-	RemovalHeight    int64  `json:"removal_height"`
+	Validator              string `json:"validator"`
+	Height                 int64  `json:"height"`
+	Type                   int32  `json:"type"`
+	ObservedHeight         int64  `json:"observed_height"`
+	SlashBasisPoints       uint32 `json:"slash_basis_points"`
+	SlashAmount            uint64 `json:"slash_amount"`
+	RemovalHeight          int64  `json:"removal_height"`
+	EvidenceTimePresent    bool   `json:"evidence_time_present,omitempty"`
+	EvidenceTimeUnix       int64  `json:"evidence_time_unix,omitempty"`
+	EvidenceTimeNanosecond int32  `json:"evidence_time_nanosecond,omitempty"`
 }
 
 type ValidatorLifecycle struct {
@@ -253,6 +256,13 @@ func validateValidatorOffence(key string, offence ValidatorOffence, identitiesBy
 	}
 	if offence.RemovalHeight < offence.ObservedHeight+2 {
 		return fmt.Errorf("validator offence %q removal height violates the validator update delay", key)
+	}
+	if !offence.EvidenceTimePresent {
+		if offence.EvidenceTimeUnix != 0 || offence.EvidenceTimeNanosecond != 0 {
+			return fmt.Errorf("validator offence %q has unmarked evidence time fields", key)
+		}
+	} else if offence.EvidenceTimeNanosecond < 0 || offence.EvidenceTimeNanosecond >= 1_000_000_000 {
+		return fmt.Errorf("validator offence %q evidence nanosecond is invalid", key)
 	}
 	return nil
 }

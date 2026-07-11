@@ -51,6 +51,7 @@ func runInit(args []string, out io.Writer) error {
 	applicationProtocol := flags.String("application-protocol", chainabci.ProtocolVersion, "application genesis protocol: chainlab-v1 or chainlab-v2")
 	upgradeV3Height := flags.Int64("upgrade-v3-height", 0, "activate chainlab-v3 proof roots at this height")
 	upgradeV4Height := flags.Int64("upgrade-v4-height", 0, "activate chainlab-v4 sparse state roots at this height")
+	upgradeV5Height := flags.Int64("upgrade-v5-height", 0, "activate chainlab-v5 validator offence retention at this height")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -72,6 +73,11 @@ func runInit(args []string, out io.Writer) error {
 	if *upgradeV4Height != 0 {
 		upgrades = append(upgrades, chainabci.ProtocolUpgrade{
 			Height: *upgradeV4Height, Protocol: chainabci.ProtocolVersionV4,
+		})
+	}
+	if *upgradeV5Height != 0 {
+		upgrades = append(upgrades, chainabci.ProtocolUpgrade{
+			Height: *upgradeV5Height, Protocol: chainabci.ProtocolVersionV5,
 		})
 	}
 	document, err := cometnode.InitializeNetwork(cometnode.NetworkConfig{

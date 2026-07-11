@@ -30,8 +30,8 @@ func validateProtocolUpgrades(genesis GenesisDocument) error {
 	if genesis.Protocol != ProtocolVersionV2 {
 		return errors.New("protocol upgrades currently require a chainlab-v2 genesis")
 	}
-	if len(genesis.Upgrades) > 2 {
-		return errors.New("at most two protocol upgrades are supported")
+	if len(genesis.Upgrades) > 3 {
+		return errors.New("at most three protocol upgrades are supported")
 	}
 	for index, upgrade := range genesis.Upgrades {
 		if upgrade.Height < 2 {
@@ -40,10 +40,7 @@ func validateProtocolUpgrades(genesis GenesisDocument) error {
 		if index > 0 && upgrade.Height <= genesis.Upgrades[index-1].Height {
 			return errors.New("protocol upgrade heights must be strictly increasing")
 		}
-		want := ProtocolVersionV3
-		if index == 1 {
-			want = ProtocolVersionV4
-		}
+		want := []string{ProtocolVersionV3, ProtocolVersionV4, ProtocolVersionV5}[index]
 		if upgrade.Protocol != want {
 			return fmt.Errorf("protocol upgrade %d must target %q", index+1, want)
 		}
@@ -74,23 +71,24 @@ func nextApplicationHeight(height int64) int64 {
 }
 
 func protocolUsesValidatorLifecycle(protocol string) bool {
-	return protocol == ProtocolVersionV2 || protocol == ProtocolVersionV3 || protocol == ProtocolVersionV4
+	return protocol == ProtocolVersionV2 || protocol == ProtocolVersionV3 ||
+		protocol == ProtocolVersionV4 || protocol == ProtocolVersionV5
 }
 
 func protocolUsesMerkleProofs(protocol string) bool {
-	return protocol == ProtocolVersionV3 || protocol == ProtocolVersionV4
+	return protocol == ProtocolVersionV3 || protocol == ProtocolVersionV4 || protocol == ProtocolVersionV5
 }
 
 func protocolUsesSparseState(protocol string) bool {
-	return protocol == ProtocolVersionV4
+	return protocol == ProtocolVersionV4 || protocol == ProtocolVersionV5
 }
 
 func normalizeMaxAppVersion(value uint64) (uint64, error) {
 	if value == 0 {
-		return AppVersionV4, nil
+		return AppVersionV5, nil
 	}
-	if value < AppVersion || value > AppVersionV4 {
-		return 0, fmt.Errorf("maximum application version must be between %d and %d", AppVersion, AppVersionV4)
+	if value < AppVersion || value > AppVersionV5 {
+		return 0, fmt.Errorf("maximum application version must be between %d and %d", AppVersion, AppVersionV5)
 	}
 	return value, nil
 }

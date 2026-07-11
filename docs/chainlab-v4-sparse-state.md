@@ -7,12 +7,14 @@ Status date: 2026-07-11
 V4 is an explicit second upgrade in a canonical V2 genesis:
 
 ```json
-{"upgrades":[{"height":100,"protocol":"chainlab-v3"},{"height":200,"protocol":"chainlab-v4"}]}
+{"upgrades":[{"height":100,"protocol":"chainlab-v3"},{"height":200,"protocol":"chainlab-v4"},{"height":300,"protocol":"chainlab-v5"}]}
 ```
 
 Heights must be strictly increasing, V4 cannot skip V3, and the schedule is part of the genesis/database identity. At height 199 the application still commits V3 roots and publishes Comet application version 4 for the next height. Height 200 uses V4. A binary capped at version 3 refuses before publishing that transition.
 
 V1, V2, and V3 vectors and roots are unchanged. V4 transaction and receipt roots remain the V3 exact-total Merkle roots. Only the application state root changes.
+
+V5 retains V4 transaction, receipt, sparse-state, and proof semantics. It changes validator-offence state only when recording or compacting timestamped V5 offences.
 
 ## Sparse State Protocol
 
@@ -28,7 +30,7 @@ The application and Store V2 keep independent in-memory sparse accumulators. Fin
 
 Ordinary commits update O(k * 256) authenticated nodes for k changed flat entries and do not sort or hash the complete state. At configured checkpoints, Store V2 also flattens the complete state, validates the journal delta, rebuilds a fresh sparse tree, and requires the incremental and rebuilt roots to match.
 
-Manifest field `state_flat_root_protocol` is `chainlab-flat-root-v1` for new V2/V3 heights and `chainlab-sparse-root-v1` for V4. Older manifests without the field remain valid as legacy flat roots. Mixed histories therefore retain their original validation rules. Restart, historical reconstruction, snapshot restore, and state sync rebuild the in-memory sparse accumulator from authenticated flat state.
+Manifest field `state_flat_root_protocol` is `chainlab-flat-root-v1` for new V2/V3 heights and `chainlab-sparse-root-v1` for V4/V5. Older manifests without the field remain valid as legacy flat roots. Mixed histories therefore retain their original validation rules. Restart, historical reconstruction, snapshot restore, and state sync rebuild the in-memory sparse accumulator from authenticated flat state.
 
 ## Queries And Offline Verification
 

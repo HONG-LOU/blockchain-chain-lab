@@ -313,9 +313,9 @@ func TestProtocolV4ScheduleValidation(t *testing.T) {
 		{name: "reversed", upgrades: []ProtocolUpgrade{
 			{Height: 4, Protocol: ProtocolVersionV3}, {Height: 3, Protocol: ProtocolVersionV4},
 		}},
-		{name: "third", upgrades: []ProtocolUpgrade{
+		{name: "fourth", upgrades: []ProtocolUpgrade{
 			{Height: 2, Protocol: ProtocolVersionV3}, {Height: 3, Protocol: ProtocolVersionV4},
-			{Height: 4, Protocol: "chainlab-v5"},
+			{Height: 4, Protocol: ProtocolVersionV5}, {Height: 5, Protocol: "chainlab-v6"},
 		}},
 	}
 	for _, test := range invalid {

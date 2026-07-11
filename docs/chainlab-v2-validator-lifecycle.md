@@ -16,7 +16,7 @@ A v2 genesis commits the epoch length, duplicate-vote and light-client-attack sl
 
 At `InitChain`, every genesis validator is permanently bound to its canonical ChainLab account, 20-byte CometBFT consensus address, compressed secp256k1 public key, voting power, and inclusive active/exclusive inactive heights.
 
-The bindings, offence tombstones, slash results, and scheduled removal heights are consensus state. They are included in the state root, v2 validator root, Pebble version manifests, application snapshots, startup validation, and state-sync validation.
+The bindings, offence tombstones, slash results, and scheduled removal heights are consensus state. They are included in the state root, v2 validator root, Pebble version manifests, application snapshots, startup validation, and state-sync validation. V2-V4 tombstones have no evidence timestamp and therefore remain permanent; V5 safely compacts only newly timestamped offences after both retention dimensions expire.
 
 ## Evidence Validation
 
@@ -54,4 +54,4 @@ A real four-validator process test constructs two correctly signed conflicting v
 
 ## Remaining Lifecycle Work
 
-Production lifecycle completion still requires certified admission/re-entry, stake-to-power rules, unbonding and withdrawal delay, reward accounting, evidence economics, tombstone compaction, remote signer/HSM protection, key rotation, quorum and emergency rules, governance/upgrade authority, partitions and rolling-upgrade tests, and adversarial economic simulation.
+Production lifecycle completion still requires certified admission/re-entry, stake-to-power rules, unbonding and withdrawal delay, reward accounting, evidence economics, remote signer/HSM protection, key rotation, quorum and emergency rules, governance/upgrade authority, partitions and rolling-upgrade tests, and adversarial economic simulation. V5 closes forward tombstone compaction; legacy tombstones deliberately remain permanent because their evidence time was never committed.

@@ -16,7 +16,7 @@ The database identity binds the protocol, canonical genesis hash, and exact stor
 - `v2/version/<height>/delta_set/` stores changed or created entries.
 - `v2/version/<height>/delta_delete/` stores deleted-entry markers.
 - `v2/version/<height>/checkpoint/` stores a complete flat state at checkpoint heights.
-- Each height manifest binds the commitment, app hash, versioned flat-state root/count, delta root/counts, checkpoint root/count, proposer bindings, transaction count, receipt count, and checksum. Legacy V2/V3 heights use `chainlab-flat-root-v1`; V4 heights use `chainlab-sparse-root-v1`.
+- Each height manifest binds the commitment, app hash, versioned flat-state root/count, delta root/counts, checkpoint root/count, proposer bindings, transaction count, receipt count, and checksum. Legacy V2/V3 heights use `chainlab-flat-root-v1`; V4/V5 heights use `chainlab-sparse-root-v1`.
 - `meta/current` and `meta/min_history` identify the published height and earliest retained height.
 - `index/block/` maps each retained non-genesis block hash to its height.
 
@@ -26,7 +26,7 @@ Accounts and account-storage keys are separate flat entries. Contract code, stak
 
 The in-memory `state.Store` now keeps a detached semantic mutation journal for account metadata, individual account-storage keys, contract code, stake, proposals, parameters, the validator slice, validator identities, and validator offences. Store clones carry the journal through proposal simulation, failed-transaction ante settlement, and finalization. Only a successful durable application commit resets it.
 
-Ordinary heights encode delta sets/deletes only from that journal and compare each touched entry with the previous flat value, so a write restored to its prior value produces no disk delta. The projected live map reuses immutable prior entry bytes and is published only after the synchronized Pebble batch succeeds. V4 also updates a copy-on-write sparse accumulator for touched entries and publishes the overlay only after persistence. Checkpoint heights flatten the complete state, compare the journal delta with a complete diff, rebuild the complete sparse tree, and require the incremental and rebuilt roots to match. Genesis creation, V1 migration, state-sync restore, checkpoints, and legacy V2/V3 flat/proof roots still require complete-state work. Ordinary V4 state-root maintenance is O(mutations * 256), but end-to-end production throughput remains unclaimed.
+Ordinary heights encode delta sets/deletes only from that journal and compare each touched entry with the previous flat value, so a write restored to its prior value produces no disk delta. The projected live map reuses immutable prior entry bytes and is published only after the synchronized Pebble batch succeeds. V4/V5 also update a copy-on-write sparse accumulator for touched entries and publish the overlay only after persistence. Checkpoint heights flatten the complete state, compare the journal delta with a complete diff, rebuild the complete sparse tree, and require the incremental and rebuilt roots to match. Genesis creation, V1 migration, state-sync restore, checkpoints, and legacy V2/V3 flat/proof roots still require complete-state work. Ordinary V4/V5 state-root maintenance is O(mutations * 256), but end-to-end production throughput remains unclaimed.
 
 ## Retention Profiles
 
@@ -80,7 +80,7 @@ Snapshot import is independent of historical retention. Restoring a trusted appl
 
 Startup verifies database identity, profile, current/minimum range, current live state, current version artifacts, and the retained checkpoint boundary. Loading a version verifies canonical keys and values, manifest identity/checksum/counts, disjoint delta sets/deletes, delta root, checkpoint root, transaction and receipt continuity, reconstructed state/app hash, and block index.
 
-Manifests written before root versioning omit `state_flat_root_protocol` and remain canonical legacy flat-root manifests. New V2/V3 and V4 heights can coexist in one retained history, and each height is validated with its recorded protocol. Restart, historical reconstruction, and state-sync restore rebuild the in-memory sparse accumulator from the flat state.
+Manifests written before root versioning omit `state_flat_root_protocol` and remain canonical legacy flat-root manifests. New V2/V3 and V4/V5 heights can coexist in one retained history, and each height is validated with its recorded protocol. Restart, historical reconstruction, and state-sync restore rebuild the in-memory sparse accumulator from the flat state.
 
 Automated coverage includes:
 
