@@ -46,12 +46,41 @@ func ensureDataManifest(dataDir string, chainID string, genesisHash string) erro
 		}
 		return nil
 	}
-	checksum, err := dataManifestChecksum(expected)
+	return writeDataManifest(dataDir, expected)
+}
+
+func migrateDataManifest(dataDir string, chainID string, genesisHash string) error {
+	existing, err := loadDataManifest(dataDir)
 	if err != nil {
 		return err
 	}
-	expected.Checksum = checksum
-	raw, err := json.MarshalIndent(expected, "", "  ")
+	if existing == nil {
+		return errors.New("cannot migrate a missing data manifest")
+	}
+	if existing.ChainID != chainID || existing.GenesisHash != genesisHash {
+		return errors.New("legacy data manifest does not match the persisted chain")
+	}
+	if existing.SnapshotVersion == diskSnapshotVersion {
+		return nil
+	}
+	if existing.SnapshotVersion != legacyDiskSnapshotVersion {
+		return errors.New("data manifest snapshot version requires an explicit migration")
+	}
+	return writeDataManifest(dataDir, dataManifest{
+		Version:         dataManifestVersion,
+		SnapshotVersion: diskSnapshotVersion,
+		ChainID:         chainID,
+		GenesisHash:     genesisHash,
+	})
+}
+
+func writeDataManifest(dataDir string, manifest dataManifest) error {
+	checksum, err := dataManifestChecksum(manifest)
+	if err != nil {
+		return err
+	}
+	manifest.Checksum = checksum
+	raw, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -82,7 +111,7 @@ func loadDataManifest(dataDir string) (*dataManifest, error) {
 		}
 		return nil, fmt.Errorf("decode trailing data manifest data: %w", err)
 	}
-	if manifest.Version != dataManifestVersion || manifest.SnapshotVersion != diskSnapshotVersion {
+	if manifest.Version != dataManifestVersion || !supportedDiskSnapshotVersion(manifest.SnapshotVersion) {
 		return nil, errors.New("data manifest version requires an explicit migration")
 	}
 	if err := types.ValidateChainID(manifest.ChainID); err != nil {
@@ -102,6 +131,20 @@ func loadDataManifest(dataDir string) (*dataManifest, error) {
 		return nil, errors.New("data manifest checksum mismatch")
 	}
 	return &manifest, nil
+}
+
+func validateDataManifestSnapshotCompatibility(manifest dataManifest, snapshot diskSnapshot) error {
+	if manifest.SnapshotVersion == diskSnapshotVersion && snapshot.Version == legacyDiskSnapshotVersion {
+		return errors.New("persisted snapshot version is older than the data manifest; rollback is not allowed")
+	}
+	if manifest.SnapshotVersion == legacyDiskSnapshotVersion &&
+		(snapshot.Version == legacyDiskSnapshotVersion || snapshot.Version == diskSnapshotVersion) {
+		return nil
+	}
+	if manifest.SnapshotVersion != snapshot.Version {
+		return errors.New("data manifest snapshot version does not match persisted snapshot")
+	}
+	return nil
 }
 
 func dataManifestChecksum(manifest dataManifest) (string, error) {

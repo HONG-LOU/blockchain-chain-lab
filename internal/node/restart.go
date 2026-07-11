@@ -17,7 +17,10 @@ import (
 	"chainlab/internal/types"
 )
 
-const diskSnapshotVersion uint64 = 2
+const (
+	legacyDiskSnapshotVersion uint64 = 2
+	diskSnapshotVersion       uint64 = 3
+)
 
 // MaxDiskSnapshotBytes is a fail-closed guard for the temporary JSON harness.
 // Production history must move to the versioned KV path before reaching it.
@@ -31,11 +34,14 @@ func validateDiskSnapshotEncodedSize(size int) error {
 }
 
 func (n *Node) restoreDiskSnapshot(snapshot *diskSnapshot, configuredGenesis *state.Store) error {
-	if snapshot.Version != diskSnapshotVersion {
+	if !supportedDiskSnapshotVersion(snapshot.Version) {
 		return fmt.Errorf("unsupported persisted snapshot version %d; explicit migration is required", snapshot.Version)
 	}
 	if snapshot.Generation == 0 {
 		return errors.New("persisted snapshot generation is required")
+	}
+	if snapshot.Version == legacyDiskSnapshotVersion && (len(snapshot.Pending) != 0 || len(snapshot.Queued) != 0) {
+		return errors.New("persisted snapshot v2 must not contain transaction pool fields")
 	}
 	if err := types.ValidateCanonicalHash("persisted snapshot checksum", snapshot.Checksum); err != nil {
 		return err
@@ -203,6 +209,15 @@ func (n *Node) restoreDiskSnapshot(snapshot *diskSnapshot, configuredGenesis *st
 	if err != nil {
 		return err
 	}
+	restoredMempool, restoredQueued, restoredTxPoolBytes, err := n.restorePersistedTxPool(
+		snapshot.Pending,
+		snapshot.Queued,
+		working,
+		head,
+	)
+	if err != nil {
+		return err
+	}
 
 	n.state = working
 	n.blocks = canonical
@@ -212,10 +227,103 @@ func (n *Node) restoreDiskSnapshot(snapshot *diskSnapshot, configuredGenesis *st
 	n.finalityVotes = finalityVotes
 	n.finalityVoteIndex = finalityVoteIndex
 	n.finalityEvidence = evidence
+	n.mempool = restoredMempool
+	n.queued = restoredQueued
+	n.txPoolBytes = restoredTxPoolBytes
 	n.snapshotGeneration = snapshot.Generation
 	n.refreshConsensusLocked()
 	n.rebuildTxIndex()
 	return nil
+}
+
+func supportedDiskSnapshotVersion(version uint64) bool {
+	return version == legacyDiskSnapshotVersion || version == diskSnapshotVersion
+}
+
+func (n *Node) restorePersistedTxPool(
+	pending []types.Transaction,
+	queued []types.Transaction,
+	committed *state.Store,
+	head types.Block,
+) ([]types.Transaction, []types.Transaction, uint64, error) {
+	if len(pending)+len(queued) > maxTxPoolTransactions {
+		return nil, nil, 0, fmt.Errorf("persisted transaction pool exceeds %d entries", maxTxPoolTransactions)
+	}
+	if len(queued) > maxQueuedTransactions {
+		return nil, nil, 0, fmt.Errorf("persisted queued transaction pool exceeds %d entries", maxQueuedTransactions)
+	}
+
+	if head.Header.Height == ^uint64(0) {
+		return nil, nil, 0, errors.New("persisted transaction pool cannot advance beyond maximum block height")
+	}
+	blockHeight := head.Header.Height + 1
+	baseFee := NextBaseFee(head, n.blockGasLimit)
+	working := committed.Clone()
+	seenHashes := make(map[string]struct{}, len(pending)+len(queued))
+	type senderNonce struct {
+		sender string
+		nonce  uint64
+	}
+	seenNonces := make(map[senderNonce]struct{}, len(pending)+len(queued))
+	senderCounts := make(map[string]int)
+	var totalBytes uint64
+
+	validateEnvelope := func(tx types.Transaction) error {
+		txSize, err := canonicalTransactionSize(tx)
+		if err != nil {
+			return err
+		}
+		if totalBytes >= maxTxPoolBytes || txSize > maxTxPoolBytes-totalBytes {
+			return fmt.Errorf("persisted transaction pool exceeds %d bytes", maxTxPoolBytes)
+		}
+		hash := tx.Hash()
+		if _, duplicate := seenHashes[hash]; duplicate {
+			return errors.New("persisted transaction pool contains a duplicate transaction hash")
+		}
+		sender := normalizedAddress(tx.From)
+		key := senderNonce{sender: sender, nonce: tx.Nonce}
+		if _, duplicate := seenNonces[key]; duplicate {
+			return errors.New("persisted transaction pool contains a duplicate sender nonce")
+		}
+		if senderCounts[sender] >= maxTransactionsPerSender {
+			return fmt.Errorf("persisted transaction pool exceeds %d entries for sender %s", maxTransactionsPerSender, sender)
+		}
+		seenHashes[hash] = struct{}{}
+		seenNonces[key] = struct{}{}
+		senderCounts[sender]++
+		totalBytes += txSize
+		return nil
+	}
+
+	restoredPending := cloneTransactions(pending)
+	for index, tx := range restoredPending {
+		if err := validateEnvelope(tx); err != nil {
+			return nil, nil, 0, fmt.Errorf("validate persisted pending transaction %d: %w", index, err)
+		}
+		if _, err := n.executor.ExecuteWithContext(working, tx, core.ExecutionContext{BlockHeight: blockHeight, BaseFeePerGas: baseFee}); err != nil {
+			return nil, nil, 0, fmt.Errorf("replay persisted pending transaction %d: %w", index, err)
+		}
+	}
+
+	restoredQueued := cloneTransactions(queued)
+	for index, tx := range restoredQueued {
+		if err := validateEnvelope(tx); err != nil {
+			return nil, nil, 0, fmt.Errorf("validate persisted queued transaction %d: %w", index, err)
+		}
+		account := working.GetAccount(tx.From)
+		if tx.Nonce <= account.Nonce {
+			return nil, nil, 0, fmt.Errorf("persisted queued transaction %d is not a future nonce", index)
+		}
+		if tx.Nonce-account.Nonce > maxQueuedNonceGap {
+			return nil, nil, 0, fmt.Errorf("persisted queued transaction %d nonce gap exceeds %d", index, maxQueuedNonceGap)
+		}
+		check := working.Clone()
+		check.SetNonce(tx.From, tx.Nonce)
+		if _, err := n.executor.ExecuteWithContext(check, tx, core.ExecutionContext{BlockHeight: blockHeight, BaseFeePerGas: baseFee}); err != nil {
+			return nil, nil, 0, fmt.Errorf("validate persisted queued transaction %d: %w", index, err)
+		}
+	}
+	return restoredPending, restoredQueued, totalBytes, nil
 }
 
 func (n *Node) requeuePersistedFinalitySlashesLocked() error {
@@ -564,7 +672,7 @@ func loadDiskSnapshot(dataDir string) (*diskSnapshot, error) {
 		}
 		return nil, fmt.Errorf("decode trailing persisted snapshot data: %w", err)
 	}
-	if snapshot.Version != diskSnapshotVersion {
+	if !supportedDiskSnapshotVersion(snapshot.Version) {
 		return nil, fmt.Errorf("unsupported persisted snapshot version %d; explicit migration is required", snapshot.Version)
 	}
 	if snapshot.Generation == 0 {

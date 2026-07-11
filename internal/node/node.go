@@ -170,6 +170,8 @@ type diskSnapshot struct {
 	FinalityLock     finalityLock                         `json:"finality_lock"`
 	FinalityVotes    []types.FinalitySignature            `json:"finality_votes,omitempty"`
 	FinalityEvidence []types.FinalityEquivocationEvidence `json:"finality_evidence,omitempty"`
+	Pending          []types.Transaction                  `json:"txpool_pending,omitempty"`
+	Queued           []types.Transaction                  `json:"txpool_queued,omitempty"`
 }
 
 func New(config Config) (result *Node, err error) {
@@ -289,15 +291,28 @@ func New(config Config) (result *Node, err error) {
 			if manifest.ChainID != loaded.ChainID || len(loaded.Blocks) == 0 || manifest.GenesisHash != loaded.Blocks[0].Hash() {
 				return nil, errors.New("data manifest does not match persisted chain")
 			}
+			if err := validateDataManifestSnapshotCompatibility(*manifest, *loaded); err != nil {
+				return nil, err
+			}
 			if err := n.restoreDiskSnapshot(loaded, genesisStore); err != nil {
 				return nil, err
 			}
 			if err := n.restorePersistentHalt(); err != nil {
 				return nil, err
 			}
+			previousTxPoolRevision := n.txPoolRevision
 			if n.haltErr == nil && n.role == RoleValidator {
 				if err := n.requeuePersistedFinalitySlashesLocked(); err != nil {
 					n.recordRuntimeFaultLocked(err)
+					return nil, err
+				}
+			}
+			if loaded.Version != diskSnapshotVersion || manifest.SnapshotVersion != diskSnapshotVersion {
+				if err := n.migrateDiskSnapshotLocked(); err != nil {
+					return nil, err
+				}
+			} else if n.txPoolRevision != previousTxPoolRevision {
+				if err := n.persistLocked(); err != nil {
 					return nil, err
 				}
 			}
@@ -371,7 +386,7 @@ func (n *Node) SubmitTx(tx types.Transaction) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	return n.submitTxLocked(tx)
+	return n.submitAndPersistTxLocked(tx)
 }
 
 func (n *Node) RequestFaucet(to string, amount uint64) (types.Transaction, error) {
@@ -416,10 +431,28 @@ func (n *Node) RequestFaucet(to string, amount uint64) (types.Transaction, error
 		return types.Transaction{}, err
 	}
 	tx.Signature = signature
-	if err := n.submitTxLocked(tx); err != nil {
+	if err := n.submitAndPersistTxLocked(tx); err != nil {
 		return types.Transaction{}, err
 	}
 	return tx, nil
+}
+
+func (n *Node) submitAndPersistTxLocked(tx types.Transaction) error {
+	previousMempool := append([]types.Transaction(nil), n.mempool...)
+	previousQueued := append([]types.Transaction(nil), n.queued...)
+	previousTxPoolBytes := n.txPoolBytes
+	previousTxPoolRevision := n.txPoolRevision
+	if err := n.submitTxLocked(tx); err != nil {
+		return err
+	}
+	if err := n.persistLocked(); err != nil {
+		n.mempool = previousMempool
+		n.queued = previousQueued
+		n.txPoolBytes = previousTxPoolBytes
+		n.txPoolRevision = previousTxPoolRevision
+		return err
+	}
+	return nil
 }
 
 func (n *Node) submitTxLocked(tx types.Transaction) (err error) {
@@ -764,7 +797,7 @@ func (n *Node) ProduceBlock() (types.Block, error) {
 	candidateBlocks = append(candidateBlocks, block)
 	n.knownBlocks[blockHash] = block
 	n.knownBlockHeights[block.Header.Height]++
-	if err := n.persistCandidateLocked(working, candidateBlocks); err != nil {
+	if err := n.persistCandidateLocked(working, candidateBlocks, nextMempool, candidateQueued); err != nil {
 		delete(n.knownBlocks, blockHash)
 		n.knownBlockHeights[block.Header.Height]--
 		if n.knownBlockHeights[block.Header.Height] == 0 {
@@ -1026,7 +1059,7 @@ func (n *Node) ImportBlock(block types.Block) error {
 		candidateBlocks = append([]types.Block(nil), n.blocks...)
 		candidateBlocks[block.Header.Height] = block
 	}
-	if err := n.persistCandidateLocked(candidateState, candidateBlocks); err != nil {
+	if err := n.persistCandidateLocked(candidateState, candidateBlocks, nextMempool, nextQueued); err != nil {
 		rollbackKnownAndLock()
 		return err
 	}
@@ -1319,7 +1352,7 @@ func (n *Node) SubmitFinalityVote(vote types.FinalitySignature) (err error) {
 	if certified.Header.Height > n.finalityLock.Height {
 		n.finalityLock = finalityLock{Height: certified.Header.Height, BlockHash: blockHash}
 	}
-	if err := n.persistCandidateLocked(n.state, candidateBlocks); err != nil {
+	if err := n.persistCandidateLocked(n.state, candidateBlocks, n.mempool, n.queued); err != nil {
 		rollback()
 		return err
 	}
@@ -2468,10 +2501,15 @@ func transactionsInBlocks(blocks []types.Block) []types.Transaction {
 }
 
 func (n *Node) persistLocked() error {
-	return n.persistCandidateLocked(n.state, n.blocks)
+	return n.persistCandidateLocked(n.state, n.blocks, n.mempool, n.queued)
 }
 
-func (n *Node) persistCandidateLocked(candidateState *state.Store, candidateBlocks []types.Block) error {
+func (n *Node) persistCandidateLocked(
+	candidateState *state.Store,
+	candidateBlocks []types.Block,
+	candidateMempool []types.Transaction,
+	candidateQueued []types.Transaction,
+) error {
 	if err := n.requireOpenLocked(); err != nil {
 		return err
 	}
@@ -2490,6 +2528,15 @@ func (n *Node) persistCandidateLocked(candidateState *state.Store, candidateBloc
 	if err := ensureDataManifest(n.dataDir, n.chainID, candidateBlocks[0].Hash()); err != nil {
 		return n.handlePersistenceErrorLocked(err)
 	}
+	return n.writeDiskSnapshotLocked(candidateState, candidateBlocks, candidateMempool, candidateQueued)
+}
+
+func (n *Node) writeDiskSnapshotLocked(
+	candidateState *state.Store,
+	candidateBlocks []types.Block,
+	candidateMempool []types.Transaction,
+	candidateQueued []types.Transaction,
+) error {
 	snapshot := diskSnapshot{
 		Version:          diskSnapshotVersion,
 		Generation:       n.snapshotGeneration + 1,
@@ -2501,6 +2548,8 @@ func (n *Node) persistCandidateLocked(candidateState *state.Store, candidateBloc
 		FinalityLock:     n.finalityLock,
 		FinalityVotes:    n.finalityVoteListLocked(),
 		FinalityEvidence: n.finalityEvidenceListLocked(),
+		Pending:          candidateMempool,
+		Queued:           candidateQueued,
 	}
 	checksum, err := diskSnapshotChecksum(snapshot)
 	if err != nil {
@@ -2520,6 +2569,29 @@ func (n *Node) persistCandidateLocked(candidateState *state.Store, candidateBloc
 		return n.handlePersistenceErrorLocked(err)
 	}
 	n.snapshotGeneration = snapshot.Generation
+	return nil
+}
+
+func (n *Node) migrateDiskSnapshotLocked() error {
+	if err := n.requireOpenLocked(); err != nil {
+		return err
+	}
+	if n.dataDir == "" || n.dataDirLock == nil {
+		return errors.New("snapshot migration requires a locked persistent data directory")
+	}
+	if n.snapshotGeneration == math.MaxUint64 {
+		return errors.New("persisted snapshot generation overflow")
+	}
+	if len(n.blocks) == 0 {
+		return errors.New("cannot migrate an empty canonical chain")
+	}
+	if err := n.writeDiskSnapshotLocked(n.state, n.blocks, n.mempool, n.queued); err != nil {
+		return err
+	}
+	if err := migrateDataManifest(n.dataDir, n.chainID, n.blocks[0].Hash()); err != nil {
+		uncertain := fmt.Errorf("%w after replacing chain.json: migrate data manifest: %v", ErrAtomicCommitUncertain, err)
+		return n.handlePersistenceErrorLocked(uncertain)
+	}
 	return nil
 }
 
