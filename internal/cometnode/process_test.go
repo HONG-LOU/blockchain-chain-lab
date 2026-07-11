@@ -729,6 +729,98 @@ func TestFourValidatorV2SimultaneousEpochRemovals(t *testing.T) {
 	_ = waitForConsistentNetworkState(t, clients, removalHeight+1, sender, 1, 60*time.Second)
 }
 
+func TestFourValidatorV2LightClientAttackRemoval(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping multi-process CometBFT light-client-attack network in short mode")
+	}
+	if processRaceEnabled {
+		t.Skip("the process-boundary test is covered by the non-race run; package logic remains race-tested")
+	}
+	root, network, clients := startFourValidatorV2EvidenceNetwork(t, "chainlab-v2-light-client-attack", 2)
+	evidenceHeight := stableEvidenceHeight(t, clients[0])
+	privateKeys := make([]cmtcrypto.PrivKey, len(network.Nodes))
+	for index, node := range network.Nodes {
+		privateKeys[index] = loadCometPrivateValidatorKey(t, filepath.Join(root, node.Home, "config", "priv_validator_key.json"))
+	}
+	evidence, byzantineKeys := lightClientAttackEvidence(t, clients[0], network.ChainID, evidenceHeight, privateKeys)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	broadcast, err := clients[0].BroadcastEvidence(ctx, evidence)
+	cancel()
+	if err != nil || broadcast == nil || len(broadcast.Hash) != 32 {
+		t.Fatalf("broadcast light-client evidence response=%+v err=%v", broadcast, err)
+	}
+
+	byzantineAddresses := make(map[string]struct{}, len(byzantineKeys))
+	for _, privateKey := range byzantineKeys {
+		byzantineAddresses[hex.EncodeToString(privateKey.PubKey().Address())] = struct{}{}
+	}
+	remainingIndex := -1
+	for index, node := range network.Nodes {
+		if _, exists := byzantineAddresses[node.ConsensusAddress]; !exists {
+			remainingIndex = index
+			break
+		}
+	}
+	if remainingIndex < 0 {
+		t.Fatal("light-client attack evidence did not leave an active validator")
+	}
+
+	var removalHeight int64
+	waitForCondition(t, 60*time.Second, func() (bool, string) {
+		observedRemovalHeight := int64(0)
+		for clientIndex, client := range clients {
+			for targetIndex, node := range network.Nodes {
+				if _, exists := byzantineAddresses[node.ConsensusAddress]; !exists {
+					continue
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				query, err := client.ABCIQuery(ctx, "/validator", []byte(node.ChainLabAddress))
+				cancel()
+				if err != nil || query == nil || query.Response.Code != chainabci.CodeOK {
+					return false, fmt.Sprintf("node %d target %d validator query=%+v err=%v", clientIndex, targetIndex, query, err)
+				}
+				var result struct {
+					Identity state.ValidatorIdentity `json:"identity"`
+					Stake    uint64                  `json:"stake"`
+				}
+				if err := json.Unmarshal(query.Response.Value, &result); err != nil {
+					return false, fmt.Sprintf("node %d target %d validator decode: %v", clientIndex, targetIndex, err)
+				}
+				if result.Stake != 0 || result.Identity.InactiveHeight <= 0 {
+					return false, fmt.Sprintf("node %d target %d stake=%d inactive_height=%d", clientIndex, targetIndex, result.Stake, result.Identity.InactiveHeight)
+				}
+				if observedRemovalHeight == 0 {
+					observedRemovalHeight = result.Identity.InactiveHeight
+				} else if result.Identity.InactiveHeight != observedRemovalHeight {
+					return false, fmt.Sprintf("node %d target %d removal height=%d want=%d", clientIndex, targetIndex, result.Identity.InactiveHeight, observedRemovalHeight)
+				}
+			}
+		}
+		removalHeight = observedRemovalHeight
+		return true, ""
+	})
+	waitForCondition(t, 60*time.Second, func() (bool, string) {
+		for index, client := range clients {
+			page, perPage := 1, 100
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			validators, err := client.Validators(ctx, nil, &page, &perPage)
+			cancel()
+			if err != nil || validators == nil || validators.Total != 1 || len(validators.Validators) != 1 {
+				return false, fmt.Sprintf("node %d validators=%+v err=%v", index, validators, err)
+			}
+			if !bytes.Equal(validators.Validators[0].Address, privateKeys[remainingIndex].PubKey().Address()) {
+				return false, fmt.Sprintf("node %d remaining validator=%X", index, validators.Validators[0].Address)
+			}
+		}
+		return true, ""
+	})
+
+	senderKey := loadChainPrivateValidatorKey(t, filepath.Join(root, network.Nodes[remainingIndex].Home, "config", "priv_validator_key.json"))
+	sender := chaincrypto.AddressFromPrivateKey(senderKey)
+	broadcastTransfer(t, clients[remainingIndex], senderKey, network.ChainID, sender, "0x8888888888888888888888888888888888888888", 0, 1)
+	_ = waitForConsistentNetworkState(t, clients, removalHeight+1, sender, 1, 60*time.Second)
+}
+
 func TestFourValidatorV3V4V5ScheduledUpgradesAndSparseProofs(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping multi-process CometBFT upgrade network in short mode")
@@ -1137,6 +1229,84 @@ func duplicateVoteEvidence(
 		t.Fatal(err)
 	}
 	return evidence
+}
+
+func lightClientAttackEvidence(
+	t *testing.T,
+	client *rpchttp.HTTP,
+	chainID string,
+	height int64,
+	privateKeys []cmtcrypto.PrivKey,
+) (*cmttypes.LightClientAttackEvidence, []cmtcrypto.PrivKey) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	canonical, err := client.Commit(ctx, &height)
+	cancel()
+	if err != nil || canonical == nil || canonical.Header == nil || canonical.Commit == nil {
+		t.Fatalf("load canonical commit %d response=%+v err=%v", height, canonical, err)
+	}
+	validatorSet := validatorSetAtHeight(t, client, height)
+	keysByAddress := make(map[string]cmtcrypto.PrivKey, len(privateKeys))
+	for _, privateKey := range privateKeys {
+		keysByAddress[hex.EncodeToString(privateKey.PubKey().Address())] = privateKey
+	}
+
+	conflictingHeader := *canonical.Header
+	conflictingHeader.DataHash = bytes.Repeat([]byte{0xdd}, 32)
+	if bytes.Equal(conflictingHeader.DataHash, canonical.Header.DataHash) {
+		conflictingHeader.DataHash[0] ^= 0xff
+	}
+	conflictingBlockID := cmttypes.BlockID{
+		Hash: conflictingHeader.Hash(), PartSetHeader: canonical.Commit.BlockID.PartSetHeader,
+	}
+	voteSet := cmttypes.NewVoteSet(chainID, height, canonical.Commit.Round, cmtproto.PrecommitType, validatorSet)
+	byzantineKeys := make([]cmtcrypto.PrivKey, 0, 3)
+	for index, validator := range validatorSet.Validators {
+		if len(byzantineKeys) == 3 {
+			break
+		}
+		if index >= len(canonical.Commit.Signatures) || canonical.Commit.Signatures[index].BlockIDFlag != cmttypes.BlockIDFlagCommit {
+			continue
+		}
+		privateKey, exists := keysByAddress[hex.EncodeToString(validator.Address)]
+		if !exists {
+			t.Fatalf("missing private key for validator %X", validator.Address)
+		}
+		vote := &cmttypes.Vote{
+			Type: cmtproto.PrecommitType, Height: height, Round: canonical.Commit.Round,
+			BlockID: conflictingBlockID, Timestamp: canonical.Header.Time,
+			ValidatorAddress: validator.Address, ValidatorIndex: int32(index),
+		}
+		signature, err := privateKey.Sign(cmttypes.VoteSignBytes(chainID, vote.ToProto()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		vote.Signature = signature
+		added, err := voteSet.AddVote(vote)
+		if err != nil || !added {
+			t.Fatalf("add conflicting vote %d added=%t err=%v", index, added, err)
+		}
+		byzantineKeys = append(byzantineKeys, privateKey)
+	}
+	if len(byzantineKeys) != 3 {
+		t.Fatalf("canonical commit has only %d usable signatures", len(byzantineKeys))
+	}
+	conflictingCommit := voteSet.MakeExtendedCommit(cmttypes.ABCIParams{}).ToCommit()
+	evidence := &cmttypes.LightClientAttackEvidence{
+		ConflictingBlock: &cmttypes.LightBlock{
+			SignedHeader: &cmttypes.SignedHeader{Header: &conflictingHeader, Commit: conflictingCommit},
+			ValidatorSet: validatorSet,
+		},
+		CommonHeight: height, TotalVotingPower: validatorSet.TotalVotingPower(), Timestamp: canonical.Header.Time,
+	}
+	evidence.ByzantineValidators = evidence.GetByzantineValidators(validatorSet, &canonical.SignedHeader)
+	if len(evidence.ByzantineValidators) != len(byzantineKeys) {
+		t.Fatalf("light-client evidence byzantine validators=%d want=%d", len(evidence.ByzantineValidators), len(byzantineKeys))
+	}
+	if err := evidence.ValidateBasic(); err != nil {
+		t.Fatal(err)
+	}
+	return evidence, byzantineKeys
 }
 
 func TestChainLabProcessHelper(t *testing.T) {
