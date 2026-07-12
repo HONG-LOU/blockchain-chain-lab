@@ -1,14 +1,15 @@
 # ChainLab CometBFT Fault Network Evidence
 
-Status date: 2026-07-11
+Status date: 2026-07-13
 
 ## Scope
 
-ChainLab's production path uses CometBFT v0.39.3 rather than the local PoA harness for Byzantine consensus. The real-process suite now fixes five equal-power four-validator availability boundaries:
+ChainLab's production path uses CometBFT v0.39.3 rather than the local PoA harness for Byzantine consensus. The real-process suite now fixes six equal-power four-validator availability and proposal-validity boundaries:
 
 - one validator unavailable: the remaining 3-of-4 commit transactions;
 - the predicted round-0 proposer unavailable: the remaining 3-of-4 advance to a later round, commit, and converge after recovery;
 - the predicted round-0 proposer connected but its proposal construction delayed beyond timeout: the full mesh remains intact while the network advances rounds and commits;
+- the predicted round-0 proposer returns a proposal containing a malformed transaction: every application rejects it through `ProcessProposal`, a different proposer commits at a later round, and the valid mempool transaction remains available;
 - two validators unavailable: 2-of-4 cannot advance consensus or committed application state;
 - a symmetric 2+2 P2P topology partition: neither side commits, transaction gossip stays on its originating side, and healing converges without divergent application state.
 
@@ -48,6 +49,12 @@ The missing-proposer scenario passed five consecutive real-process runs. It prov
 
 The full peer mesh must remain present. Height `H+1` must use its predicted proposer; height `H+2` must be produced by a different validator with commit round greater than zero. The transaction must commit and all four nodes must converge. The scenario passed five consecutive runs. This covers validator-local proposal-construction latency, not packet delay or asymmetric network reachability.
 
+## Invalid Proposal Test
+
+`TestFourValidatorInvalidProposalAdvancesRound` keeps all four validators and the complete peer mesh online. A test-only ABCI wrapper targets the predicted round-0 proposer at height `H+2`, first lets the real ChainLab application build its proposal, and then appends one malformed transaction. Consuming the one-shot trigger file proves that the target application actually injected the invalid payload.
+
+Height `H+1` must still use its predicted proposer. The targeted proposer must not produce the committed block at `H+2`, and the commit round must be greater than zero. The valid transaction broadcast before the fault must remain available, commit successfully, and converge all four block/application hashes, state roots, and sender nonces. The scenario passed five consecutive real-process runs. The final tree also passed the full unit and race suites, vet, dependency-tidiness diff, four production command builds, height-18 demo, formatting/diff checks, and fixed `govulncheck` v1.6.0 with zero reachable vulnerabilities. It proves application-level proposal rejection and consensus round recovery; it does not prove packet corruption handling or arbitrary Byzantine proposer behavior.
+
 ## Evidence Boundary
 
-The tests cover process outage, a targeted missing round-0 proposer, validator-local delayed proposal construction while connected, and a symmetric disjoint P2P topology. Separate V2 lifecycle networks cover simultaneous evidence-driven power-zero removals and a Comet-verified same-height light-client equivocation proof. They do not emulate dynamic packet delay, drop, duplication, corruption, or reordering; bandwidth exhaustion; asymmetric one-way reachability; forward/lunatic or amnesia light-client cases; simultaneous admission or non-removal power changes; sentry topology; or sustained load. Those remain production gates and require a controllable network-fault environment rather than relabeling application delay or process shutdown as a packet-level fault.
+The tests cover process outage, a targeted missing round-0 proposer, validator-local delayed proposal construction while connected, application rejection of a malformed proposal, and a symmetric disjoint P2P topology. Separate V2 lifecycle networks cover simultaneous evidence-driven power-zero removals and a Comet-verified same-height light-client equivocation proof. They do not emulate dynamic packet delay, drop, duplication, corruption, or reordering; bandwidth exhaustion; asymmetric one-way reachability; forward/lunatic or amnesia light-client cases; simultaneous admission or non-removal power changes; sentry topology; or sustained load. Those remain production gates and require a controllable network-fault environment rather than relabeling application delay, proposal-content injection, or process shutdown as a packet-level fault.

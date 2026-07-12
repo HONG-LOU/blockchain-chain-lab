@@ -37,16 +37,17 @@ import (
 )
 
 const (
-	processHelperModeEnv          = "CHAINLAB_PROCESS_HELPER_MODE"
-	processHelperHomeEnv          = "CHAINLAB_PROCESS_HELPER_HOME"
-	processHelperGenesisEnv       = "CHAINLAB_PROCESS_HELPER_GENESIS"
-	processHelperListenEnv        = "CHAINLAB_PROCESS_HELPER_LISTEN"
-	processHelperDataDirEnv       = "CHAINLAB_PROCESS_HELPER_DATA_DIR"
-	processHelperMaxAppVersionEnv = "CHAINLAB_PROCESS_HELPER_MAX_APP_VERSION"
-	processHelperStateSyncRPCEnv  = "CHAINLAB_PROCESS_HELPER_STATE_SYNC_RPC"
-	processHelperTrustHeightEnv   = "CHAINLAB_PROCESS_HELPER_TRUST_HEIGHT"
-	processHelperTrustHashEnv     = "CHAINLAB_PROCESS_HELPER_TRUST_HASH"
-	processHelperPrepareDelayFile = "CHAINLAB_PROCESS_HELPER_PREPARE_DELAY_FILE"
+	processHelperModeEnv            = "CHAINLAB_PROCESS_HELPER_MODE"
+	processHelperHomeEnv            = "CHAINLAB_PROCESS_HELPER_HOME"
+	processHelperGenesisEnv         = "CHAINLAB_PROCESS_HELPER_GENESIS"
+	processHelperListenEnv          = "CHAINLAB_PROCESS_HELPER_LISTEN"
+	processHelperDataDirEnv         = "CHAINLAB_PROCESS_HELPER_DATA_DIR"
+	processHelperMaxAppVersionEnv   = "CHAINLAB_PROCESS_HELPER_MAX_APP_VERSION"
+	processHelperStateSyncRPCEnv    = "CHAINLAB_PROCESS_HELPER_STATE_SYNC_RPC"
+	processHelperTrustHeightEnv     = "CHAINLAB_PROCESS_HELPER_TRUST_HEIGHT"
+	processHelperTrustHashEnv       = "CHAINLAB_PROCESS_HELPER_TRUST_HASH"
+	processHelperPrepareDelayFile   = "CHAINLAB_PROCESS_HELPER_PREPARE_DELAY_FILE"
+	processHelperPrepareInvalidFile = "CHAINLAB_PROCESS_HELPER_PREPARE_INVALID_FILE"
 )
 
 func TestFourValidatorProcessesRestartReplayBlockAndStateSync(t *testing.T) {
@@ -649,6 +650,103 @@ func TestFourValidatorDelayedConnectedProposerAdvancesRound(t *testing.T) {
 	}
 	if bytes.Equal(targetBlock.Block.ProposerAddress, targetProposer.Address) {
 		t.Fatal("delayed round-0 proposer produced the target block")
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	targetCommit, err := clients[0].Commit(ctx, &targetHeight)
+	cancel()
+	if err != nil || targetCommit == nil || targetCommit.Commit == nil || targetCommit.Commit.Round <= 0 {
+		t.Fatalf("target commit=%+v err=%v", targetCommit, err)
+	}
+	_ = waitForConsistentNetworkState(t, clients, activeHeight, sender, 1, 30*time.Second)
+}
+
+func TestFourValidatorInvalidProposalAdvancesRound(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping multi-process CometBFT invalid-proposal network in short mode")
+	}
+	if processRaceEnabled {
+		t.Skip("the process-boundary test is covered by the non-race run; package logic remains race-tested")
+	}
+	basePort := availablePortRange(t, 12)
+	root := filepath.Join(t.TempDir(), "invalid-proposal-network")
+	network, err := InitializeNetwork(NetworkConfig{
+		OutputRoot: root, ChainID: "chainlab-invalid-proposal", ValidatorCount: 4,
+		GenesisTime:  time.Date(2026, time.July, 10, 12, 0, 0, 0, time.UTC),
+		ABCIBasePort: basePort, RPCBasePort: basePort + 4, P2PBasePort: basePort + 8,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	processes := make([]*helperProcess, 0, len(network.Nodes)*2)
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		for _, process := range processes {
+			t.Logf("%s log:\n%s", process.name, process.tailLog())
+		}
+	})
+	invalidFiles := make([]string, len(network.Nodes))
+	for index, generatedNode := range network.Nodes {
+		home := filepath.Join(root, generatedNode.Home)
+		invalidFiles[index] = filepath.Join(root, fmt.Sprintf("prepare-invalid-%d", index))
+		processes = append(processes, startHelperProcess(t, root, fmt.Sprintf("invalid-proposal-app-%d", index), map[string]string{
+			processHelperModeEnv: "abci", processHelperGenesisEnv: filepath.Join(home, filepath.FromSlash(AppGenesisPath)),
+			processHelperListenEnv: generatedNode.ABCIListenAddress, processHelperDataDirEnv: filepath.Join(root, filepath.FromSlash(generatedNode.ApplicationData)),
+			processHelperPrepareInvalidFile: invalidFiles[index],
+		}))
+	}
+	for _, generatedNode := range network.Nodes {
+		waitForTCP(t, generatedNode.ABCIListenAddress, 15*time.Second)
+	}
+	for index, generatedNode := range network.Nodes {
+		processes = append(processes, startHelperProcess(t, root, fmt.Sprintf("invalid-proposal-comet-%d", index), map[string]string{
+			processHelperModeEnv: "comet", processHelperHomeEnv: filepath.Join(root, generatedNode.Home),
+		}))
+	}
+	clients := make([]*rpchttp.HTTP, len(network.Nodes))
+	for index, generatedNode := range network.Nodes {
+		client, err := rpchttp.New(httpAddress(generatedNode.RPCListenAddress), "/websocket")
+		if err != nil {
+			t.Fatal(err)
+		}
+		clients[index] = client
+	}
+	waitForRPCReady(t, clients, 45*time.Second)
+	waitForPeerMesh(t, clients, 45*time.Second)
+	senderKey := loadChainPrivateValidatorKey(t, filepath.Join(root, network.Nodes[0].Home, "config", "priv_validator_key.json"))
+	sender := chaincrypto.AddressFromPrivateKey(senderKey)
+	height := waitForConsistentNetworkState(t, clients, 2, sender, 0, 45*time.Second)
+	currentSet := validatorSetAtHeight(t, clients[0], height)
+	nextProposer := currentSet.CopyIncrementProposerPriority(1).GetProposer()
+	targetHeight := height + 2
+	targetProposer := currentSet.CopyIncrementProposerPriority(2).GetProposer()
+	targetIndex := validatorNodeIndex(t, network.Nodes, targetProposer.Address)
+	if err := os.WriteFile(invalidFiles[targetIndex], []byte(strconv.FormatInt(targetHeight, 10)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	broadcastTransfer(t, clients[0], senderKey, network.ChainID, sender, "0x9999999999999999999999999999999999999999", 0, 1)
+	activeHeight := waitForConsistentNetworkState(t, clients, targetHeight+1, sender, 1, 60*time.Second)
+	waitForPeerMesh(t, clients, 10*time.Second)
+	if _, err := os.Stat(invalidFiles[targetIndex]); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid proposal trigger was not consumed: %v", err)
+	}
+	nextHeight := height + 1
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	nextBlock, err := clients[0].Block(ctx, &nextHeight)
+	cancel()
+	if err != nil || nextBlock == nil || nextBlock.Block == nil || !bytes.Equal(nextBlock.Block.ProposerAddress, nextProposer.Address) {
+		t.Fatalf("next block=%+v predicted proposer=%X err=%v", nextBlock, nextProposer.Address, err)
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	targetBlock, err := clients[0].Block(ctx, &targetHeight)
+	cancel()
+	if err != nil || targetBlock == nil || targetBlock.Block == nil {
+		t.Fatalf("target block=%+v err=%v", targetBlock, err)
+	}
+	if bytes.Equal(targetBlock.Block.ProposerAddress, targetProposer.Address) {
+		t.Fatal("invalid round-0 proposer produced the target block")
 	}
 	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
 	targetCommit, err := clients[0].Commit(ctx, &targetHeight)
@@ -1435,8 +1533,10 @@ func TestChainLabProcessHelper(t *testing.T) {
 		config := chainabci.Config{
 			Genesis: genesis, DataDir: os.Getenv(processHelperDataDirEnv), MaxAppVersion: maxAppVersion,
 		}
-		if delayFile := os.Getenv(processHelperPrepareDelayFile); delayFile != "" {
-			err = serveDelayedPrepareApplication(ctx, os.Getenv(processHelperListenEnv), config, delayFile, logger)
+		delayFile := os.Getenv(processHelperPrepareDelayFile)
+		invalidFile := os.Getenv(processHelperPrepareInvalidFile)
+		if delayFile != "" || invalidFile != "" {
+			err = servePrepareFaultApplication(ctx, os.Getenv(processHelperListenEnv), config, delayFile, invalidFile, logger)
 		} else {
 			err = chainabci.ServeWithConfig(ctx, os.Getenv(processHelperListenEnv), config, logger)
 		}
@@ -1461,18 +1561,20 @@ func TestChainLabProcessHelper(t *testing.T) {
 	}
 }
 
-type delayedPrepareApplication struct {
+type prepareFaultApplication struct {
 	abcitypes.Application
-	heightFile string
-	mu         sync.Mutex
-	delayed    bool
+	delayHeightFile   string
+	invalidHeightFile string
+	mu                sync.Mutex
+	delayed           bool
+	invalidated       bool
 }
 
-func (application *delayedPrepareApplication) PrepareProposal(
+func (application *prepareFaultApplication) PrepareProposal(
 	ctx context.Context,
 	request *abcitypes.RequestPrepareProposal,
 ) (*abcitypes.ResponsePrepareProposal, error) {
-	raw, err := os.ReadFile(application.heightFile)
+	raw, err := os.ReadFile(application.delayHeightFile)
 	if err == nil && request != nil {
 		height, parseErr := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64)
 		application.mu.Lock()
@@ -1491,14 +1593,37 @@ func (application *delayedPrepareApplication) PrepareProposal(
 			}
 		}
 	}
-	return application.Application.PrepareProposal(ctx, request)
+	response, err := application.Application.PrepareProposal(ctx, request)
+	if err != nil || request == nil || response == nil {
+		return response, err
+	}
+	raw, err = os.ReadFile(application.invalidHeightFile)
+	if err != nil {
+		return response, nil
+	}
+	height, parseErr := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64)
+	application.mu.Lock()
+	shouldInvalidate := parseErr == nil && request.Height == height && !application.invalidated
+	if shouldInvalidate {
+		application.invalidated = true
+	}
+	application.mu.Unlock()
+	if !shouldInvalidate {
+		return response, nil
+	}
+	if err := os.Remove(application.invalidHeightFile); err != nil {
+		return nil, err
+	}
+	response.Txs = append(response.Txs, []byte("{"))
+	return response, nil
 }
 
-func serveDelayedPrepareApplication(
+func servePrepareFaultApplication(
 	ctx context.Context,
 	listen string,
 	config chainabci.Config,
-	heightFile string,
+	delayHeightFile string,
+	invalidHeightFile string,
 	logger cmtlog.Logger,
 ) (returnErr error) {
 	application, err := chainabci.NewApplication(config)
@@ -1508,9 +1633,10 @@ func serveDelayedPrepareApplication(
 	defer func() {
 		returnErr = errors.Join(returnErr, application.Close())
 	}()
-	server, err := abciserver.NewServer(listen, "socket", &delayedPrepareApplication{
-		Application: application,
-		heightFile:  heightFile,
+	server, err := abciserver.NewServer(listen, "socket", &prepareFaultApplication{
+		Application:       application,
+		delayHeightFile:   delayHeightFile,
+		invalidHeightFile: invalidHeightFile,
 	})
 	if err != nil {
 		return err

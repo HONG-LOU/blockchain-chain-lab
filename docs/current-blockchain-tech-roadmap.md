@@ -1,6 +1,6 @@
 # ChainLab Production Technology Roadmap
 
-Status date: 2026-07-11
+Status date: 2026-07-13
 
 ## Product Target
 
@@ -52,7 +52,7 @@ The existing local PoA node remains a fast development/differential-test harness
 - Preserve the implemented socket, atomic durable application commit, block sync, app replay, and real Comet state-sync path as one authoritative height/app-hash/state lifecycle.
 - Preserve the implemented v2 validator identity, retention, slashing, epoch-removal, and `H+2` update invariants while adding certified admission/re-entry, stake-derived voting power, unbonding/rewards, quorum rounding, and upgrade compatibility.
 - Replace the remaining harness and fixed-v1 lifecycle only through explicit protocol activation; do not enable state-driven join/leave shortcuts.
-- Extend the implemented normal-round, 3-of-4 progress, targeted missing/connected-delayed proposer round advancement, 2-of-4 halt/recovery, symmetric partition/heal, reconnect, restart, app-replay, block-sync, state-sync, single/simultaneous duplicate-vote and same-height light-client-equivocation removals, and rolling-application process tests with dynamic packet delay/drop/reorder and asymmetric partitions, forward/amnesia light-client cases, non-removal power/admission changes, load, Comet binary upgrades, and staged operator drills.
+- Extend the implemented normal-round, 3-of-4 progress, targeted missing/connected-delayed/invalid proposer round advancement, 2-of-4 halt/recovery, symmetric partition/heal, reconnect, restart, app-replay, block-sync, state-sync, single/simultaneous duplicate-vote and same-height light-client-equivocation removals, and rolling-application process tests with dynamic packet delay/drop/reorder and asymmetric partitions, forward/amnesia light-client cases, broader Byzantine proposal behavior, non-removal power/admission changes, load, Comet binary upgrades, and staged operator drills.
 - Differential-test ABCI++ execution against the local harness using the same transaction corpus and roots.
 
 ## Gate 3: Durable State And History

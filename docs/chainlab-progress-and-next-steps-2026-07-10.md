@@ -1,6 +1,6 @@
 # ChainLab Progress And Next Steps
 
-Status date: 2026-07-11
+Status date: 2026-07-13
 Branch: `feature/own-chain-mvp`
 Project: `D:\blockchain-chain-lab`
 
@@ -248,6 +248,8 @@ The light-client-equivocation evidence network passed five consecutive runs. Eac
 
 The connected delayed-proposer network passed five consecutive runs. Every run kept all four Comet/application processes and the full peer mesh online, predicted the `H+2` round-0 proposer, and delayed only that node's `PrepareProposal(H+2)` response for two seconds against a 500 ms timeout. A different proposer committed `H+2` at round greater than zero, the transaction committed, and all four nodes converged. Packet-level delay and asymmetric reachability remain open.
 
+The invalid-proposal network passed five consecutive runs. Every run predicted the `H+2` round-0 proposer and used a one-shot test wrapper to append a malformed transaction after the real application prepared that proposal. The consumed trigger proved injection occurred; all applications rejected the proposal, another validator committed `H+2` at round greater than zero, the valid mempool transaction committed, and all four nodes converged. The final tree passed the full unit/race suites, vet, tidy-diff, four production builds, height-18 demo, diff checks, and fixed `govulncheck` v1.6.0 with zero reachable vulnerabilities; two imported-package and 20 required-module advisories remain without reachable vulnerable symbols. This covers application-level proposal rejection, not packet corruption or arbitrary Byzantine proposal behavior.
+
 Windows `go mod verify` is not recorded as green for the CometBFT tree. The signed v0.39.3 module zip contains `.github/workflows/e2e-nightly-38x.yml ` with a trailing space; Windows normalizes the extracted cache path to the no-space name, so Go reports the directory as modified even though the file bytes match. Both `goproxy.cn/sumdb/sum.golang.org` and `sum.golang.google.cn` returned the committed module sums `h1:UegHXskZNomsijmm29nL5NkeXtnzkme6fg+q1hPQnEI=` and `h1:PmNfvtw256BC41ad0FABts236CSZnvZ0kjPOciBwTdM=`. The initial 60 non-Comet ABCI checksum lines match CometBFT v0.39.3's upstream `go.sum`; the larger node graph and security overrides were resolved through signed sumdb. A clean Linux module-cache verification remains part of the Linux/amd64 validator release gate.
 
 ## Current Production Blockers
@@ -255,8 +257,8 @@ Windows `go mod verify` is not recorded as green for the CometBFT tree. The sign
 Ordered by consensus and security dependency rather than feature visibility:
 
 1. **Authoritative CometBFT ABCI++ lifecycle**
-   - The `chainlab-v1` lifecycle now runs across real socket and Comet node processes. Four-validator tests cover proposal/finalize/commit, full-mesh P2P, transaction gossip, 3-of-4 progress, targeted missing-proposer round advancement, 2-of-4 halt/recovery, symmetric 2+2 partition/heal, Comet restart, block sync, durable app restart, fresh-app replay, destructive-data state sync, common-height block/app-hash equality, and current state-root convergence. Keep the local harness for deterministic differential testing only.
-   - Preserve the implemented v2 duplicate-vote/light-client-equivocation slashing, epoch-removal, missing/connected-delayed proposer, quorum-loss/partition recovery, and rolling application replacement paths while adding certified admission/re-entry, stake-derived power, unbonding/rewards, Comet binary/staged rolling drills, dynamic packet faults/asymmetric partitions, forward/amnesia light-client cases, and broader Byzantine fault tests.
+   - The `chainlab-v1` lifecycle now runs across real socket and Comet node processes. Four-validator tests cover proposal/finalize/commit, full-mesh P2P, transaction gossip, 3-of-4 progress, targeted missing/delayed/invalid-proposer round advancement, 2-of-4 halt/recovery, symmetric 2+2 partition/heal, Comet restart, block sync, durable app restart, fresh-app replay, destructive-data state sync, common-height block/app-hash equality, and current state-root convergence. Keep the local harness for deterministic differential testing only.
+   - Preserve the implemented v2 duplicate-vote/light-client-equivocation slashing, epoch-removal, missing/connected-delayed/invalid proposer, quorum-loss/partition recovery, and rolling application replacement paths while adding certified admission/re-entry, stake-derived power, unbonding/rewards, Comet binary/staged rolling drills, dynamic packet faults/asymmetric partitions, forward/amnesia light-client cases, and broader Byzantine fault tests.
    - Keep validator join/leave disabled until their certified transition and economics rules are explicitly activated.
 
 2. **Crash-consistent transactional storage**
@@ -290,7 +292,7 @@ Ordered by consensus and security dependency rather than feature visibility:
 
 1. Extend the V2/V5 evidence-removal foundation into certified admission/re-entry, stake-to-power, unbonding/rewards, governance authority, key rotation, and rolling-upgrade rules without re-enabling ad hoc join/leave transactions; preserve permanent legacy tombstones and V5 forward compaction.
 2. Add incremental Store V2 flat/proof roots, then production-size retention/compaction/load evidence, broader power-loss coverage, an operational restore drill, and external rollback protection.
-3. Extend the multi-process network beyond implemented validator-outage, targeted missing/connected-delayed proposer, simultaneous evidence-driven removals, same-height light-client equivocation, and symmetric partition recovery with dynamic packet faults/asymmetric partitions, forward/amnesia light-client cases, non-removal power/admission changes, Comet binary replacement, staged operator drills, and other Byzantine cases while preserving the implemented application rolling upgrade.
+3. Extend the multi-process network beyond implemented validator-outage, targeted missing/connected-delayed/invalid proposer, simultaneous evidence-driven removals, same-height light-client equivocation, and symmetric partition recovery with dynamic packet faults/asymmetric partitions, forward/amnesia light-client cases, broader Byzantine proposal behavior, non-removal power/admission changes, Comet binary replacement, staged operator drills, and other Byzantine cases while preserving the implemented application rolling upgrade.
 4. Establish the Linux/amd64 validator release target, remote-signer boundary, JIT/RSS limits, reproducible build artifacts, and baseline operational telemetry.
 
 Asset and deployment work stays downstream of the production core: specify the native gas asset and economics, define a production fungible-token standard and issuer controls, add wallet/indexer/explorer/oracle/DEX interfaces, select an audited IBC/bridge or issuer-native stablecoin path, and size validator/sentry/RPC/archive hardware from Linux multi-process load results rather than estimates.
