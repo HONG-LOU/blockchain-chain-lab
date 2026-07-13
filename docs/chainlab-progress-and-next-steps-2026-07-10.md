@@ -1,19 +1,48 @@
 # ChainLab Progress And Next Steps
 
 Status date: 2026-07-13
-Branch: `feature/own-chain-mvp`
+Branch: `main`
 Project: `D:\blockchain-chain-lab`
+Direction decision: desktop-first, self-hosted small-community network
 
 ## Product Target
 
-ChainLab is intended to become a real production-grade sovereign blockchain. It is not scoped as a learning chain, toy, or permanently local prototype.
+As of 2026-07-13, ChainLab's active product target is a desktop-first, self-hosted community blockchain that runs on ordinary personal computers. One machine must provide a complete local experience; four trusted operators must be able to form a fixed-membership CometBFT network using separately operated home computers. Linux, NAS, mini-PC, and low-cost VPS deployments remain supported operating choices, not prerequisites for the first release.
 
-The current local PoA implementation is a development and differential-test harness for the deterministic application state transition; wall-clock block timestamps mean the whole local network is not cross-run deterministic. The selected production path preserves ChainLab's protocol/application state machine and integrates CometBFT ABCI++ for Byzantine consensus, P2P, evidence, proposal flow, block sync, and state sync. Production also requires transactional versioned storage, deterministic WASM limits, protected validator signing, protocol upgrades, security evidence, economics, and staged network operations.
+The current local PoA implementation remains a fast development and differential-test harness. CometBFT ABCI++ remains the authoritative multi-computer network path for consensus, P2P, proposal flow, evidence, block sync, and state sync. The direction change does not weaken deterministic execution, key isolation, storage integrity, protocol compatibility, or fail-closed consensus behavior.
 
-Production readiness is tracked by explicit gates rather than a completion percentage. The capability-and-gates document is authoritative; the roadmap and the blocker summaries in this file are navigational views, not independent exhaustive checklists. See:
+### Intended Release Profiles
+
+These are target profiles, not claims that their complete workflows already exist:
+
+| Profile | Intended use | Signing authority | Current gap |
+|---|---|---|---|
+| `desktop-solo` | One computer, local RPC/Explorer, demos, development, private state | One local development validator | Needs a unified start/status/stop and restart-safe desktop workflow |
+| `home-validator` | Four trusted operators on separate personal computers | Fixed, explicitly invited validator | Needs public-only invitations, home-network guidance, and real multi-computer evidence |
+| `observer` | Verify, sync, query, and broadcast without voting | None | Needs a first-class non-validator initialization and join workflow |
+
+The initial consumer target is Windows 10/11 amd64 with four logical cores, 8 GiB RAM, 100 GiB free SSD space, and ordinary broadband. A single node plus Explorer must fit that target. A four-validator network on one computer remains a 16 GiB-or-more developer workflow, not the 8 GiB consumer requirement. These are release targets until measured by the resource gates below, not current performance guarantees.
+
+### Non-Financial Asset Boundary
+
+"Not involving real financial assets" defines the supported product and operating boundary; it does not claim that software can prevent people from assigning value to arbitrary data.
+
+- Native balances, stake, contract tokens, and demo assets are test units or community points with no promised market value, fiat redemption, yield, issuer backing, or guaranteed permanence.
+- The project does not sell tokens, custody funds for others, market an investment, provide an official stablecoin, operate a fiat gateway, or endorse exchange, bridge, DEX, or collateral use.
+- Local and community networks may be reset, upgraded, or discontinued. Development keys and faucet balances are not suitable for protecting money.
+- A third party may still trade a token or attach real-world value without permission. That behavior is technically impossible to rule out, but it is outside the supported scope and must not be presented as a ChainLab guarantee.
+- Any future decision to support public strangers, valuable assets, redemption rights, bridges, or investment activity must reactivate the deferred economics, HSM/remote-signing, audit, operations, legal, and public-mainnet gates before implementation or promotion.
+
+This boundary reduces the required launch cost and consequence of failure; it does not justify careless key handling, nondeterministic execution, corrupt storage, unsafe downloads, or misleading claims.
+
+### Scope Authority
+
+This decision supersedes the previous public-mainnet implementation priority. Existing capability evidence remains authoritative and must be preserved. The following documents retain the deferred high-assurance/public-mainnet requirements for possible future use, but they no longer define the current execution order:
 
 - `docs/current-blockchain-tech-roadmap.md`
 - `docs/mainstream-chain-capability-and-production-gates-2026-07-10.md`
+
+The English and Chinese README files still describe the earlier production-oriented target. Synchronizing both README files is an explicit desktop-release task below; until then, this section is the authoritative current direction.
 
 ## Completed In This Milestone
 
@@ -259,63 +288,142 @@ The runtime-admission network passed its complete real-process flow after constr
 
 Windows `go mod verify` is not recorded as green for the CometBFT tree. The signed v0.39.3 module zip contains `.github/workflows/e2e-nightly-38x.yml ` with a trailing space; Windows normalizes the extracted cache path to the no-space name, so Go reports the directory as modified even though the file bytes match. Both `goproxy.cn/sumdb/sum.golang.org` and `sum.golang.google.cn` returned the committed module sums `h1:UegHXskZNomsijmm29nL5NkeXtnzkme6fg+q1hPQnEI=` and `h1:PmNfvtw256BC41ad0FABts236CSZnvZ0kjPOciBwTdM=`. The initial 60 non-Comet ABCI checksum lines match CometBFT v0.39.3's upstream `go.sum`; the larger node graph and security overrides were resolved through signed sumdb. A clean Linux module-cache verification remains part of the Linux/amd64 validator release gate.
 
-## Current Production Blockers
+## Desktop-First Gaps And Deferred Mainnet Work
 
-Ordered by consensus and security dependency rather than feature visibility:
+### Desktop Release Blockers
 
-1. **Authoritative CometBFT ABCI++ lifecycle**
-   - The `chainlab-v1` lifecycle now runs across real socket and Comet node processes. Four-validator tests cover proposal/finalize/commit, full-mesh P2P, transaction gossip, 3-of-4 progress, targeted missing/delayed/invalid-proposer round advancement, 2-of-4 halt/recovery, symmetric 2+2 partition/heal, Comet restart, block sync, durable app restart, fresh-app replay, destructive-data state sync, common-height block/app-hash equality, and current state-root convergence. Keep the local harness for deterministic differential testing only.
-   - Preserve the implemented v2 duplicate-vote/light-client-equivocation/forward-lunatic slashing, epoch-removal, missing/connected-delayed/invalid proposer, quorum-loss/partition recovery, and rolling application replacement paths while adding certified admission/re-entry, stake-derived power, unbonding/rewards, Comet binary/staged rolling drills, dynamic packet faults/asymmetric partitions, amnesia light-client evidence, external detector/sourcing, and broader Byzantine fault tests.
-   - Keep validator join/leave disabled until their certified transition and economics rules are explicitly activated.
+1. **Unified node lifecycle**
+   - A user still has to understand separate genesis, key, ABCI application, and Comet process commands.
+   - Deliver one clear local lifecycle for initialize, start, status, stop, restart, and Explorer access. Reuse existing commands and ownership boundaries before adding another framework or GUI.
+   - Shutdown must not leave child processes, locks, or half-written state. Restart must retain height, balances, transaction results, and chain identity.
 
-2. **Crash-consistent transactional storage**
-   - Preserve the implemented Pebble V2 atomic batch, flat live state, per-height deltas/checkpoints, deterministic migration, explicit profiles, historical reads, compaction, backup/open, state-sync rebase, and corruption/kill recovery evidence.
-   - Preserve mutation-aware delta generation, V4/V5 incremental authenticated state, and checkpoint full-diff/root cross-checks; add production-size compaction/retention measurements, an operational restore drill, additional filesystem power-loss phases, and external rollback protection.
-   - Replace sticky-halt handling of post-rename directory-sync uncertainty with an authoritative WAL/transaction recovery decision. Avoid rewriting the complete JSON snapshot for every partial vote.
+2. **Safe network creation and joining**
+   - Define a versioned, bounded, checksummed public invitation containing only chain ID, canonical genesis, network/profile metadata, and public peer identities/addresses.
+   - Validator, P2P, account, and any other private keys must be generated locally, stored separately, excluded from Git, and absent from invitations, logs, screenshots, and error payloads.
+   - Validate schema, size, checksums, chain identity, genesis bytes, profile compatibility, duplicate identities, and unsafe bind addresses before starting processes.
 
-3. **Protocol lifecycle and proofs**
-   - Preserve genesis-scheduled V2-to-V3-to-V4-to-V5 activation, Comet app-version updates, deterministic root/lifecycle migrations, V5 offence retention, incompatible-node rejection, exact-total and sparse proofs, and the standalone trusted-root verifier.
-   - Add runtime-authorized scheduling, signed binary compatibility manifests, rollback limits, light-client integration, a second independent implementation, isolated proof serving, Comet binary replacement, and staged operator rolling-upgrade evidence.
+3. **Low-resource storage and idle behavior**
+   - Make a bounded profile the desktop default. Coordinate application `pruned` retention with Comet block retention instead of pruning only one side.
+   - Measure and then tune empty-block cadence, logs, snapshots, txpool persistence, WASM compilation/cache lifecycle, and proof/history retention. Do not invent a TPS or disk claim before measurement.
+   - Expose the selected profile, data path, retained range, current disk use, and backup status to the user.
 
-4. **Validator signing and node rollback protection**
-   - Add remote signer/HSM support with monotonic last-sign state, single-instance locking, and slashing-safe recovery.
-   - Protect the entire data directory against rollback to an older but internally valid snapshot; the current checksums detect corruption but cannot prove external monotonicity.
+4. **Observer and home-network operation**
+   - Add a non-validator node path that holds no validator private key, cannot propose or vote, and can sync, verify, query, serve a local Explorer, and broadcast transactions.
+   - Document LAN operation first. For different homes, support explicit public addresses/port forwarding or a clearly identified external overlay. Comet P2P does not provide zero-configuration NAT traversal; do not claim that it does.
+   - A small optional seed/bootstrap node may improve discovery, but the network must not silently depend on an undocumented hosted service.
 
-5. **Resource and RPC governance**
-   - Add gas-bounded/lazy proposal simulation, deterministic eviction/TTL, and a production WAL-backed journal without full-snapshot write amplification; preserve the implemented snapshot-backed txpool restart, bounded orphaned-transaction reinsertion, and incremental byte accounting across every mutation and rollback path.
-   - Add hard JIT/compiled-code RSS and lifecycle limits plus Linux multi-process load evidence.
-   - Preserve the implemented all-request/POST/filter/WebSocket/txpool bounds, active filter/subscription expiry, pending-hash accounting, heartbeat/write deadlines, bounded queues, and log-work budget; add principal-aware rate limiting, measured disconnect/backpressure policy, pagination, and sustained abuse tests.
+5. **Desktop packaging and recovery**
+   - Produce Windows amd64 artifacts first, followed by Linux amd64/NAS-friendly artifacts. Each release needs version output, SHA-256 checksums, Quick Start, data-path documentation, and uninstall guidance that does not delete user data by default.
+   - Provide a bounded backup, destructive working-copy removal, restore, and integrity-check workflow. Corrupt, wrong-chain, or stale/incompatible material must fail closed.
+   - Keep RPC and Explorer on loopback by default. Public binding must be explicit and accompanied by the implemented authentication/rate-limit boundary or a clear warning.
 
-6. **Release and security evidence**
-   - Run pinned Linux/amd64 replay vectors, cross-process/cross-node differential tests, fuzz/property/fault/load/soak programs, and dependency/license scans.
-   - Produce reproducible artifacts, checksums, SBOM/provenance, and external security/consensus review. Windows remains a development environment rather than a supported validator target for protocol version 1.
+6. **Real personal-computer evidence**
+   - Validate four separately operated machines or equivalent isolated hosts, not only four processes on one computer.
+   - Preserve the established 3-of-4 progress, deterministic 2-of-4 halt, recovery after returning to 3-of-4, common block/application state, state sync, and incompatible-version rejection.
+   - Record peak RSS, CPU, startup time, sync time, idle traffic, and disk growth per 10,000 blocks. Resource targets become claims only after repeatable evidence.
 
-7. **Operations, economics, and ecosystem**
-   - Add structured logs, metrics, alerts, sentry topology, backups, restore drills, incident runbooks, capacity evidence, and staged public/incentivized testnets.
-   - Specify and simulate native supply, rewards, staking/unbonding/slashing, snapshot-based governance, treasury, deposits/timelocks, and upgrade authority before re-enabling governance transactions.
-   - Build production wallet/SDK/indexer/explorer/token/oracle/interoperability support. USDT/USDC availability requires issuer-native deployment or an audited interoperability path; ChainLab cannot unilaterally mint the official assets.
+7. **User-facing scope consistency**
+   - Synchronize `README.md`, `README.zh-CN.md`, CLI help, Explorer status, and generated network metadata with the desktop/community and non-financial boundaries.
+   - Use explicit experimental/local/community wording. Do not display public-mainnet, investment, stablecoin, custody, guaranteed uptime, or asset-value claims.
+
+### Community Enhancements After Desktop v0.1
+
+- LAN discovery and a reviewed optional seed/relay design.
+- Friendlier invitation exchange and connectivity diagnostics.
+- A desktop GUI only after the CLI lifecycle and error contracts are stable.
+- Longer Windows/Linux soak runs, rolling application upgrade practice, and basic metrics/log rotation.
+- More observer, backup, restore, state-sync, low-disk, sleep/resume, dynamic-IP, and interrupted-shutdown evidence.
+
+### Deferred Public-Mainnet Gates
+
+The following work remains valuable but does not block the desktop/community release:
+
+- public or incentivized testnets, permissionless validator admission, re-entry, runtime power changes, voluntary leave, rewards, full staking economics, treasury, and governance;
+- remote signer/HSM, sentry and multi-region topology, monotonic external rollback protection, enterprise incident response, and financial-grade disaster recovery;
+- official or bridged stablecoins, fiat gateways, exchange/DEX/oracle integrations, production wallet/indexer ecosystems, asset issuance programs, and custody;
+- public-mainnet load targets, large archive fleets, dynamic packet-fault and broader Byzantine programs, a second proof implementation, SBOM/provenance programs, and independent financial-grade audits.
+
+Implemented consensus, deterministic execution, storage integrity, resource bounds, key separation, protocol upgrade rejection, and fail-closed governance must remain tested. "Deferred" never means that an existing safety property may be removed to simplify desktop packaging.
 
 ## Next Immediate Work
 
-1. Extend the V2/V5 evidence-removal foundation into certified admission/re-entry, stake-to-power, unbonding/rewards, governance authority, key rotation, and rolling-upgrade rules without re-enabling ad hoc join/leave transactions; preserve permanent legacy tombstones and V5 forward compaction.
-2. Add incremental Store V2 flat/proof roots, then production-size retention/compaction/load evidence, broader power-loss coverage, an operational restore drill, and external rollback protection.
-3. Extend the multi-process network beyond implemented validator-outage, targeted missing/connected-delayed/invalid proposer, simultaneous evidence-driven removals, runtime admission, same-height light-client equivocation, cross-height forward-lunatic evidence, and symmetric partition recovery with dynamic packet faults/asymmetric partitions, amnesia light-client evidence, external detector/sourcing, broader Byzantine proposal behavior, re-entry/non-removal power changes, Comet binary replacement, staged operator drills, and other Byzantine cases while preserving the implemented application rolling upgrade.
-4. Establish the Linux/amd64 validator release target, remote-signer boundary, JIT/RSS limits, reproducible build artifacts, and baseline operational telemetry.
+The next AI must work through these phases in order and start with only Phase 0 and the smallest Phase 1 implementation slice. It must not resume the old economics/HSM/public-mainnet list, introduce a GUI framework, design a new consensus protocol, or weaken current validation to make the launcher easier.
 
-Asset and deployment work stays downstream of the production core: specify the native gas asset and economics, define a production fungible-token standard and issuer controls, add wallet/indexer/explorer/oracle/DEX interfaces, select an audited IBC/bridge or issuer-native stablecoin path, and size validator/sentry/RPC/archive hardware from Linux multi-process load results rather than estimates.
+### Phase 0: Baseline And Contract
 
-## Completion Audit
+1. Map the existing `cmd/chainlab`, `cmd/chainlab-abci`, and `cmd/chainlab-comet` lifecycle, configuration ownership, ports, data directories, process shutdown, and tests before choosing a new command surface.
+2. Record a repeatable Windows baseline for one node plus Explorer and the existing four-node developer network: startup time, peak/steady RSS, CPU at idle, disk growth, open ports, child processes, and clean shutdown.
+3. Write the smallest explicit profile/config contract for `desktop-solo`, `home-validator`, and `observer`. A profile must select behavior; it must not be an undocumented pile of unrelated defaults.
 
-Do not call the long-running production-chain goal complete until every gate has authoritative evidence:
+Phase 0 acceptance:
 
-- deterministic execution and cross-node replay;
-- Byzantine consensus/P2P/evidence/block sync/state sync through the selected production stack;
-- crash-consistent versioned storage and historical modes;
-- protocol upgrades, migrations, and independently verified inclusion proofs;
-- bounded resources and abuse resistance under load;
-- fuzz/property/race/fault/load/soak/security-review evidence;
-- protected validator signing, operations, and disaster recovery;
-- specified economics, governance, ecosystem, and staged network evidence;
-- documentation and release artifacts matching deployed behavior.
+- measurements include commands, machine specification, duration, height delta, and artifact paths;
+- generated keys and node data stay outside tracked paths and are deleted only when the test explicitly owns them;
+- no performance number is promoted to README before it has repeatable evidence;
+- existing `go test -short -count=1 ./...`, `go vet ./...`, and `go build ./cmd/...` remain green.
 
-The local PoA harness now has materially stronger execution, recovery, finality-lock, and RPC safety properties. It is still a harness, not a completed production sovereign chain. A green local suite is necessary but not sufficient for mainnet readiness.
+### Phase 1: One-Computer Desktop Lifecycle
+
+1. Implement one user-facing workflow that initializes and starts a restart-safe local ChainLab experience without requiring the user to manually coordinate ABCI and Comet internals.
+2. Provide status and clean stop behavior, show the data directory and local Explorer URL, use loopback RPC by default, and never overwrite an existing key or chain identity.
+3. Restart the same network and verify height, account state, transaction receipt, app hash, and chain ID. A second instance using the same data directory must fail closed.
+4. Keep the first deliverable CLI-based. Add a GUI only after lifecycle and error behavior are stable and covered.
+
+Phase 1 acceptance:
+
+- a clean Windows 10/11 amd64 user can create a solo network and reach Explorer/health within five minutes using the documented workflow;
+- normal stop leaves no managed child process or stale lock, while forced termination recovers according to the existing storage contract;
+- no secret appears in CLI output, invitation material, logs, Git status, or screenshots;
+- focused lifecycle/restart tests plus the repository short suite, vet, builds, demo, and diff checks pass.
+
+### Phase 2: Invitations, Validators, And Observers
+
+1. Implement the bounded public invitation contract and local-key generation boundary.
+2. Create or extend initialization for `home-validator` and `observer`; observer nodes must have no validator signing material.
+3. Validate LAN joining first, then document manual port forwarding or an explicit overlay option for different homes. Treat automated NAT traversal and relay operation as later work.
+4. Prove invitation tamper/wrong-chain/duplicate identity/private-material rejection.
+
+Phase 2 acceptance:
+
+- four isolated homes start from the same public network metadata with four independently generated private identities;
+- an automated secret scan confirms that the invitation contains no private validator, P2P, account, or service key;
+- 3-of-4 commits, 2-of-4 halts, restoration to 3-of-4 commits queued work, and all nodes converge;
+- an observer syncs and verifies state, serves local queries, and broadcasts a transaction without proposal or voting authority.
+
+### Phase 3: Bounded Desktop Storage And Recovery
+
+1. Make the desktop default bounded, align application and Comet retention, and select a measured desktop-friendly empty-block policy.
+2. Expose disk use and retention status. Add bounded logs and verify that idle operation does not produce unbounded RSS or file growth unrelated to committed data.
+3. Exercise backup, removal of the working copy, restore, restart, and exact height/app-hash/account-state verification. Reject damaged or wrong-chain backups.
+
+Phase 3 acceptance:
+
+- one node plus Explorer runs on a 4-core/8-GiB Windows reference machine without swap pressure, panic, consensus stall, or sustained unbounded RSS during the measured test;
+- record peak RSS, CPU, network traffic, and disk growth per 10,000 blocks; do not promise 24-hour or long-term behavior until a corresponding soak completes;
+- pruning/empty-block changes rerun determinism, restart, state sync, 3-of-4 progress, and 2-of-4 halt coverage.
+
+### Phase 4: Release And Documentation
+
+1. Produce a Windows amd64 package with version output and SHA-256 checksum; add Linux amd64/NAS-friendly packaging after the Windows path is stable.
+2. Document create, start, status, stop, join, observer, backup, restore, update, and uninstall workflows.
+3. Synchronize both README languages and Explorer/CLI wording with the desktop-first and non-financial product boundary.
+4. Run full tests, short race tests, vet, all command builds, demo, Markdown/link checks, and Playwright desktop/mobile validation before publishing.
+
+Phase 4 acceptance is the Desktop v0.1 completion audit below.
+
+## Desktop v0.1 Completion Audit
+
+Do not call the desktop/community milestone complete until each item has direct evidence:
+
+- a clean Windows amd64 install can initialize, start, inspect, stop, and restart one local network without manual multi-process coordination;
+- the single-node target is measured on a 4-core/8-GiB/100-GiB-free-SSD machine, with resource results reported as evidence rather than estimates;
+- default RPC/Explorer binding is loopback, data paths are explicit, keys are non-overwriting and excluded from Git, and a duplicate data-directory owner is rejected;
+- the bounded storage profile, Comet/application retention, backup, restore, corruption rejection, and restart invariants are verified;
+- four isolated home validators use only public shared invitation data, retain separate private identities, preserve 3-of-4 progress and 2-of-4 halt, and converge after recovery;
+- an observer without validator signing material can sync, verify, query, serve a local Explorer, and broadcast transactions;
+- Windows artifacts, checksums, version information, Quick Start, lifecycle/network/recovery documentation, and uninstall behavior are complete;
+- English and Chinese README files state the desktop/community target, resource evidence, NAT limitation, test/community asset semantics, and deferred public-mainnet gates consistently;
+- full unit/integration tests, short race, vet, builds, demo, Markdown/link validation, and browser validation pass for the shipped tree;
+- no feature, documentation, or UI implies investment value, fiat redemption, official stablecoin support, custody, public-mainnet readiness, or financial-grade availability.
+
+This audit closes only the Desktop v0.1 milestone. The deferred production-gates document remains available if ChainLab later chooses to support strangers, valuable assets, permissionless membership, or a public financial network; those gates must be explicitly reactivated rather than silently assumed complete.
