@@ -45,7 +45,7 @@ The missing-proposer scenario passed five consecutive real-process runs. It prov
 
 ## Delayed Connected Proposer Test
 
-`TestFourValidatorDelayedConnectedProposerAdvancesRound` keeps every validator, Comet process, application process, and P2P connection online. A test-only ABCI wrapper delays exactly one predicted `PrepareProposal(H+2)` response for two seconds, beyond the configured 500 ms round-0 propose timeout.
+`TestFourValidatorDelayedConnectedProposerAdvancesRound` keeps every validator, Comet process, application process, and P2P connection online. A test-only ABCI wrapper delays exactly one predicted `PrepareProposal(H+2)` response for five seconds, beyond the configured 500 ms round-0 propose timeout. The wrapper deletes the height marker when it consumes the fault, and the test requires that direct signal before accepting the later-round result.
 
 The full peer mesh must remain present. Height `H+1` must use its predicted proposer; height `H+2` must be produced by a different validator with commit round greater than zero. The transaction must commit and all four nodes must converge. The scenario passed five consecutive runs. This covers validator-local proposal-construction latency, not packet delay or asymmetric network reachability.
 
