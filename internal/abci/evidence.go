@@ -385,7 +385,7 @@ func validateNonEmptyScheduledValidatorSets(lifecycle state.ValidatorLifecycle) 
 func validatorUpdatesAtHeight(lifecycle state.ValidatorLifecycle, height int64) ([]abcitypes.ValidatorUpdate, error) {
 	identities := make([]state.ValidatorIdentity, 0)
 	for _, identity := range lifecycle.Validators {
-		if identity.InactiveHeight == height+2 {
+		if identity.ActiveHeight == height+2 || identity.InactiveHeight == height+2 {
 			identities = append(identities, identity)
 		}
 	}
@@ -394,11 +394,18 @@ func validatorUpdatesAtHeight(lifecycle state.ValidatorLifecycle, height int64) 
 	})
 	updates := make([]abcitypes.ValidatorUpdate, 0, len(identities))
 	for _, identity := range identities {
+		if identity.ActiveHeight == identity.InactiveHeight {
+			return nil, errors.New("validator lifecycle activates and removes an identity at the same height")
+		}
 		publicKey, err := hex.DecodeString(identity.PublicKey)
 		if err != nil || len(publicKey) != 33 {
 			return nil, errors.New("validator lifecycle contains an invalid public key")
 		}
-		updates = append(updates, abcitypes.UpdateValidator(publicKey, 0, cmtsecp256k1.KeyType))
+		power := identity.Power
+		if identity.InactiveHeight == height+2 {
+			power = 0
+		}
+		updates = append(updates, abcitypes.UpdateValidator(publicKey, power, cmtsecp256k1.KeyType))
 	}
 	return updates, nil
 }

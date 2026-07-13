@@ -315,6 +315,48 @@ func bytesToHex(value []byte) string {
 	return string(encoded)
 }
 
+func TestValidatorUpdatesAtHeightActivatesAndRemovesIdentities(t *testing.T) {
+	fixture := newValidatorV2Fixture(t, "")
+	fixture.initialize(t)
+	lifecycle, exists := fixture.app.committed.store.ValidatorLifecycle()
+	if !exists {
+		t.Fatal("validator lifecycle is missing")
+	}
+	candidateKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidatePublicKey := candidateKey.PubKey().SerializeCompressed()
+	candidateAddress := bytesToHex(cmtsecp256k1.PubKey(candidatePublicKey).Address())
+	lifecycle.Validators[candidateAddress] = state.ValidatorIdentity{
+		Account: chaincrypto.AddressFromPrivateKey(candidateKey), ConsensusAddress: candidateAddress,
+		PublicKey: bytesToHex(candidatePublicKey), Power: 3, ActiveHeight: 5,
+	}
+	removed := lifecycle.Validators[bytesToHex(fixture.proposerAddresses[1])]
+	removed.InactiveHeight = 5
+	lifecycle.Validators[removed.ConsensusAddress] = removed
+
+	updates, err := validatorUpdatesAtHeight(lifecycle, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updates) != 2 {
+		t.Fatalf("validator updates = %+v", updates)
+	}
+	powers := map[string]int64{}
+	for _, update := range updates {
+		address := bytesToHex(cmtsecp256k1.PubKey(update.PubKey.GetSecp256K1()).Address())
+		powers[address] = update.Power
+	}
+	if powers[candidateAddress] != 3 || powers[removed.ConsensusAddress] != 0 {
+		t.Fatalf("validator update powers = %+v", powers)
+	}
+	updates, err = validatorUpdatesAtHeight(lifecycle, 4)
+	if err != nil || len(updates) != 0 {
+		t.Fatalf("repeated validator updates = %+v err=%v", updates, err)
+	}
+}
+
 func hasABCIAttribute(events []abcitypes.Event, eventType string, key string, value string) bool {
 	for _, event := range events {
 		if event.Type != eventType {
