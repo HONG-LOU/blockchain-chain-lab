@@ -233,6 +233,10 @@ func validateValidatorIdentity(identity ValidatorIdentity) error {
 	return nil
 }
 
+func ValidateValidatorIdentity(identity ValidatorIdentity) error {
+	return validateValidatorIdentity(identity)
+}
+
 func validateValidatorOffence(key string, offence ValidatorOffence, identitiesByAccount map[string]ValidatorIdentity) error {
 	account, err := chaincrypto.NormalizeAddress(offence.Validator)
 	if err != nil || account != offence.Validator {

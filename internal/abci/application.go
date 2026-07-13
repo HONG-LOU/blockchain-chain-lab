@@ -62,12 +62,13 @@ type ValidatorPolicy struct {
 }
 
 type GenesisDocument struct {
-	Protocol        string            `json:"protocol"`
-	ChainID         string            `json:"chain_id"`
-	BlockGasLimit   uint64            `json:"block_gas_limit"`
-	State           state.Snapshot    `json:"state"`
-	ValidatorPolicy *ValidatorPolicy  `json:"validator_policy,omitempty"`
-	Upgrades        []ProtocolUpgrade `json:"upgrades,omitempty"`
+	Protocol        string                          `json:"protocol"`
+	ChainID         string                          `json:"chain_id"`
+	BlockGasLimit   uint64                          `json:"block_gas_limit"`
+	State           state.Snapshot                  `json:"state"`
+	ValidatorPolicy *ValidatorPolicy                `json:"validator_policy,omitempty"`
+	Admissions      []ValidatorAdmissionCertificate `json:"validator_admissions,omitempty"`
+	Upgrades        []ProtocolUpgrade               `json:"upgrades,omitempty"`
 }
 
 func NewGenesisDocument(chainID string, blockGasLimit uint64, store *state.Store) (GenesisDocument, error) {
@@ -188,6 +189,7 @@ func NewApplication(config Config) (*Application, error) {
 	}
 	genesis := config.Genesis
 	genesis.State = store.Snapshot()
+	genesis.Admissions = cloneValidatorAdmissions(config.Genesis.Admissions)
 	genesis.Upgrades = append([]ProtocolUpgrade(nil), config.Genesis.Upgrades...)
 	if config.Genesis.ValidatorPolicy != nil {
 		policy := *config.Genesis.ValidatorPolicy
@@ -297,6 +299,9 @@ func validateGenesisDocument(document GenesisDocument) (*state.Store, error) {
 	if _, exists := store.ValidatorLifecycle(); exists {
 		return nil, errors.New("genesis state must not contain an initialized validator lifecycle")
 	}
+	if err := validateGenesisAdmissions(document, store.Validators()); err != nil {
+		return nil, err
+	}
 	return store, nil
 }
 
@@ -402,6 +407,9 @@ func (a *Application) InitChain(_ context.Context, req *abcitypes.RequestInitCha
 	nextCommitted := a.committed
 	if a.genesis.Protocol == ProtocolVersionV2 {
 		nextStore := a.committed.store.Clone()
+		for _, admission := range a.genesis.Admissions {
+			identities = append(identities, admission.Identity)
+		}
 		if err := nextStore.InitializeValidatorLifecycle(identities); err != nil {
 			return nil, err
 		}

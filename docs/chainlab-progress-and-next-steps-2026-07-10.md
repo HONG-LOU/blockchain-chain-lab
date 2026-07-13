@@ -88,10 +88,11 @@ Verification coverage includes smart-account and delegated-EOA end-to-end rotati
 
 ### Validator Safety Boundary
 
-- The current consensus validator set is fixed by genesis.
+- The local harness and protocol V1 consensus validator sets remain fixed by genesis.
+- Protocol V2 genesis can pre-authorize up to 64 future validators through ordered, chain-bound certificates carrying `2/3+1` canonical genesis-validator signatures. Certified identities persist across restart, emit the Comet `H+2` positive-power update, and can propose only during their epoch-aligned active interval.
 - `validator.join` and `validator.leave` are disabled at schema and admission layers until a finalized CometBFT epoch-transition protocol exists.
 - `validator.slash` requires two canonical low-s signatures from the target validator for different block hashes at the same chain and height. Each validator-height offence is single-use regardless of the proving pair and clears all current stake, but does not mutate the fixed consensus validator set immediately.
-- This is an explicit safety restriction, not a completed dynamic staking lifecycle.
+- Runtime admission/re-entry, stake-derived power, unbonding/rewards, and key operations remain disabled; the offline genesis certificate path is not a completed dynamic staking lifecycle.
 
 ### Governance Safety Boundary
 
