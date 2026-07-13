@@ -854,20 +854,32 @@ func (a *Application) CompactStorage() error {
 }
 
 func (a *Application) proposerLocked(address []byte, height int64) (string, error) {
-	if len(address) != cmtcrypto.AddressSize {
-		return "", errors.New("proposal has an invalid proposer address")
+	account, err := a.validatorAccountLocked(address, height)
+	if err != nil {
+		return "", fmt.Errorf("proposal proposer: %w", err)
 	}
-	proposer, exists := a.proposers[hex.EncodeToString(address)]
-	if !exists {
-		return "", errors.New("proposal proposer is not in the fixed validator set")
+	return account, nil
+}
+
+func (a *Application) validatorAccountLocked(address []byte, height int64) (string, error) {
+	if len(address) != cmtcrypto.AddressSize {
+		return "", errors.New("validator has an invalid consensus address")
 	}
 	if a.genesis.Protocol == ProtocolVersionV2 {
 		identity, exists := a.committed.store.ValidatorIdentityByConsensusAddress(hex.EncodeToString(address))
-		if !exists || !validatorIdentityActive(identity, height) {
-			return "", errors.New("proposal proposer is not active at this height")
+		if !exists {
+			return "", errors.New("validator identity is unknown")
 		}
+		if !validatorIdentityActive(identity, height) {
+			return "", errors.New("validator is not active at this height")
+		}
+		return identity.Account, nil
 	}
-	return proposer, nil
+	account, exists := a.proposers[hex.EncodeToString(address)]
+	if !exists {
+		return "", errors.New("validator is not in the fixed validator set")
+	}
+	return account, nil
 }
 
 func appVersion(protocol string) uint64 {

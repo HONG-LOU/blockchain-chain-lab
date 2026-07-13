@@ -2,7 +2,6 @@ package abci
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 
 	abcitypes "github.com/cometbft/cometbft/abci/types"
@@ -38,16 +37,7 @@ func (a *Application) VerifyVoteExtension(_ context.Context, req *abcitypes.Requ
 	if err := a.requireProtocolSupportLocked(req.Height, true); err != nil {
 		return &abcitypes.ResponseVerifyVoteExtension{Status: abcitypes.ResponseVerifyVoteExtension_REJECT}, nil
 	}
-	if _, exists := a.proposers[hex.EncodeToString(req.ValidatorAddress)]; !exists {
-		return &abcitypes.ResponseVerifyVoteExtension{Status: abcitypes.ResponseVerifyVoteExtension_REJECT}, nil
-	}
-	if a.genesis.Protocol == ProtocolVersionV2 {
-		identity, known := a.committed.store.ValidatorIdentityByConsensusAddress(hex.EncodeToString(req.ValidatorAddress))
-		if !known || !validatorIdentityActive(identity, req.Height) {
-			return &abcitypes.ResponseVerifyVoteExtension{Status: abcitypes.ResponseVerifyVoteExtension_REJECT}, nil
-		}
-	}
-	if len(req.ValidatorAddress) != 20 {
+	if _, err := a.validatorAccountLocked(req.ValidatorAddress, req.Height); err != nil {
 		return &abcitypes.ResponseVerifyVoteExtension{Status: abcitypes.ResponseVerifyVoteExtension_REJECT}, nil
 	}
 	return &abcitypes.ResponseVerifyVoteExtension{Status: abcitypes.ResponseVerifyVoteExtension_ACCEPT}, nil

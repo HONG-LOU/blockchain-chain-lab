@@ -357,6 +357,49 @@ func TestValidatorUpdatesAtHeightActivatesAndRemovesIdentities(t *testing.T) {
 	}
 }
 
+func TestLifecycleValidatorIdentityAuthorizesOnlyItsActiveInterval(t *testing.T) {
+	fixture := newValidatorV2Fixture(t, "")
+	fixture.initialize(t)
+	candidateKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidatePublicKey := candidateKey.PubKey().SerializeCompressed()
+	candidateAddress := cmtsecp256k1.PubKey(candidatePublicKey).Address()
+	lifecycle, _ := fixture.app.committed.store.ValidatorLifecycle()
+	lifecycle.Validators[bytesToHex(candidateAddress)] = state.ValidatorIdentity{
+		Account:          chaincrypto.AddressFromPrivateKey(candidateKey),
+		ConsensusAddress: bytesToHex(candidateAddress), PublicKey: bytesToHex(candidatePublicKey),
+		Power: 2, ActiveHeight: 3, InactiveHeight: 5,
+	}
+	if err := fixture.app.committed.store.SetValidatorLifecycle(lifecycle); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		height int64
+		valid  bool
+	}{
+		{height: 2, valid: false},
+		{height: 3, valid: true},
+		{height: 4, valid: true},
+		{height: 5, valid: false},
+	} {
+		account, err := fixture.app.validatorAccountLocked(candidateAddress, test.height)
+		if test.valid && (err != nil || account != chaincrypto.AddressFromPrivateKey(candidateKey)) {
+			t.Fatalf("height %d account=%q err=%v", test.height, account, err)
+		}
+		if !test.valid && err == nil {
+			t.Fatalf("height %d unexpectedly authorized account %q", test.height, account)
+		}
+	}
+	unknown := make([]byte, 20)
+	unknown[0] = 1
+	if _, err := fixture.app.validatorAccountLocked(unknown, 3); err == nil {
+		t.Fatal("unknown validator identity was authorized")
+	}
+}
+
 func hasABCIAttribute(events []abcitypes.Event, eventType string, key string, value string) bool {
 	for _, event := range events {
 		if event.Type != eventType {
