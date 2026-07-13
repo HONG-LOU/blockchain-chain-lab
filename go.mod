@@ -6,6 +6,7 @@ require (
 	github.com/bytecodealliance/wasmtime-go/v46 v46.0.1
 	github.com/cockroachdb/pebble v1.1.1
 	github.com/cometbft/cometbft v0.39.3
+	github.com/cometbft/cometbft-db v0.14.1
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1
 	golang.org/x/crypto v0.49.0
 	golang.org/x/sys v0.44.0
@@ -23,7 +24,6 @@ require (
 	github.com/cockroachdb/logtags v0.0.0-20230118201751-21c54148d20b // indirect
 	github.com/cockroachdb/redact v1.1.5 // indirect
 	github.com/cockroachdb/tokenbucket v0.0.0-20230807174530-cc333fc44b06 // indirect
-	github.com/cometbft/cometbft-db v0.14.1 // indirect
 	github.com/cosmos/gogoproto v1.7.2 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/davidlazar/go-crypto v0.0.0-20200604182044-b73af7476f6c // indirect

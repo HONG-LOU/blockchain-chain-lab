@@ -65,3 +65,25 @@ func TestApplyConsensusOptionsRejectsUnboundedManagedCadence(t *testing.T) {
 		t.Fatal("expected zero managed empty-block interval to fail")
 	}
 }
+
+func TestManagedDBProviderReleasesTransactionIndex(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "comet-home")
+	config := cmtcfg.DefaultConfig().SetRoot(root)
+	provider := &managedDBProvider{}
+	database, err := provider.open(&cmtcfg.DBContext{ID: "tx_index", Config: config})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Set([]byte("key"), []byte("value")); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(root); err != nil {
+		t.Fatalf("remove closed transaction index: %v", err)
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("transaction index root still exists: %v", err)
+	}
+}

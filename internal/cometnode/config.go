@@ -19,6 +19,7 @@ import (
 	"chainlab/internal/hash"
 	chaintypes "chainlab/internal/types"
 
+	dbm "github.com/cometbft/cometbft-db"
 	cmtcfg "github.com/cometbft/cometbft/config"
 	cmtcrypto "github.com/cometbft/cometbft/crypto"
 	cmtsecp256k1 "github.com/cometbft/cometbft/crypto/secp256k1"
@@ -79,6 +80,30 @@ type StateSyncOptions struct {
 	RPCServers  []string
 	TrustHeight int64
 	TrustHash   string
+}
+
+type managedDBProvider struct {
+	txIndex dbm.DB
+}
+
+func (provider *managedDBProvider) open(context *cmtcfg.DBContext) (dbm.DB, error) {
+	database, err := cmtcfg.DefaultDBProvider(context)
+	if err != nil {
+		return nil, err
+	}
+	if context.ID == "tx_index" {
+		provider.txIndex = database
+	}
+	return database, nil
+}
+
+func (provider *managedDBProvider) close() error {
+	if provider.txIndex == nil {
+		return nil
+	}
+	err := provider.txIndex.Close()
+	provider.txIndex = nil
+	return err
 }
 
 func (document NodeDocument) CanonicalBytes() ([]byte, error) {
@@ -215,28 +240,57 @@ func RunWithOptions(ctx context.Context, home string, out io.Writer, options Run
 	if err != nil {
 		return fmt.Errorf("parse CometBFT log level: %w", err)
 	}
+	databaseProvider := &managedDBProvider{}
 	var cometNode *node.Node
 	if document.Role == RoleObserver {
-		cometNode, err = newObserverNode(config, logger)
+		cometNode, err = newObserverNode(config, logger, databaseProvider.open)
 	} else {
-		cometNode, err = node.DefaultNewNode(config, logger)
+		cometNode, err = newValidatorNode(config, logger, databaseProvider.open)
 	}
 	if err != nil {
-		return fmt.Errorf("create CometBFT node: %w", err)
+		return closeManagedDatabase(databaseProvider, fmt.Errorf("create CometBFT node: %w", err))
 	}
 	if err := cometNode.Start(); err != nil {
-		return fmt.Errorf("start CometBFT node: %w", err)
+		return closeManagedDatabase(databaseProvider, fmt.Errorf("start CometBFT node: %w", err))
 	}
 	select {
 	case <-ctx.Done():
 		if err := cometNode.Stop(); err != nil {
-			return fmt.Errorf("stop CometBFT node: %w", err)
+			return closeManagedDatabase(databaseProvider, fmt.Errorf("stop CometBFT node: %w", err))
 		}
 		<-cometNode.Quit()
-		return nil
+		return closeManagedDatabase(databaseProvider, nil)
 	case <-cometNode.Quit():
-		return errors.New("CometBFT node stopped unexpectedly")
+		return closeManagedDatabase(databaseProvider, errors.New("CometBFT node stopped unexpectedly"))
 	}
+}
+
+func closeManagedDatabase(provider *managedDBProvider, runErr error) error {
+	if err := provider.close(); err != nil {
+		closeErr := fmt.Errorf("close CometBFT transaction index: %w", err)
+		if runErr != nil {
+			return errors.Join(runErr, closeErr)
+		}
+		return closeErr
+	}
+	return runErr
+}
+
+func newValidatorNode(config *cmtcfg.Config, logger cmtlog.Logger, databaseProvider cmtcfg.DBProvider) (*node.Node, error) {
+	nodeKey, err := p2p.LoadOrGenNodeKey(config.NodeKeyFile())
+	if err != nil {
+		return nil, fmt.Errorf("load or generate node key: %w", err)
+	}
+	return node.NewNode(
+		config,
+		privval.LoadOrGenFilePV(config.PrivValidatorKeyFile(), config.PrivValidatorStateFile()),
+		nodeKey,
+		proxy.DefaultClientCreator(config.ProxyApp, config.ABCI, config.DBDir()),
+		node.DefaultGenesisDocProviderFunc(config),
+		databaseProvider,
+		node.DefaultMetricsProvider(config.Instrumentation),
+		logger,
+	)
 }
 
 type observerPrivValidator struct {
@@ -255,7 +309,7 @@ func (observerPrivValidator) SignProposal(string, *cmtproto.Proposal) error {
 	return errors.New("observer nodes cannot sign proposals")
 }
 
-func newObserverNode(config *cmtcfg.Config, logger cmtlog.Logger) (*node.Node, error) {
+func newObserverNode(config *cmtcfg.Config, logger cmtlog.Logger, databaseProvider cmtcfg.DBProvider) (*node.Node, error) {
 	nodeKey, err := p2p.LoadNodeKey(config.NodeKeyFile())
 	if err != nil {
 		return nil, fmt.Errorf("load observer P2P node key: %w", err)
@@ -266,7 +320,7 @@ func newObserverNode(config *cmtcfg.Config, logger cmtlog.Logger) (*node.Node, e
 		nodeKey,
 		proxy.DefaultClientCreator(config.ProxyApp, config.ABCI, config.DBDir()),
 		node.DefaultGenesisDocProviderFunc(config),
-		cmtcfg.DefaultDBProvider,
+		databaseProvider,
 		node.DefaultMetricsProvider(config.Instrumentation),
 		logger,
 	)

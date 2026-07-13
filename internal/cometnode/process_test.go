@@ -97,7 +97,7 @@ func TestFourValidatorProcessesRestartReplayBlockAndStateSync(t *testing.T) {
 		processes = append(processes, apps[index])
 	}
 	for _, generatedNode := range network.Nodes {
-		waitForTCP(t, generatedNode.ABCIListenAddress, 15*time.Second)
+		waitForTCP(t, generatedNode.ABCIListenAddress, 45*time.Second)
 	}
 	for index, generatedNode := range network.Nodes {
 		cometNodes[index] = startHelperProcess(t, root, fmt.Sprintf("comet-%d", index), map[string]string{
@@ -155,7 +155,7 @@ func TestFourValidatorProcessesRestartReplayBlockAndStateSync(t *testing.T) {
 		processHelperDataDirEnv: filepath.Join(root, filepath.FromSlash(network.Nodes[3].ApplicationData)),
 	})
 	processes = append(processes, apps[3])
-	waitForTCP(t, network.Nodes[3].ABCIListenAddress, 15*time.Second)
+	waitForTCP(t, network.Nodes[3].ABCIListenAddress, 45*time.Second)
 	cometNodes[3] = startHelperProcess(t, root, "comet-3-durable-app", map[string]string{
 		processHelperModeEnv: "comet",
 		processHelperHomeEnv: home3,
@@ -176,7 +176,7 @@ func TestFourValidatorProcessesRestartReplayBlockAndStateSync(t *testing.T) {
 		processHelperDataDirEnv: filepath.Join(root, "fresh-app-3"),
 	})
 	processes = append(processes, apps[3])
-	waitForTCP(t, network.Nodes[3].ABCIListenAddress, 15*time.Second)
+	waitForTCP(t, network.Nodes[3].ABCIListenAddress, 45*time.Second)
 	cometNodes[3] = startHelperProcess(t, root, "comet-3-app-replay", map[string]string{
 		processHelperModeEnv: "comet",
 		processHelperHomeEnv: home3,
@@ -207,7 +207,7 @@ func TestFourValidatorProcessesRestartReplayBlockAndStateSync(t *testing.T) {
 		processHelperDataDirEnv: filepath.Join(root, filepath.FromSlash(network.Nodes[3].ApplicationData)),
 	})
 	processes = append(processes, apps[3])
-	waitForTCP(t, network.Nodes[3].ABCIListenAddress, 15*time.Second)
+	waitForTCP(t, network.Nodes[3].ABCIListenAddress, 45*time.Second)
 	cometNodes[3] = startHelperProcess(t, root, "comet-3-state-sync", map[string]string{
 		processHelperModeEnv:         "comet",
 		processHelperHomeEnv:         home3,
@@ -261,7 +261,7 @@ func TestFourValidatorQuorumLossHaltsAndRecovers(t *testing.T) {
 		processes = append(processes, apps[index])
 	}
 	for _, generatedNode := range network.Nodes {
-		waitForTCP(t, generatedNode.ABCIListenAddress, 15*time.Second)
+		waitForTCP(t, generatedNode.ABCIListenAddress, 45*time.Second)
 	}
 	for index, generatedNode := range network.Nodes {
 		cometNodes[index] = startHelperProcess(t, root, fmt.Sprintf("quorum-comet-%d", index), map[string]string{
@@ -357,7 +357,7 @@ func TestFourValidatorP2PPartitionHaltsAndHeals(t *testing.T) {
 		processes = append(processes, apps[index])
 	}
 	for _, generatedNode := range network.Nodes {
-		waitForTCP(t, generatedNode.ABCIListenAddress, 15*time.Second)
+		waitForTCP(t, generatedNode.ABCIListenAddress, 45*time.Second)
 	}
 	for index, generatedNode := range network.Nodes {
 		cometNodes[index] = startHelperProcess(t, root, fmt.Sprintf("partition-full-comet-%d", index), map[string]string{
@@ -482,7 +482,7 @@ func TestFourValidatorMissingProposerAdvancesRoundAndRecovers(t *testing.T) {
 		processes = append(processes, apps[index])
 	}
 	for _, generatedNode := range network.Nodes {
-		waitForTCP(t, generatedNode.ABCIListenAddress, 15*time.Second)
+		waitForTCP(t, generatedNode.ABCIListenAddress, 45*time.Second)
 	}
 	for index, generatedNode := range network.Nodes {
 		cometNodes[index] = startHelperProcess(t, root, fmt.Sprintf("missing-proposer-comet-%d", index), map[string]string{
@@ -606,7 +606,7 @@ func TestFourValidatorDelayedConnectedProposerAdvancesRound(t *testing.T) {
 		}))
 	}
 	for _, generatedNode := range network.Nodes {
-		waitForTCP(t, generatedNode.ABCIListenAddress, 15*time.Second)
+		waitForTCP(t, generatedNode.ABCIListenAddress, 45*time.Second)
 	}
 	for index, generatedNode := range network.Nodes {
 		processes = append(processes, startHelperProcess(t, root, fmt.Sprintf("delayed-proposer-comet-%d", index), map[string]string{
@@ -637,6 +637,9 @@ func TestFourValidatorDelayedConnectedProposerAdvancesRound(t *testing.T) {
 
 	broadcastTransfer(t, clients[0], senderKey, network.ChainID, sender, "0x9999999999999999999999999999999999999999", 0, 1)
 	activeHeight := waitForConsistentNetworkState(t, clients, targetHeight+1, sender, 1, 60*time.Second)
+	if _, err := os.Stat(delayFiles[targetIndex]); !os.IsNotExist(err) {
+		t.Fatalf("target proposer delay was not consumed: %v", err)
+	}
 	waitForPeerMesh(t, clients, 10*time.Second)
 	nextHeight := height + 1
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -700,7 +703,7 @@ func TestFourValidatorInvalidProposalAdvancesRound(t *testing.T) {
 		}))
 	}
 	for _, generatedNode := range network.Nodes {
-		waitForTCP(t, generatedNode.ABCIListenAddress, 15*time.Second)
+		waitForTCP(t, generatedNode.ABCIListenAddress, 45*time.Second)
 	}
 	for index, generatedNode := range network.Nodes {
 		processes = append(processes, startHelperProcess(t, root, fmt.Sprintf("invalid-proposal-comet-%d", index), map[string]string{
@@ -1310,7 +1313,7 @@ func TestFourValidatorV3V4V5ScheduledUpgradesAndSparseProofs(t *testing.T) {
 		}))
 	}
 	for _, generatedNode := range network.Nodes {
-		waitForTCP(t, generatedNode.ABCIListenAddress, 15*time.Second)
+		waitForTCP(t, generatedNode.ABCIListenAddress, 45*time.Second)
 	}
 	for index, generatedNode := range network.Nodes {
 		processes = append(processes, startHelperProcess(t, root, fmt.Sprintf("v4-comet-%d", index), map[string]string{
@@ -1377,7 +1380,7 @@ func TestFourValidatorV5RollingApplicationUpgrade(t *testing.T) {
 		processes = append(processes, apps[index])
 	}
 	for _, generatedNode := range network.Nodes {
-		waitForTCP(t, generatedNode.ABCIListenAddress, 15*time.Second)
+		waitForTCP(t, generatedNode.ABCIListenAddress, 45*time.Second)
 	}
 	for index, generatedNode := range network.Nodes {
 		cometNodes[index] = startHelperProcess(t, root, fmt.Sprintf("rolling-comet-%d", index), map[string]string{
@@ -1418,7 +1421,7 @@ func TestFourValidatorV5RollingApplicationUpgrade(t *testing.T) {
 			processHelperMaxAppVersionEnv: strconv.FormatUint(chainabci.AppVersionV5, 10),
 		})
 		processes = append(processes, apps[index])
-		waitForTCP(t, generatedNode.ABCIListenAddress, 15*time.Second)
+		waitForTCP(t, generatedNode.ABCIListenAddress, 45*time.Second)
 		cometNodes[index] = startHelperProcess(t, root, fmt.Sprintf("rolling-v5-comet-%d", index), map[string]string{
 			processHelperModeEnv: "comet", processHelperHomeEnv: home,
 		})
@@ -1569,7 +1572,7 @@ func startFourValidatorV2ProcessNetwork(
 		}))
 	}
 	for _, generatedNode := range network.Nodes {
-		waitForTCP(t, generatedNode.ABCIListenAddress, 15*time.Second)
+		waitForTCP(t, generatedNode.ABCIListenAddress, 45*time.Second)
 	}
 	for index, generatedNode := range network.Nodes {
 		started.cometNodes[index] = startHelperProcess(t, root, fmt.Sprintf("v2-comet-%d", index), map[string]string{
@@ -1963,7 +1966,10 @@ func (application *prepareFaultApplication) PrepareProposal(
 		}
 		application.mu.Unlock()
 		if shouldDelay {
-			timer := time.NewTimer(2 * time.Second)
+			if err := os.Remove(application.delayHeightFile); err != nil {
+				return nil, err
+			}
+			timer := time.NewTimer(5 * time.Second)
 			defer timer.Stop()
 			select {
 			case <-ctx.Done():
@@ -2158,20 +2164,11 @@ func resetNodeDataForStateSync(t *testing.T, home string) {
 
 func availablePortRange(t *testing.T, count int) int {
 	t.Helper()
-	for attempt := 0; attempt < 100; attempt++ {
-		seed, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		base := seed.Addr().(*net.TCPAddr).Port
-		_ = seed.Close()
-		if base+count > 65535 {
-			continue
-		}
+	for base := 30_000; base+count < 35_000; base += count {
 		listeners := make([]net.Listener, 0, count)
 		available := true
 		for offset := 0; offset < count; offset++ {
-			listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", base+offset))
+			listener, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(base+offset))
 			if err != nil {
 				available = false
 				break

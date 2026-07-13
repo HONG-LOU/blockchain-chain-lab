@@ -145,7 +145,7 @@ func processPorts(base int, index int) LocalPorts {
 
 func availablePortBlock(t *testing.T, count int) int {
 	t.Helper()
-	for base := 30_000; base+count < 40_000; base += count {
+	for base := 35_000; base+count < 40_000; base += count {
 		listeners := make([]net.Listener, 0, count)
 		available := true
 		for offset := 0; offset < count; offset++ {
