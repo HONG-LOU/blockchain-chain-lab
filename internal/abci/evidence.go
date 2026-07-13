@@ -33,6 +33,7 @@ type evidenceOutcome struct {
 	slashBasisPoints uint32
 	slashAmount      uint64
 	removalHeight    int64
+	unbondingHeight  int64
 }
 
 func validateEvidence(input []abcitypes.Misbehavior, height int64, validators map[string]string) ([]evidenceRecord, error) {
@@ -189,9 +190,10 @@ func applyEvidenceV2(
 	for _, record := range records {
 		key := state.ValidatorOffenceKey(record.Validator, record.Height)
 		if prior, consumed := lifecycle.Offences[key]; consumed {
+			identity := lifecycle.Validators[record.ConsensusAddress]
 			outcomes = append(outcomes, evidenceOutcome{
 				record: record, slashBasisPoints: prior.SlashBasisPoints,
-				removalHeight: prior.RemovalHeight,
+				removalHeight: prior.RemovalHeight, unbondingHeight: identity.UnbondingHeight,
 			})
 			continue
 		}
@@ -243,6 +245,7 @@ func applyEvidenceV2(
 		outcomes = append(outcomes, evidenceOutcome{
 			record: record, newOffence: true, slashBasisPoints: slashBasisPoints,
 			slashAmount: slashAmount, removalHeight: removalHeight,
+			unbondingHeight: identity.UnbondingHeight,
 		})
 	}
 	if err := validateNonEmptyScheduledValidatorSets(lifecycle); err != nil {
@@ -475,17 +478,22 @@ func validatorEpoch(height int64, epochLength int64) uint64 {
 func evidenceOutcomeEvents(outcomes []evidenceOutcome) []abcitypes.Event {
 	events := make([]abcitypes.Event, 0, len(outcomes))
 	for _, outcome := range outcomes {
+		attributes := []abcitypes.EventAttribute{
+			{Key: "height", Value: strconv.FormatInt(outcome.record.Height, 10), Index: true},
+			{Key: "validator", Value: outcome.record.Validator, Index: true},
+			{Key: "type", Value: strconv.FormatInt(int64(outcome.record.Type), 10), Index: true},
+			{Key: "new_offence", Value: strconv.FormatBool(outcome.newOffence), Index: true},
+			{Key: "slash_basis_points", Value: strconv.FormatUint(uint64(outcome.slashBasisPoints), 10)},
+			{Key: "slash_amount", Value: strconv.FormatUint(outcome.slashAmount, 10)},
+			{Key: "removal_height", Value: strconv.FormatInt(outcome.removalHeight, 10), Index: true},
+		}
+		if outcome.unbondingHeight > 0 {
+			attributes = append(attributes, abcitypes.EventAttribute{
+				Key: "unbonding_height", Value: strconv.FormatInt(outcome.unbondingHeight, 10), Index: true,
+			})
+		}
 		events = append(events, abcitypes.Event{
-			Type: "chainlab.validator_slash",
-			Attributes: []abcitypes.EventAttribute{
-				{Key: "height", Value: strconv.FormatInt(outcome.record.Height, 10), Index: true},
-				{Key: "validator", Value: outcome.record.Validator, Index: true},
-				{Key: "type", Value: strconv.FormatInt(int64(outcome.record.Type), 10), Index: true},
-				{Key: "new_offence", Value: strconv.FormatBool(outcome.newOffence), Index: true},
-				{Key: "slash_basis_points", Value: strconv.FormatUint(uint64(outcome.slashBasisPoints), 10)},
-				{Key: "slash_amount", Value: strconv.FormatUint(outcome.slashAmount, 10)},
-				{Key: "removal_height", Value: strconv.FormatInt(outcome.removalHeight, 10), Index: true},
-			},
+			Type: "chainlab.validator_slash", Attributes: attributes,
 		})
 	}
 	return events

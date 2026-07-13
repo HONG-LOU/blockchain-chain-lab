@@ -139,6 +139,9 @@ func TestValidatorV2EvidenceSlashingAndEpochUpdateTiming(t *testing.T) {
 	if len(heightTwo.ValidatorUpdates) != 0 {
 		t.Fatalf("height 2 validator updates = %+v", heightTwo.ValidatorUpdates)
 	}
+	if !hasABCIAttribute(heightTwo.Events, "chainlab.validator_slash", "unbonding_height", "13") {
+		t.Fatalf("height 2 slash events = %+v", heightTwo.Events)
+	}
 	if got := fixture.app.committed.store.StakeOf(fixture.accounts[1]); got != 950 {
 		t.Fatalf("slashed stake = %d, want 950", got)
 	}
@@ -163,6 +166,9 @@ func TestValidatorV2EvidenceSlashingAndEpochUpdateTiming(t *testing.T) {
 	}
 	if !hasABCIAttribute(heightFour.Events, "chainlab.validator_slash", "new_offence", "false") {
 		t.Fatalf("repeated evidence events = %+v", heightFour.Events)
+	}
+	if !hasABCIAttribute(heightFour.Events, "chainlab.validator_slash", "unbonding_height", "13") {
+		t.Fatalf("repeated evidence unbonding event = %+v", heightFour.Events)
 	}
 
 	if _, err := fixture.app.FinalizeBlock(context.Background(), &abcitypes.RequestFinalizeBlock{
