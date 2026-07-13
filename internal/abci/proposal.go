@@ -274,6 +274,11 @@ func (a *Application) proposalEvidenceStateLocked(
 	if !exists {
 		return proposalEvidenceState{}, errors.New("protocol version 2 validator lifecycle is missing")
 	}
+	if err := validateValidatorEpochSchedule(
+		lifecycle, working.Validators(), a.genesis.ValidatorPolicy.EpochLength,
+	); err != nil {
+		return proposalEvidenceState{}, err
+	}
 	records, err := validateEvidenceV2(input, height, blockTime, lifecycle, *a.genesis.ValidatorPolicy)
 	if err != nil {
 		return proposalEvidenceState{}, err

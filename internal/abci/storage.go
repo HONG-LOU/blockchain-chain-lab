@@ -391,11 +391,10 @@ func validatePersistedApplicationState(
 		if commitment.Epoch != validatorEpoch(commitment.Height, genesis.ValidatorPolicy.EpochLength) {
 			return errors.New("protocol version 2 validator epoch mismatch")
 		}
-		for _, identity := range lifecycle.Validators {
-			if identity.InactiveHeight != 0 &&
-				(identity.InactiveHeight < 3 || (identity.InactiveHeight-1)%genesis.ValidatorPolicy.EpochLength != 0) {
-				return errors.New("protocol version 2 validator removal is not on an epoch boundary")
-			}
+		if err := validateValidatorEpochSchedule(
+			lifecycle, value.committed.store.Validators(), genesis.ValidatorPolicy.EpochLength,
+		); err != nil {
+			return fmt.Errorf("protocol version 2 validator schedule: %w", err)
 		}
 		identitiesByAccount := make(map[string]state.ValidatorIdentity, len(lifecycle.Validators))
 		for _, identity := range lifecycle.Validators {

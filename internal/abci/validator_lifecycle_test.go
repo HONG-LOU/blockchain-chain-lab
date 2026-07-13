@@ -370,7 +370,7 @@ func TestLifecycleValidatorIdentityAuthorizesOnlyItsActiveInterval(t *testing.T)
 	lifecycle.Validators[bytesToHex(candidateAddress)] = state.ValidatorIdentity{
 		Account:          chaincrypto.AddressFromPrivateKey(candidateKey),
 		ConsensusAddress: bytesToHex(candidateAddress), PublicKey: bytesToHex(candidatePublicKey),
-		Power: 2, ActiveHeight: 3, InactiveHeight: 5,
+		Power: 2, ActiveHeight: 5, InactiveHeight: 9,
 	}
 	if err := fixture.app.committed.store.SetValidatorLifecycle(lifecycle); err != nil {
 		t.Fatal(err)
@@ -380,10 +380,10 @@ func TestLifecycleValidatorIdentityAuthorizesOnlyItsActiveInterval(t *testing.T)
 		height int64
 		valid  bool
 	}{
-		{height: 2, valid: false},
-		{height: 3, valid: true},
-		{height: 4, valid: true},
-		{height: 5, valid: false},
+		{height: 4, valid: false},
+		{height: 5, valid: true},
+		{height: 8, valid: true},
+		{height: 9, valid: false},
 	} {
 		account, err := fixture.app.validatorAccountLocked(candidateAddress, test.height)
 		if test.valid && (err != nil || account != chaincrypto.AddressFromPrivateKey(candidateKey)) {
@@ -395,9 +395,56 @@ func TestLifecycleValidatorIdentityAuthorizesOnlyItsActiveInterval(t *testing.T)
 	}
 	unknown := make([]byte, 20)
 	unknown[0] = 1
-	if _, err := fixture.app.validatorAccountLocked(unknown, 3); err == nil {
+	if _, err := fixture.app.validatorAccountLocked(unknown, 5); err == nil {
 		t.Fatal("unknown validator identity was authorized")
 	}
+}
+
+func TestValidatorEpochScheduleRejectsMisalignedLifecycle(t *testing.T) {
+	fixture := newValidatorV2Fixture(t, "")
+	fixture.initialize(t)
+	valid, _ := fixture.app.committed.store.ValidatorLifecycle()
+	if err := validateValidatorEpochSchedule(valid, fixture.accounts, 0); err == nil {
+		t.Fatal("invalid epoch length was accepted")
+	}
+	t.Run("genesis activation", func(t *testing.T) {
+		invalid, _ := fixture.app.committed.store.ValidatorLifecycle()
+		key := bytesToHex(fixture.proposerAddresses[0])
+		identity := invalid.Validators[key]
+		identity.ActiveHeight = 5
+		invalid.Validators[key] = identity
+		if err := validateValidatorEpochSchedule(invalid, fixture.accounts, 4); err == nil {
+			t.Fatal("misaligned genesis activation was accepted")
+		}
+	})
+
+	t.Run("candidate activation", func(t *testing.T) {
+		invalid, _ := fixture.app.committed.store.ValidatorLifecycle()
+		candidateKey, err := chaincrypto.GenerateKey()
+		if err != nil {
+			t.Fatal(err)
+		}
+		publicKey := candidateKey.PubKey().SerializeCompressed()
+		address := bytesToHex(cmtsecp256k1.PubKey(publicKey).Address())
+		invalid.Validators[address] = state.ValidatorIdentity{
+			Account: chaincrypto.AddressFromPrivateKey(candidateKey), ConsensusAddress: address,
+			PublicKey: bytesToHex(publicKey), Power: 1, ActiveHeight: 4,
+		}
+		if err := validateValidatorEpochSchedule(invalid, fixture.accounts, 4); err == nil {
+			t.Fatal("non-epoch candidate activation was accepted")
+		}
+	})
+
+	t.Run("removal", func(t *testing.T) {
+		invalid, _ := fixture.app.committed.store.ValidatorLifecycle()
+		key := bytesToHex(fixture.proposerAddresses[1])
+		identity := invalid.Validators[key]
+		identity.InactiveHeight = 6
+		invalid.Validators[key] = identity
+		if err := validateValidatorEpochSchedule(invalid, fixture.accounts, 4); err == nil {
+			t.Fatal("non-epoch removal was accepted")
+		}
+	})
 }
 
 func hasABCIAttribute(events []abcitypes.Event, eventType string, key string, value string) bool {

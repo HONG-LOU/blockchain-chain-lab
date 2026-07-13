@@ -382,6 +382,34 @@ func validateNonEmptyScheduledValidatorSets(lifecycle state.ValidatorLifecycle) 
 	return nil
 }
 
+func validateValidatorEpochSchedule(
+	lifecycle state.ValidatorLifecycle,
+	genesisValidators []string,
+	epochLength int64,
+) error {
+	if epochLength < 2 {
+		return errors.New("validator epoch length must be at least 2")
+	}
+	genesis := make(map[string]struct{}, len(genesisValidators))
+	for _, account := range genesisValidators {
+		genesis[account] = struct{}{}
+	}
+	for _, identity := range lifecycle.Validators {
+		_, isGenesis := genesis[identity.Account]
+		switch {
+		case isGenesis && identity.ActiveHeight != 1:
+			return fmt.Errorf("genesis validator %q must activate at height 1", identity.Account)
+		case !isGenesis && (identity.ActiveHeight < 3 || (identity.ActiveHeight-1)%epochLength != 0):
+			return fmt.Errorf("validator %q admission is not on an epoch boundary", identity.Account)
+		}
+		if identity.InactiveHeight != 0 &&
+			(identity.InactiveHeight < 3 || (identity.InactiveHeight-1)%epochLength != 0) {
+			return fmt.Errorf("validator %q removal is not on an epoch boundary", identity.Account)
+		}
+	}
+	return nil
+}
+
 func validatorUpdatesAtHeight(lifecycle state.ValidatorLifecycle, height int64) ([]abcitypes.ValidatorUpdate, error) {
 	identities := make([]state.ValidatorIdentity, 0)
 	for _, identity := range lifecycle.Validators {
