@@ -10,6 +10,10 @@ param(
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 $executablePath = (Resolve-Path -LiteralPath $Executable).Path
+$executableVersion = & $executablePath version | ConvertFrom-Json
+$executableSHA256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $executablePath).Hash.ToLowerInvariant()
+$harnessPath = (Resolve-Path -LiteralPath $PSCommandPath).Path
+$harnessSHA256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $harnessPath).Hash.ToLowerInvariant()
 $runId = '{0}-{1}-{2}' -f (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ'), $Mode, [guid]::NewGuid().ToString('N').Substring(0, 8)
 $artifactDir = Join-Path $OutputRoot $runId
 $ownedDataRoot = Join-Path $env:TEMP "chainlab-measure-$runId"
@@ -98,6 +102,9 @@ try {
         }
     }
 
+    $desktopConfig = Get-Content -Raw -LiteralPath (Join-Path $dataDirs[0] 'desktop.json') | ConvertFrom-Json
+    $blockIntervalSeconds = [uint64]$desktopConfig.contract.block_interval_seconds
+    if ($blockIntervalSeconds -eq 0) { throw 'Desktop block interval must be positive' }
     $diskStart = Get-DirectoryBytes $ownedDataRoot
     $networkStart = Get-AdapterTotals
     for ($index = 0; $index -lt $dataDirs.Count; $index++) {
@@ -112,7 +119,7 @@ try {
         $current = Get-Process -Id $process.Id
         $cpuStart[$process.Id] = $current.TotalProcessorTime.TotalSeconds
     }
-    $samples = @()
+    $samples = [Collections.Generic.List[object]]::new()
     $sampleDeadline = (Get-Date).AddSeconds($DurationSeconds)
     do {
         foreach ($process in $processes) {
@@ -120,7 +127,7 @@ try {
             $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($process.Id)" -ErrorAction SilentlyContinue)
             $managedChildCount = @($children | Where-Object Name -ne 'conhost.exe').Count
             $consoleHostCount = @($children | Where-Object Name -eq 'conhost.exe').Count
-            $samples += [pscustomobject]@{
+            [void]$samples.Add([pscustomobject]@{
                 Timestamp = (Get-Date).ToUniversalTime().ToString('o')
                 PID = $process.Id
                 WorkingSetBytes = [int64]$current.WorkingSet64
@@ -128,7 +135,7 @@ try {
                 CPUSeconds = $current.TotalProcessorTime.TotalSeconds
                 ManagedChildProcesses = $managedChildCount
                 ConsoleHostProcesses = $consoleHostCount
-            }
+            })
         }
         Start-Sleep -Seconds 1
     } while ((Get-Date) -lt $sampleDeadline)
@@ -161,14 +168,26 @@ try {
         OS = Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version, OSArchitecture, @{N='TotalVisibleMemoryBytes';E={[int64]$_.TotalVisibleMemorySize * 1KB}}
         CPU = Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed
         Volume = Get-Volume -DriveLetter ([IO.Path]::GetPathRoot($ownedDataRoot).Substring(0,1)) | Select-Object DriveLetter, FileSystem, Size, SizeRemaining
-        GoVersion = (go version)
+        GoVersion = $executableVersion.go_version
     }
     $result = [pscustomobject]@{
         Protocol = 'chainlab-desktop-measurement-v1'
         RunID = $runId
         Mode = $Mode
         StartedAt = $startupStarted.ToUniversalTime().ToString('o')
+        CompletedAt = (Get-Date).ToUniversalTime().ToString('o')
         DurationSeconds = $DurationSeconds
+        SampleDelaySeconds = 1
+        BlockIntervalSeconds = $blockIntervalSeconds
+        Executable = [pscustomobject]@{
+            Path = $executablePath
+            SHA256 = $executableSHA256
+            Version = $executableVersion
+        }
+        Harness = [pscustomobject]@{
+            Path = $harnessPath
+            SHA256 = $harnessSHA256
+        }
         Machine = $machine
         DataRoot = $ownedDataRoot
         ArtifactDirectory = (Resolve-Path $artifactDir).Path
