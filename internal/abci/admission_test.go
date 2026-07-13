@@ -9,6 +9,7 @@ import (
 
 	chaincrypto "chainlab/internal/crypto"
 	"chainlab/internal/state"
+	"chainlab/internal/types"
 
 	abcitypes "github.com/cometbft/cometbft/abci/types"
 	cmtsecp256k1 "github.com/cometbft/cometbft/crypto/secp256k1"
@@ -20,6 +21,15 @@ func TestGenesisCertifiedValidatorAdmissionActivatesCandidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	genesisStore, err := state.NewStoreFromSnapshot(fixture.genesis.State)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := genesisStore.AddStake(chaincrypto.AddressFromPrivateKey(candidateKey), validatorAdmissionStakePerPower); err != nil {
+		t.Fatal(err)
+	}
+	genesisStore.SetBalance(chaincrypto.AddressFromPrivateKey(candidateKey), 1_000_000)
+	fixture.genesis.State = genesisStore.Snapshot()
 	certificate := signedValidatorAdmission(t, fixture.genesis.ChainID, candidateKey, 5, fixture.keys)
 	fixture.genesis.Admissions = []ValidatorAdmissionCertificate{certificate}
 	fixture.genesisBytes, err = fixture.genesis.CanonicalBytes()
@@ -32,13 +42,38 @@ func TestGenesisCertifiedValidatorAdmissionActivatesCandidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = fixture.app.Close() })
 	fixture.initialize(t)
+	unstake := signFixtureTransaction(t, candidateKey, types.Transaction{
+		ChainID: fixture.genesis.ChainID, Type: types.TxUnstake,
+		From: certificate.Identity.Account, Nonce: 0, Value: 1, GasLimit: 100_000, GasPrice: 1,
+	})
+	unstakeRaw := rawFixtureTransaction(t, unstake)
+	checked, err := fixture.app.CheckTx(context.Background(), &abcitypes.RequestCheckTx{
+		Tx: unstakeRaw,
+	})
+	if err != nil || checked.Code != CodeOK || !strings.Contains(string(checked.Data), `"failure_code":"execution_reverted"`) ||
+		fixture.app.committed.store.StakeOf(certificate.Identity.Account) != validatorAdmissionStakePerPower {
+		t.Fatalf("validator unstake response=%+v err=%v", checked, err)
+	}
 
 	identity, exists := fixture.app.committed.store.ValidatorIdentityByAccount(certificate.Identity.Account)
 	if !exists || identity != certificate.Identity {
 		t.Fatalf("certified identity=%+v exists=%t", identity, exists)
 	}
-	fixture.finalizeAndCommit(t, 1, 0, nil)
+	heightOne, err := fixture.app.FinalizeBlock(context.Background(), &abcitypes.RequestFinalizeBlock{
+		Hash: blockHash(1), Height: 1, Time: validatorV2BlockTime(1),
+		ProposerAddress: fixture.proposerAddresses[0], Txs: [][]byte{unstakeRaw},
+	})
+	if err != nil || len(heightOne.TxResults) != 1 || heightOne.TxResults[0].Code != CodeExecutionFailed {
+		t.Fatalf("validator unstake block response=%+v err=%v", heightOne, err)
+	}
+	if _, err := fixture.app.Commit(context.Background(), &abcitypes.RequestCommit{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := fixture.app.committed.store.StakeOf(certificate.Identity.Account); got != validatorAdmissionStakePerPower {
+		t.Fatalf("validator stake after rejected unstake = %d", got)
+	}
 	fixture.finalizeAndCommit(t, 2, 0, nil)
 	heightThree := fixture.finalizeAndCommit(t, 3, 0, nil)
 	if len(heightThree.ValidatorUpdates) != 1 || heightThree.ValidatorUpdates[0].Power != certificate.Identity.Power ||
@@ -52,7 +87,6 @@ func TestGenesisCertifiedValidatorAdmissionActivatesCandidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = fixture.app.Close() })
 	restored, exists := fixture.app.committed.store.ValidatorIdentityByAccount(certificate.Identity.Account)
 	if !exists || restored != certificate.Identity {
 		t.Fatalf("restored certified identity=%+v exists=%t", restored, exists)
@@ -76,6 +110,14 @@ func TestGenesisCertifiedValidatorAdmissionRejectsInvalidCertificates(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	genesisStore, err := state.NewStoreFromSnapshot(fixture.genesis.State)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := genesisStore.AddStake(chaincrypto.AddressFromPrivateKey(candidateKey), validatorAdmissionStakePerPower); err != nil {
+		t.Fatal(err)
+	}
+	fixture.genesis.State = genesisStore.Snapshot()
 	valid := signedValidatorAdmission(t, fixture.genesis.ChainID, candidateKey, 5, fixture.keys)
 
 	for _, test := range []struct {
@@ -113,9 +155,30 @@ func TestGenesisCertifiedValidatorAdmissionRejectsInvalidCertificates(t *testing
 			want: "duplicates an account",
 		},
 		{
+			name: "insufficient stake",
+			mutate: func(genesis *GenesisDocument) {
+				store, err := state.NewStoreFromSnapshot(genesis.State)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := store.SubStake(valid.Identity.Account, validatorAdmissionStakePerPower); err != nil {
+					t.Fatal(err)
+				}
+				genesis.State = store.Snapshot()
+			},
+			want: "requires at least 1000 stake",
+		},
+		{
 			name: "tampered power",
 			mutate: func(genesis *GenesisDocument) {
 				genesis.Admissions[0].Identity.Power++
+			},
+			want: "does not match stake-derived power",
+		},
+		{
+			name: "tampered activation",
+			mutate: func(genesis *GenesisDocument) {
+				genesis.Admissions[0].Identity.ActiveHeight = 9
 			},
 			want: "does not authorize",
 		},

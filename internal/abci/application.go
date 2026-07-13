@@ -299,7 +299,7 @@ func validateGenesisDocument(document GenesisDocument) (*state.Store, error) {
 	if _, exists := store.ValidatorLifecycle(); exists {
 		return nil, errors.New("genesis state must not contain an initialized validator lifecycle")
 	}
-	if err := validateGenesisAdmissions(document, store.Validators()); err != nil {
+	if err := validateGenesisAdmissions(document, store); err != nil {
 		return nil, err
 	}
 	return store, nil
