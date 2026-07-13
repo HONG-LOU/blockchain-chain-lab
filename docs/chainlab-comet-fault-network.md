@@ -13,7 +13,7 @@ ChainLab's production path uses CometBFT v0.39.3 rather than the local PoA harne
 - two validators unavailable: 2-of-4 cannot advance consensus or committed application state;
 - a symmetric 2+2 P2P topology partition: neither side commits, transaction gossip stays on its originating side, and healing converges without divergent application state.
 
-These are Windows/amd64 development-network results, not public-network or hostile-infrastructure claims.
+Separate evidence networks also exercise same-height light-client equivocation and cross-height forward-lunatic proofs through Comet RPC and its evidence pool. These are Windows/amd64 development-network results, not public-network or hostile-infrastructure claims.
 
 ## Quorum-Loss Test
 
@@ -57,4 +57,6 @@ Height `H+1` must still use its predicted proposer. The targeted proposer must n
 
 ## Evidence Boundary
 
-The tests cover process outage, a targeted missing round-0 proposer, validator-local delayed proposal construction while connected, application rejection of a malformed proposal, and a symmetric disjoint P2P topology. Separate V2 lifecycle networks cover simultaneous evidence-driven power-zero removals and a Comet-verified same-height light-client equivocation proof. They do not emulate dynamic packet delay, drop, duplication, corruption, or reordering; bandwidth exhaustion; asymmetric one-way reachability; forward/lunatic or amnesia light-client cases; simultaneous admission or non-removal power changes; sentry topology; or sustained load. Those remain production gates and require a controllable network-fault environment rather than relabeling application delay, proposal-content injection, or process shutdown as a packet-level fault.
+The tests cover process outage, a targeted missing round-0 proposer, validator-local delayed proposal construction while connected, application rejection of a malformed proposal, and a symmetric disjoint P2P topology. Separate V2 lifecycle networks cover simultaneous evidence-driven power-zero removals, a Comet-verified same-height light-client equivocation proof, and a cross-height forward-lunatic proof. The forward-lunatic test uses common height `H`, an invalid conflicting application hash at `H+1`, and waits until the full nodes have committed `H+2`; three historical validators sign the conflicting header, Comet derives those signers as Byzantine, and the application removes them before proving post-transition liveness and convergence. It does not provide an externally operated light-client detector or test a conflicting height ahead of the full node's local block store.
+
+The suite does not emulate dynamic packet delay, drop, duplication, corruption, or reordering; bandwidth exhaustion; asymmetric one-way reachability; amnesia light-client evidence; simultaneous admission or non-removal power changes; sentry topology; or sustained load. Those remain production gates and require a controllable network-fault environment rather than relabeling application delay, proposal-content injection, or process shutdown as a packet-level fault.
