@@ -105,6 +105,27 @@ func TestValidatorLifecycleRejectsInvalidFutureIdentity(t *testing.T) {
 			t.Fatalf("duplicate account error = %v", err)
 		}
 	})
+
+	t.Run("unbonding without removal", func(t *testing.T) {
+		lifecycle, _ := store.ValidatorLifecycle()
+		candidate := validatorIdentity(candidateKey, 11)
+		candidate.UnbondingHeight = 20
+		lifecycle.Validators[candidate.ConsensusAddress] = candidate
+		if err := store.SetValidatorLifecycle(lifecycle); err == nil || !strings.Contains(err.Error(), "unbonding height") {
+			t.Fatalf("unbonding without removal error = %v", err)
+		}
+	})
+
+	t.Run("unbonding before removal", func(t *testing.T) {
+		lifecycle, _ := store.ValidatorLifecycle()
+		candidate := validatorIdentity(candidateKey, 11)
+		candidate.InactiveHeight = 20
+		candidate.UnbondingHeight = 20
+		lifecycle.Validators[candidate.ConsensusAddress] = candidate
+		if err := store.SetValidatorLifecycle(lifecycle); err == nil || !strings.Contains(err.Error(), "unbonding height") {
+			t.Fatalf("unbonding before removal error = %v", err)
+		}
+	})
 }
 
 func validatorIdentity(key chaincrypto.PrivateKey, activeHeight int64) state.ValidatorIdentity {

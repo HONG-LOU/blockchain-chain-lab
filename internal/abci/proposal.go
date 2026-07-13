@@ -276,6 +276,7 @@ func (a *Application) proposalEvidenceStateLocked(
 	}
 	if err := validateValidatorEpochSchedule(
 		lifecycle, working.Validators(), a.genesis.ValidatorPolicy.EpochLength,
+		a.genesis.ValidatorPolicy.UnbondingEpochs,
 	); err != nil {
 		return proposalEvidenceState{}, err
 	}

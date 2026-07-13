@@ -19,6 +19,7 @@ const MaxValidatorOffences = 1_000_000
 // ValidatorIdentity permanently binds the application account to the CometBFT
 // consensus identity. InactiveHeight is exclusive: the validator is active at
 // h when ActiveHeight <= h < InactiveHeight, or when InactiveHeight is zero.
+// UnbondingHeight is inclusive and zero means stake remains locked indefinitely.
 type ValidatorIdentity struct {
 	Account          string `json:"account"`
 	ConsensusAddress string `json:"consensus_address"`
@@ -26,6 +27,7 @@ type ValidatorIdentity struct {
 	Power            int64  `json:"power"`
 	ActiveHeight     int64  `json:"active_height"`
 	InactiveHeight   int64  `json:"inactive_height,omitempty"`
+	UnbondingHeight  int64  `json:"unbonding_height,omitempty"`
 }
 
 type ValidatorOffence struct {
@@ -229,6 +231,10 @@ func validateValidatorIdentity(identity ValidatorIdentity) error {
 	}
 	if identity.InactiveHeight != 0 && identity.InactiveHeight <= identity.ActiveHeight {
 		return errors.New("validator lifecycle inactive height must exceed active height")
+	}
+	if identity.UnbondingHeight != 0 &&
+		(identity.InactiveHeight == 0 || identity.UnbondingHeight <= identity.InactiveHeight) {
+		return errors.New("validator lifecycle unbonding height must exceed inactive height")
 	}
 	return nil
 }

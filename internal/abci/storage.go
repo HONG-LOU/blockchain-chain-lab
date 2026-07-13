@@ -393,6 +393,7 @@ func validatePersistedApplicationState(
 		}
 		if err := validateValidatorEpochSchedule(
 			lifecycle, value.committed.store.Validators(), genesis.ValidatorPolicy.EpochLength,
+			genesis.ValidatorPolicy.UnbondingEpochs,
 		); err != nil {
 			return fmt.Errorf("protocol version 2 validator schedule: %w", err)
 		}

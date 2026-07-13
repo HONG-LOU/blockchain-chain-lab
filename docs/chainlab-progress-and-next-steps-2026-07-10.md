@@ -89,10 +89,10 @@ Verification coverage includes smart-account and delegated-EOA end-to-end rotati
 ### Validator Safety Boundary
 
 - The local harness and protocol V1 consensus validator sets remain fixed by genesis.
-- Protocol V2 genesis can pre-authorize up to 64 future validators through ordered, chain-bound certificates carrying `2/3+1` canonical genesis-validator signatures. Their power is derived as `floor(genesis_stake/1000)`, lifecycle validator stake is locked before an explicit unbonding protocol, and certified identities persist across restart, emit the Comet `H+2` positive-power update, and can propose only during their epoch-aligned active interval.
+- Protocol V2 genesis can pre-authorize up to 64 future validators through ordered, chain-bound certificates carrying `2/3+1` canonical genesis-validator signatures. Their power is derived as `floor(genesis_stake/1000)`, and certified identities persist across restart, emit the Comet `H+2` positive-power update, and can propose only during their epoch-aligned active interval. Optional `unbonding_epochs>=2` keeps their stake locked until that many complete epochs after evidence removal; zero preserves the legacy permanent lock and roots.
 - `validator.join` and `validator.leave` are disabled at schema and admission layers until a finalized CometBFT epoch-transition protocol exists.
 - `validator.slash` requires two canonical low-s signatures from the target validator for different block hashes at the same chain and height. Each validator-height offence is single-use regardless of the proving pair and clears all current stake, but does not mutate the fixed consensus validator set immediately.
-- Runtime admission/re-entry and power changes, unbonding/rewards, and key operations remain disabled; the offline genesis certificate path is not a completed dynamic staking lifecycle.
+- Runtime admission/re-entry and power changes, voluntary-leave unbonding/rewards, and key operations remain disabled; evidence-removal unbonding plus the offline genesis certificate path are not a completed dynamic staking lifecycle.
 
 ### Governance Safety Boundary
 

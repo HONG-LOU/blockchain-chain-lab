@@ -56,7 +56,7 @@ func newValidatorV2Fixture(t *testing.T, dataDir string) validatorV2Fixture {
 		t.Fatal(err)
 	}
 	policy := ValidatorPolicy{
-		EpochLength: 4, DuplicateVoteSlashBasisPoints: 500,
+		EpochLength: 4, UnbondingEpochs: 2, DuplicateVoteSlashBasisPoints: 500,
 		LightClientAttackSlashBasisPoints: 10_000,
 		EvidenceMaxAgeNumBlocks:           10, EvidenceMaxAgeDurationNanos: int64(time.Hour),
 	}
@@ -147,8 +147,8 @@ func TestValidatorV2EvidenceSlashingAndEpochUpdateTiming(t *testing.T) {
 		t.Fatalf("lifecycle after offence = %+v exists=%t", lifecycle, exists)
 	}
 	identity := lifecycle.Validators[bytesToHex(fixture.proposerAddresses[1])]
-	if identity.InactiveHeight != 5 {
-		t.Fatalf("inactive height = %d, want 5", identity.InactiveHeight)
+	if identity.InactiveHeight != 5 || identity.UnbondingHeight != 13 {
+		t.Fatalf("validator removal schedule = %+v", identity)
 	}
 
 	heightThree := fixture.finalizeAndCommit(t, 3, 0, nil)
@@ -174,6 +174,32 @@ func TestValidatorV2EvidenceSlashingAndEpochUpdateTiming(t *testing.T) {
 	heightFive := fixture.finalizeAndCommit(t, 5, 0, nil)
 	if len(heightFive.ValidatorUpdates) != 0 || fixture.app.committed.commitment.Epoch != 1 {
 		t.Fatalf("height 5 response=%+v commitment=%+v", heightFive, fixture.app.committed.commitment)
+	}
+	for height := int64(6); height <= 11; height++ {
+		fixture.finalizeAndCommit(t, height, 0, nil)
+	}
+	unstake := signFixtureTransaction(t, fixture.keys[1], types.Transaction{
+		ChainID: fixture.genesis.ChainID, Type: types.TxUnstake, From: fixture.accounts[1],
+		Nonce: 0, Value: 50, GasLimit: 100_000, GasPrice: 1,
+	})
+	unstakeRaw := rawFixtureTransaction(t, unstake)
+	locked, err := fixture.app.CheckTx(context.Background(), &abcitypes.RequestCheckTx{Tx: unstakeRaw})
+	if err != nil || locked.Code != CodeOK || !bytes.Contains(locked.Data, []byte(`"failure_code":"execution_reverted"`)) {
+		t.Fatalf("pre-unbonding unstake response=%+v err=%v", locked, err)
+	}
+	fixture.finalizeAndCommit(t, 12, 0, nil)
+	heightThirteen, err := fixture.app.FinalizeBlock(context.Background(), &abcitypes.RequestFinalizeBlock{
+		Hash: blockHash(13), Height: 13, Time: validatorV2BlockTime(13),
+		ProposerAddress: fixture.proposerAddresses[0], Txs: [][]byte{unstakeRaw},
+	})
+	if err != nil || len(heightThirteen.TxResults) != 1 || heightThirteen.TxResults[0].Code != CodeOK {
+		t.Fatalf("unbonding-height unstake response=%+v err=%v", heightThirteen, err)
+	}
+	if _, err := fixture.app.Commit(context.Background(), &abcitypes.RequestCommit{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := fixture.app.committed.store.StakeOf(fixture.accounts[1]); got != 900 {
+		t.Fatalf("stake after unbonding withdrawal = %d, want 900", got)
 	}
 }
 
@@ -240,7 +266,9 @@ func TestValidatorV2LifecycleSurvivesRestartAndSnapshot(t *testing.T) {
 		t.Fatal("validator lifecycle did not survive state sync snapshot")
 	}
 	targetLifecycle, exists := target.app.committed.store.ValidatorLifecycle()
-	if !exists || len(targetLifecycle.Offences) != 1 || targetLifecycle.Validators[bytesToHex(fixture.proposerAddresses[1])].InactiveHeight != 5 {
+	if !exists || len(targetLifecycle.Offences) != 1 ||
+		targetLifecycle.Validators[bytesToHex(fixture.proposerAddresses[1])].InactiveHeight != 5 ||
+		targetLifecycle.Validators[bytesToHex(fixture.proposerAddresses[1])].UnbondingHeight != 13 {
 		t.Fatalf("restored snapshot lifecycle = %+v exists=%t", targetLifecycle, exists)
 	}
 }
@@ -404,7 +432,7 @@ func TestValidatorEpochScheduleRejectsMisalignedLifecycle(t *testing.T) {
 	fixture := newValidatorV2Fixture(t, "")
 	fixture.initialize(t)
 	valid, _ := fixture.app.committed.store.ValidatorLifecycle()
-	if err := validateValidatorEpochSchedule(valid, fixture.accounts, 0); err == nil {
+	if err := validateValidatorEpochSchedule(valid, fixture.accounts, 0, 0); err == nil {
 		t.Fatal("invalid epoch length was accepted")
 	}
 	t.Run("genesis activation", func(t *testing.T) {
@@ -413,7 +441,7 @@ func TestValidatorEpochScheduleRejectsMisalignedLifecycle(t *testing.T) {
 		identity := invalid.Validators[key]
 		identity.ActiveHeight = 5
 		invalid.Validators[key] = identity
-		if err := validateValidatorEpochSchedule(invalid, fixture.accounts, 4); err == nil {
+		if err := validateValidatorEpochSchedule(invalid, fixture.accounts, 4, 2); err == nil {
 			t.Fatal("misaligned genesis activation was accepted")
 		}
 	})
@@ -430,7 +458,7 @@ func TestValidatorEpochScheduleRejectsMisalignedLifecycle(t *testing.T) {
 			Account: chaincrypto.AddressFromPrivateKey(candidateKey), ConsensusAddress: address,
 			PublicKey: bytesToHex(publicKey), Power: 1, ActiveHeight: 4,
 		}
-		if err := validateValidatorEpochSchedule(invalid, fixture.accounts, 4); err == nil {
+		if err := validateValidatorEpochSchedule(invalid, fixture.accounts, 4, 2); err == nil {
 			t.Fatal("non-epoch candidate activation was accepted")
 		}
 	})
@@ -441,10 +469,26 @@ func TestValidatorEpochScheduleRejectsMisalignedLifecycle(t *testing.T) {
 		identity := invalid.Validators[key]
 		identity.InactiveHeight = 6
 		invalid.Validators[key] = identity
-		if err := validateValidatorEpochSchedule(invalid, fixture.accounts, 4); err == nil {
+		if err := validateValidatorEpochSchedule(invalid, fixture.accounts, 4, 2); err == nil {
 			t.Fatal("non-epoch removal was accepted")
 		}
 	})
+}
+
+func TestValidatorPolicyValidatesUnbondingEpochs(t *testing.T) {
+	policy := DefaultValidatorPolicy()
+	for _, value := range []int64{1, 1_001} {
+		policy.UnbondingEpochs = value
+		if err := validateValidatorPolicy(policy); err == nil {
+			t.Fatalf("unbonding epochs %d was accepted", value)
+		}
+	}
+	for _, value := range []int64{0, 2, 1_000} {
+		policy.UnbondingEpochs = value
+		if err := validateValidatorPolicy(policy); err != nil {
+			t.Fatalf("unbonding epochs %d: %v", value, err)
+		}
+	}
 }
 
 func hasABCIAttribute(events []abcitypes.Event, eventType string, key string, value string) bool {

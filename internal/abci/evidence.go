@@ -216,6 +216,15 @@ func applyEvidenceV2(
 		identity := lifecycle.Validators[record.ConsensusAddress]
 		if identity.InactiveHeight == 0 || removalHeight < identity.InactiveHeight {
 			identity.InactiveHeight = removalHeight
+			if policy.UnbondingEpochs > 0 {
+				unbondingHeight, err := validatorUnbondingHeight(
+					removalHeight, policy.EpochLength, policy.UnbondingEpochs,
+				)
+				if err != nil {
+					return nil, nil, err
+				}
+				identity.UnbondingHeight = unbondingHeight
+			}
 			lifecycle.Validators[record.ConsensusAddress] = identity
 		} else {
 			removalHeight = identity.InactiveHeight
@@ -367,6 +376,14 @@ func nextEpochRemovalHeight(observedHeight int64, epochLength int64) (int64, err
 	return epoch*epochLength + 1, nil
 }
 
+func validatorUnbondingHeight(removalHeight int64, epochLength int64, unbondingEpochs int64) (int64, error) {
+	if removalHeight <= 0 || epochLength < 2 || unbondingEpochs < 2 ||
+		epochLength > (math.MaxInt64-removalHeight)/unbondingEpochs {
+		return 0, errors.New("validator unbonding height overflows")
+	}
+	return removalHeight + unbondingEpochs*epochLength, nil
+}
+
 func validateNonEmptyScheduledValidatorSets(lifecycle state.ValidatorLifecycle) error {
 	heights := make(map[int64]struct{})
 	for _, identity := range lifecycle.Validators {
@@ -386,6 +403,7 @@ func validateValidatorEpochSchedule(
 	lifecycle state.ValidatorLifecycle,
 	genesisValidators []string,
 	epochLength int64,
+	unbondingEpochs int64,
 ) error {
 	if epochLength < 2 {
 		return errors.New("validator epoch length must be at least 2")
@@ -405,6 +423,15 @@ func validateValidatorEpochSchedule(
 		if identity.InactiveHeight != 0 &&
 			(identity.InactiveHeight < 3 || (identity.InactiveHeight-1)%epochLength != 0) {
 			return fmt.Errorf("validator %q removal is not on an epoch boundary", identity.Account)
+		}
+		if identity.UnbondingHeight != 0 {
+			if unbondingEpochs == 0 {
+				return fmt.Errorf("validator %q has unactivated unbonding state", identity.Account)
+			}
+			expected, err := validatorUnbondingHeight(identity.InactiveHeight, epochLength, unbondingEpochs)
+			if err != nil || identity.UnbondingHeight != expected {
+				return fmt.Errorf("validator %q unbonding height is invalid", identity.Account)
+			}
 		}
 	}
 	return nil

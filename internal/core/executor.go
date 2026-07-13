@@ -149,8 +149,9 @@ func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, 
 		if tx.Value == 0 {
 			return types.Receipt{}, errors.New("unstake value must be positive")
 		}
-		if _, validator := working.ValidatorIdentityByAccount(tx.From); validator {
-			return types.Receipt{}, errors.New("validator stake is locked until an unbonding protocol is activated")
+		if identity, validator := working.ValidatorIdentityByAccount(tx.From); validator &&
+			(identity.UnbondingHeight == 0 || context.BlockHeight < uint64(identity.UnbondingHeight)) {
+			return types.Receipt{}, errors.New("validator stake is locked until its unbonding height")
 		}
 		if err := working.SubStake(tx.From, tx.Value); err != nil {
 			return types.Receipt{}, err
