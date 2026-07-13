@@ -119,15 +119,27 @@ func TestMeasureRetentionBoundary(t *testing.T) {
 		t.Skip("set CHAINLAB_DESKTOP_RETENTION_MEASURE to an artifact path")
 	}
 	network := startEmptyBlockMeasurementNetwork(t, "chainlab-retention-measure-", "chainlab-desktop-retention", time.Millisecond)
-	defer os.RemoveAll(network.root)
+	defer func() {
+		network.cancelComet()
+		if err := <-network.cometResult; err != nil {
+			t.Errorf("stop CometBFT: %v", err)
+		}
+		network.cancelApplication()
+		if err := <-network.applicationResult; err != nil {
+			t.Errorf("stop application: %v", err)
+		}
+		if err := os.RemoveAll(network.root); err != nil {
+			t.Errorf("remove measurement root: %v", err)
+		}
+	}()
 	start := time.Now()
 	waitForMeasurementHeight(t, network.client, 1, 30*time.Second)
 	initial := retentionMeasurementCheckpoint(t, network.client, network.networkRoot)
 	firstTarget := int64(defaultRetainBlocks) + 1
-	waitForMeasurementHeight(t, network.client, firstTarget, 45*time.Minute)
+	waitForMeasurementHeight(t, network.client, firstTarget, 60*time.Minute)
 	first := waitForRetentionMinimum(t, network.client, network.networkRoot, 2, 2*time.Minute)
 	secondTarget := 2*int64(defaultRetainBlocks) + 1
-	waitForMeasurementHeight(t, network.client, secondTarget, 90*time.Minute)
+	waitForMeasurementHeight(t, network.client, secondTarget, 60*time.Minute)
 	secondMinimum := secondTarget - int64(defaultRetainBlocks) + 1
 	second := waitForRetentionMinimum(t, network.client, network.networkRoot, secondMinimum, 2*time.Minute)
 	heightOnePruned := waitForCometHeightPruned(t, network.client, 1, 2*time.Minute)
@@ -157,7 +169,6 @@ func TestMeasureRetentionBoundary(t *testing.T) {
 	if err := os.WriteFile(artifact, raw, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	network.stop(t)
 }
 
 func measurementSource() (string, bool) {
@@ -321,7 +332,7 @@ func waitForMeasurementHeight(t *testing.T, client *rpchttp.HTTP, height int64, 
 		if err == nil && status.SyncInfo.LatestBlockHeight >= height {
 			return
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatalf("network did not reach height %d within %s", height, timeout)
 }
