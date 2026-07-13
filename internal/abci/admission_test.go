@@ -216,7 +216,7 @@ func TestGenesisCertifiedValidatorAdmissionRejectsInvalidCertificates(t *testing
 	}
 }
 
-func TestRuntimeCertifiedValidatorAdmissionsShareCommittedRoot(t *testing.T) {
+func TestRuntimeCertifiedValidatorAdmissionsAllowDelayedInclusionAndShareAuthorizationRoot(t *testing.T) {
 	fixture := newValidatorV2Fixture(t, "")
 	candidateKeys := make([]chaincrypto.PrivateKey, 2)
 	for index := range candidateKeys {
@@ -239,6 +239,7 @@ func TestRuntimeCertifiedValidatorAdmissionsShareCommittedRoot(t *testing.T) {
 	}
 	fixture.genesis.State = store.Snapshot()
 	fixture.genesis.ValidatorPolicy.RuntimeAdmissions = true
+	fixture.genesis.ValidatorPolicy.RuntimeAdmissionWindow = fixture.genesis.ValidatorPolicy.EpochLength
 	fixture.genesisBytes, err = fixture.genesis.CanonicalBytes()
 	if err != nil {
 		t.Fatal(err)
@@ -269,14 +270,15 @@ func TestRuntimeCertifiedValidatorAdmissionsShareCommittedRoot(t *testing.T) {
 		certificates[index] = certificate
 		joinRaw[index] = rawFixtureTransaction(t, join)
 	}
-	heightOne, err := fixture.app.FinalizeBlock(context.Background(), &abcitypes.RequestFinalizeBlock{
-		Hash: blockHash(1), Height: 1, Time: validatorV2BlockTime(1),
+	fixture.finalizeAndCommit(t, 1, 0, nil)
+	heightTwo, err := fixture.app.FinalizeBlock(context.Background(), &abcitypes.RequestFinalizeBlock{
+		Hash: blockHash(2), Height: 2, Time: validatorV2BlockTime(2),
 		ProposerAddress: fixture.proposerAddresses[0], Txs: joinRaw,
 	})
-	if err != nil || len(heightOne.TxResults) != len(candidateKeys) {
-		t.Fatalf("runtime admission response=%+v err=%v", heightOne, err)
+	if err != nil || len(heightTwo.TxResults) != len(candidateKeys) {
+		t.Fatalf("runtime admission response=%+v err=%v", heightTwo, err)
 	}
-	for index, result := range heightOne.TxResults {
+	for index, result := range heightTwo.TxResults {
 		if result.Code != CodeOK {
 			t.Fatalf("runtime admission %d result=%+v", index, result)
 		}
@@ -290,7 +292,6 @@ func TestRuntimeCertifiedValidatorAdmissionsShareCommittedRoot(t *testing.T) {
 			t.Fatalf("runtime admitted identity=%+v exists=%t", identity, exists)
 		}
 	}
-	fixture.finalizeAndCommit(t, 2, 0, nil)
 	heightThree := fixture.finalizeAndCommit(t, 3, 0, nil)
 	if len(heightThree.ValidatorUpdates) != len(candidateKeys) {
 		t.Fatalf("runtime admission update=%+v", heightThree.ValidatorUpdates)

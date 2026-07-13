@@ -51,6 +51,7 @@ type Status struct {
 	ExplorerURL       string                `json:"explorer_url"`
 	RPCURL            string                `json:"rpc_url"`
 	Height            int64                 `json:"height"`
+	CatchingUp        bool                  `json:"catching_up"`
 	BlockHash         string                `json:"block_hash,omitempty"`
 	AppHash           string                `json:"app_hash,omitempty"`
 	StartedAt         string                `json:"started_at,omitempty"`
@@ -159,9 +160,15 @@ func Run(ctx context.Context, root string, out io.Writer) (returnErr error) {
 		return err
 	}
 	logger := cmtlog.NewFilter(cmtlog.NewTMLogger(cmtlog.NewSyncWriter(out)), cmtlog.AllowInfo())
-	errorsChannel := make(chan error, 2)
+	serviceContext := context.WithoutCancel(runCtx)
+	applicationContext, cancelApplication := context.WithCancel(serviceContext)
+	defer cancelApplication()
+	cometContext, cancelComet := context.WithCancel(serviceContext)
+	defer cancelComet()
+	applicationResult := make(chan error, 1)
+	cometResult := make(chan error, 1)
 	go func() {
-		errorsChannel <- chainabci.ServeWithConfig(runCtx, config.ABCIAddress, chainabci.Config{
+		applicationResult <- chainabci.ServeWithConfig(applicationContext, config.ABCIAddress, chainabci.Config{
 			Genesis:            genesis,
 			DataDir:            filepath.Join(absoluteRoot, filepath.FromSlash(config.ApplicationData)),
 			Storage:            config.Contract.ApplicationStorage,
@@ -169,12 +176,13 @@ func Run(ctx context.Context, root string, out io.Writer) (returnErr error) {
 		}, logger)
 	}()
 	if err := waitForTCP(runCtx, strings.TrimPrefix(config.ABCIAddress, "tcp://"), startTimeout); err != nil {
-		cancel()
+		cancelApplication()
+		_ = <-applicationResult
 		return fmt.Errorf("wait for desktop application: %w", err)
 	}
 	go func() {
-		errorsChannel <- cometnode.RunWithOptions(
-			runCtx,
+		cometResult <- cometnode.RunWithOptions(
+			cometContext,
 			filepath.Join(absoluteRoot, filepath.FromSlash(config.NodeHome)),
 			out,
 			cometnode.RunOptions{Consensus: &cometnode.ConsensusOptions{
@@ -184,8 +192,21 @@ func Run(ctx context.Context, root string, out io.Writer) (returnErr error) {
 			}},
 		)
 	}()
-	if err := waitForComet(runCtx, state, errorsChannel, startTimeout); err != nil {
-		cancel()
+	failedService, err := waitForComet(runCtx, state, applicationResult, cometResult, startTimeout)
+	if err != nil {
+		switch failedService {
+		case "application":
+			cancelComet()
+			_ = <-cometResult
+		case "comet":
+			cancelApplication()
+			_ = <-applicationResult
+		default:
+			cancelComet()
+			_ = <-cometResult
+			cancelApplication()
+			_ = <-applicationResult
+		}
 		return fmt.Errorf("wait for desktop consensus: %w", err)
 	}
 	state.phase("running")
@@ -193,21 +214,27 @@ func Run(ctx context.Context, root string, out io.Writer) (returnErr error) {
 
 	select {
 	case <-runCtx.Done():
-		cancel()
-	case err := <-errorsChannel:
-		cancel()
+		state.phase("stopping")
+		cancelComet()
+		returnErr = errors.Join(returnErr, <-cometResult)
+		cancelApplication()
+		returnErr = errors.Join(returnErr, <-applicationResult)
+		return returnErr
+	case err := <-applicationResult:
+		cancelComet()
+		returnErr = errors.Join(returnErr, <-cometResult)
 		if err != nil {
-			return err
+			return errors.Join(err, returnErr)
 		}
-		return errors.New("desktop managed service stopped unexpectedly")
-	}
-	state.phase("stopping")
-	for range 2 {
-		if err := <-errorsChannel; err != nil {
-			returnErr = errors.Join(returnErr, err)
+		return errors.Join(errors.New("desktop application stopped unexpectedly"), returnErr)
+	case err := <-cometResult:
+		cancelApplication()
+		returnErr = errors.Join(returnErr, <-applicationResult)
+		if err != nil {
+			return errors.Join(err, returnErr)
 		}
+		return errors.Join(errors.New("desktop consensus stopped unexpectedly"), returnErr)
 	}
-	return returnErr
 }
 
 func CurrentStatus(ctx context.Context, root string) (Status, error) {
@@ -358,6 +385,7 @@ func refreshCometStatus(ctx context.Context, status *Status) {
 				LatestBlockHash   string `json:"latest_block_hash"`
 				LatestAppHash     string `json:"latest_app_hash"`
 				LatestBlockHeight string `json:"latest_block_height"`
+				CatchingUp        bool   `json:"catching_up"`
 			} `json:"sync_info"`
 		} `json:"result"`
 	}
@@ -369,6 +397,7 @@ func refreshCometStatus(ctx context.Context, status *Status) {
 		return
 	}
 	status.Height = height
+	status.CatchingUp = envelope.Result.SyncInfo.CatchingUp
 	status.BlockHash = envelope.Result.SyncInfo.LatestBlockHash
 	status.AppHash = envelope.Result.SyncInfo.LatestAppHash
 	client, err := rpchttp.New(status.RPCURL, "/websocket")
@@ -432,28 +461,39 @@ func waitForTCP(ctx context.Context, address string, timeout time.Duration) erro
 	}
 }
 
-func waitForComet(ctx context.Context, state *supervisorState, serviceErrors <-chan error, timeout time.Duration) error {
+func waitForComet(
+	ctx context.Context,
+	state *supervisorState,
+	applicationResult <-chan error,
+	cometResult <-chan error,
+	timeout time.Duration,
+) (string, error) {
 	deadline := time.Now().Add(timeout)
 	for {
 		select {
-		case err := <-serviceErrors:
+		case err := <-applicationResult:
 			if err == nil {
-				return errors.New("desktop managed service stopped during startup")
+				err = errors.New("desktop application stopped during startup")
 			}
-			return err
+			return "application", err
+		case err := <-cometResult:
+			if err == nil {
+				err = errors.New("desktop consensus stopped during startup")
+			}
+			return "comet", err
 		default:
 		}
 		status := state.snapshot()
 		refreshCometStatus(ctx, &status)
 		if status.Height > 0 {
-			return nil
+			return "", nil
 		}
 		if time.Now().After(deadline) {
-			return errors.New("CometBFT RPC did not report a committed height")
+			return "", errors.New("CometBFT RPC did not report a committed height")
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return "", ctx.Err()
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
@@ -529,6 +569,7 @@ var desktopExplorerTemplate = template.Must(template.New("desktop-explorer").Fun
 <div class="field"><div class="label">Chain ID</div><div class="value">{{.ChainID}}</div></div>
 <div class="field"><div class="label">Profile</div><div class="value">{{.Profile}}</div></div>
 <div class="field"><div class="label">Height</div><div class="value primary">{{.Height}}</div></div>
+<div class="field"><div class="label">Sync state</div><div class="value">{{if .CatchingUp}}catching up{{else}}caught up{{end}}</div></div>
 <div class="field"><div class="label">Storage</div><div class="value">{{.Storage.Mode}}</div></div>
 <div class="field"><div class="label">Retained range</div><div class="value">{{.Storage.MinimumHeight}} - {{.Storage.CurrentHeight}}</div></div>
 <div class="field"><div class="label">Disk use</div><div class="value">{{bytes .DiskBytes}}</div></div>

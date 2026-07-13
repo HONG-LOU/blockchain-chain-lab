@@ -120,6 +120,13 @@ func SubmitRaw(ctx context.Context, root string, encoded string) (string, error)
 	if err != nil {
 		return "", fmt.Errorf("create desktop RPC client: %w", err)
 	}
+	status, err := client.Status(ctx)
+	if err != nil {
+		return "", fmt.Errorf("query desktop sync status: %w", err)
+	}
+	if status.SyncInfo.CatchingUp {
+		return "", errors.New("desktop node is still catching up; transaction broadcast is unavailable")
+	}
 	broadcast, err := client.BroadcastTxSync(ctx, cmttypes.Tx(raw))
 	if err != nil {
 		return "", fmt.Errorf("broadcast desktop transaction: %w", err)

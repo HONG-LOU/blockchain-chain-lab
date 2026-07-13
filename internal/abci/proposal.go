@@ -396,6 +396,7 @@ func (a *Application) executionContextLocked(height int64, baseFeePerGas uint64)
 	if a.genesis.Protocol == ProtocolVersionV2 {
 		context.ValidatorRuntimeAdmissions = a.genesis.ValidatorPolicy.RuntimeAdmissions
 		context.ValidatorEpochLength = a.genesis.ValidatorPolicy.EpochLength
+		context.ValidatorRuntimeAdmissionWindow = a.genesis.ValidatorPolicy.RuntimeAdmissionWindow
 		context.ValidatorAdmissionAuthorizationRoot = a.committed.store.ValidatorRoot()
 	}
 	return context

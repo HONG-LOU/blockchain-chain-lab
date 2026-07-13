@@ -114,6 +114,7 @@ func TestHomeValidatorQuorumRecoveryAndObserverBroadcast(t *testing.T) {
 		t.Fatalf("observer status = %+v", observerStatus)
 	}
 	waitForAccountBalance(t, []string{observerRoot}, recipient, 300, 30*time.Second)
+	waitForDesktopCaughtUp(t, observerRoot, 30*time.Second)
 	for _, path := range []string{
 		filepath.Join(observerRoot, identityHomePath, "config", "priv_validator_key.json"),
 		filepath.Join(observerRoot, identityHomePath, "data", "priv_validator_state.json"),
@@ -144,16 +145,7 @@ func processPorts(base int, index int) LocalPorts {
 
 func availablePortBlock(t *testing.T, count int) int {
 	t.Helper()
-	for attempts := 0; attempts < 100; attempts++ {
-		seed, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		base := seed.Addr().(*net.TCPAddr).Port
-		_ = seed.Close()
-		if base+count >= 65535 {
-			continue
-		}
+	for base := 30_000; base+count < 40_000; base += count {
 		listeners := make([]net.Listener, 0, count)
 		available := true
 		for offset := 0; offset < count; offset++ {
@@ -227,6 +219,21 @@ func waitForAccountBalance(t *testing.T, roots []string, address string, balance
 		time.Sleep(200 * time.Millisecond)
 	}
 	t.Fatalf("account %s did not converge to balance %d", address, balance)
+}
+
+func waitForDesktopCaughtUp(t *testing.T, root string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		status, err := CurrentStatus(ctx, root)
+		cancel()
+		if err == nil && status.Height > 0 && !status.CatchingUp {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("desktop node did not finish catching up")
 }
 
 func currentTestStatus(t *testing.T, root string) Status {

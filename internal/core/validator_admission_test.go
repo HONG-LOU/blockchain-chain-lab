@@ -50,3 +50,36 @@ func TestRuntimeValidatorAdmissionGasRejectsNonCanonicalCertificate(t *testing.T
 		t.Fatalf("non-canonical certificate error = %v", err)
 	}
 }
+
+func TestRuntimeValidatorAdmissionAuthorizationWindow(t *testing.T) {
+	for _, test := range []struct {
+		name                string
+		authorizationHeight int64
+		blockHeight         uint64
+		validatorRoot       string
+		window              int64
+		wantError           bool
+	}{
+		{name: "previous height", authorizationHeight: 9, blockHeight: 10, validatorRoot: "root"},
+		{name: "delayed within enabled window", authorizationHeight: 4, blockHeight: 10, validatorRoot: "root", window: 6},
+		{name: "genesis authorization", authorizationHeight: 0, blockHeight: 1, validatorRoot: "root"},
+		{name: "delayed with legacy window", authorizationHeight: 8, blockHeight: 10, validatorRoot: "root", wantError: true},
+		{name: "same height", authorizationHeight: 10, blockHeight: 10, validatorRoot: "root", wantError: true},
+		{name: "future height", authorizationHeight: 11, blockHeight: 10, validatorRoot: "root", wantError: true},
+		{name: "older than enabled window", authorizationHeight: 3, blockHeight: 10, validatorRoot: "root", window: 6, wantError: true},
+		{name: "changed root", authorizationHeight: 9, blockHeight: 10, validatorRoot: "other", wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateRuntimeAdmissionAuthorization(
+				RuntimeValidatorAdmissionCertificate{AuthorizationHeight: test.authorizationHeight, ValidatorRoot: test.validatorRoot},
+				ExecutionContext{
+					BlockHeight: test.blockHeight, ValidatorEpochLength: 6,
+					ValidatorRuntimeAdmissionWindow: test.window, ValidatorAdmissionAuthorizationRoot: "root",
+				},
+			)
+			if (err != nil) != test.wantError {
+				t.Fatalf("authorization error = %v, wantError=%t", err, test.wantError)
+			}
+		})
+	}
+}

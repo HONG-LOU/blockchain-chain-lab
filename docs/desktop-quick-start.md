@@ -24,6 +24,8 @@ From another PowerShell window:
 
 Normal stop releases every managed listener and data lock. Starting the same command again resumes the same chain. A second owner of the same data directory is rejected.
 
+Status reports `catching_up`. Query and Explorer access remain available during synchronization, but transaction broadcast is intentionally unavailable until `catching_up` becomes `false`.
+
 ## Backup And Restore
 
 Stop the node before backup:

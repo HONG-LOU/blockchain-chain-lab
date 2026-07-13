@@ -826,6 +826,7 @@ func TestFourValidatorV2RuntimeAdmission(t *testing.T) {
 	policy := chainabci.ValidatorPolicy{
 		EpochLength: epochLength, DuplicateVoteSlashBasisPoints: 5_000,
 		LightClientAttackSlashBasisPoints: 5_000, RuntimeAdmissions: true,
+		RuntimeAdmissionWindow:  epochLength,
 		EvidenceMaxAgeNumBlocks: 1_000, EvidenceMaxAgeDurationNanos: int64(24 * time.Hour),
 	}
 	started := startFourValidatorV2ProcessNetwork(t, "chainlab-v2-runtime-admission", policy)

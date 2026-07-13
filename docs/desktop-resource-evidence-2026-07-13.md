@@ -110,12 +110,46 @@ This accelerated run is evidence for empty-block storage growth only. It is not 
 
 These processes share one physical host and loopback network. They are equivalent isolated homes for filesystem/key/process ownership, but they are not four separately operated physical computers and do not close the real-home hardware/network gate.
 
+## Equivalent Isolated Container Hosts
+
+Repeatable command:
+
+```powershell
+.\scripts\measure-desktop-container-hosts.ps1 -DurationSeconds 30
+```
+
+Artifact: `output/desktop-measurements/20260713T070919Z-container-hosts-7fa25593/measurement.json`
+
+Artifact SHA-256: `003707352bbc49426a0e39774b097ddfd34ea5a2704a1119597b10a26d6a6c2a`
+
+The run used Docker Server 28.3.3 on Docker Desktop/WSL2 and immutable image `postgres@sha256:f992505e18f114c1e5102ac4dcf00f791b44462f6a423d899320f0bbf80e386f`. Each of four validators and one observer had a distinct container ID, IP address, network namespace, mount namespace, PID namespace, named data volume, read-only root filesystem, 256-process limit, four-CPU cgroup quota, and 8-GiB memory limit. All five shared one WSL2 kernel and one physical host.
+
+| Metric | Result |
+|---|---:|
+| Four validators through committed height | 17.767 s |
+| Initial validator peer counts | 3, 3, 3, 3 |
+| Idle measured duration | 30 s |
+| Height delta per validator | +7, +7, +7, +6 |
+| Maximum cgroup memory peak | 54,128,640 bytes |
+| Per-validator average cgroup memory | 35,718,656 to 44,266,496 bytes |
+| CPU per validator as percent of its four-CPU quota | 1.12% to 1.34% |
+| Per-validator `eth0` received bytes | 217,776 to 263,340 bytes |
+| Per-validator `eth0` sent bytes | 231,546 to 255,900 bytes |
+| Per-validator disk growth | 77,614 to 90,420 bytes |
+| Observer sync/query/Explorer | 4.570 s; balance 300; Explorer rendered |
+| Observer signing material | no validator key; no validator state; local signing rejected |
+| Clean stop and cleanup | 0 runtime files, containers, volumes, or networks remaining |
+
+The fault flow committed an initial transfer, advanced with 3-of-4, held both remaining validators at height 12 and an unchanged app hash for 12 seconds with 2-of-4, observed one transaction in the live mempool, committed it after restoring a third validator, restored the fourth validator, returned to peer counts 3/3/3/3, and directly observed a common height 13 block hash, app hash, and recipient balance 300. The public invitation passed a private-material field scan. The observer synced the final balance, served its loopback Explorer, and failed closed when asked to sign locally; external raw broadcast remains covered by `TestHomeValidatorQuorumRecoveryAndObserverBroadcast` on the same shipped tree.
+
+This closes the fixed-address equivalent-container-host, independent namespace/data ownership, cgroup-limit, quorum, process-isolated P2P-byte, and cleanup evidence slices. It does not prove four physical homes, independent kernels or power domains, Windows resource behavior, WAN/firewall/port-forwarding behavior, dynamic IP, sleep/resume, or interrupted host shutdown.
+
 ## Open Resource Gates
 
 - repeat solo measurements on the exact 4-core/8-GiB/100-GiB-free-SSD Windows reference machine;
-- process-isolated idle network bytes rather than system-wide adapter deltas;
 - a 24-hour release-cadence soak and a post-120,961-height pruning steady-state run;
-- separately operated physical-home or equivalent VM/container host evidence, including dynamic IP, firewall, sleep/resume, and interrupted shutdown;
+- separately operated physical-home evidence, including WAN reachability, dynamic IP, firewall/port forwarding, and independent power domains;
+- Windows sleep/resume and interrupted-host-shutdown recovery evidence;
 - sustained RSS, log rotation, and state-sync resource results over materially longer durations.
 
 Until these runs exist, no README or release note may claim the corresponding target or long-term behavior as proven.

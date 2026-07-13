@@ -57,6 +57,7 @@ type ValidatorPolicy struct {
 	EpochLength                       int64  `json:"epoch_length"`
 	UnbondingEpochs                   int64  `json:"unbonding_epochs,omitempty"`
 	RuntimeAdmissions                 bool   `json:"runtime_admissions,omitempty"`
+	RuntimeAdmissionWindow            int64  `json:"runtime_admission_window,omitempty"`
 	DuplicateVoteSlashBasisPoints     uint32 `json:"duplicate_vote_slash_basis_points"`
 	LightClientAttackSlashBasisPoints uint32 `json:"light_client_attack_slash_basis_points"`
 	EvidenceMaxAgeNumBlocks           int64  `json:"evidence_max_age_num_blocks"`
@@ -331,6 +332,10 @@ func validateValidatorPolicy(policy ValidatorPolicy) error {
 	}
 	if policy.UnbondingEpochs != 0 && (policy.UnbondingEpochs < 2 || policy.UnbondingEpochs > 1_000) {
 		return errors.New("unbonding epochs must be zero or between 2 and 1000")
+	}
+	if policy.RuntimeAdmissionWindow < 0 || policy.RuntimeAdmissionWindow > policy.EpochLength ||
+		(policy.RuntimeAdmissionWindow > 0 && !policy.RuntimeAdmissions) {
+		return errors.New("runtime admission window must be zero or at most one enabled admission epoch")
 	}
 	if policy.DuplicateVoteSlashBasisPoints == 0 || policy.DuplicateVoteSlashBasisPoints > 10_000 {
 		return errors.New("duplicate-vote slash ratio must be between 1 and 10000 basis points")

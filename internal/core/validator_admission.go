@@ -118,7 +118,8 @@ func executeRuntimeValidatorAdmission(
 	if !context.ValidatorRuntimeAdmissions {
 		return types.Event{}, errors.New("runtime validator admissions are disabled")
 	}
-	if context.BlockHeight == 0 || context.BlockHeight > math.MaxInt64 || context.ValidatorEpochLength < 2 {
+	if context.BlockHeight == 0 || context.BlockHeight > math.MaxInt64 || context.ValidatorEpochLength < 2 ||
+		context.ValidatorRuntimeAdmissionWindow < 0 || context.ValidatorRuntimeAdmissionWindow > context.ValidatorEpochLength {
 		return types.Event{}, errors.New("runtime validator admission context is invalid")
 	}
 	certificate, err := parseRuntimeValidatorAdmission(tx.Payload["certificate"])
@@ -129,9 +130,8 @@ func executeRuntimeValidatorAdmission(
 	if identity.Account != tx.From {
 		return types.Event{}, errors.New("validator join sender must equal the candidate account")
 	}
-	if certificate.AuthorizationHeight != int64(context.BlockHeight)-1 ||
-		certificate.ValidatorRoot != context.ValidatorAdmissionAuthorizationRoot {
-		return types.Event{}, errors.New("runtime validator admission does not authorize the current state")
+	if err := validateRuntimeAdmissionAuthorization(certificate, context); err != nil {
+		return types.Event{}, err
 	}
 	if _, exists := store.ValidatorIdentityByAccount(identity.Account); exists {
 		return types.Event{}, errors.New("runtime validator admission candidate already exists")
@@ -162,6 +162,21 @@ func executeRuntimeValidatorAdmission(
 		"power":         fmt.Sprintf("%d", identity.Power),
 		"active_height": fmt.Sprintf("%d", identity.ActiveHeight),
 	}}, nil
+}
+
+func validateRuntimeAdmissionAuthorization(certificate RuntimeValidatorAdmissionCertificate, context ExecutionContext) error {
+	blockHeight := int64(context.BlockHeight)
+	if certificate.ValidatorRoot != context.ValidatorAdmissionAuthorizationRoot {
+		return errors.New("runtime validator admission does not authorize the current state")
+	}
+	maximumAge := int64(1)
+	if context.ValidatorRuntimeAdmissionWindow > 0 {
+		maximumAge = context.ValidatorRuntimeAdmissionWindow
+	}
+	if certificate.AuthorizationHeight >= blockHeight || blockHeight-certificate.AuthorizationHeight > maximumAge {
+		return errors.New("runtime validator admission authorization height is outside the current epoch window")
+	}
+	return nil
 }
 
 func estimateRuntimeValidatorAdmissionGas(raw string) (uint64, error) {

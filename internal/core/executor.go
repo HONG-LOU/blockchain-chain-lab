@@ -25,6 +25,7 @@ type ExecutionContext struct {
 	BaseFeePerGas                       uint64
 	ValidatorRuntimeAdmissions          bool
 	ValidatorEpochLength                int64
+	ValidatorRuntimeAdmissionWindow     int64
 	ValidatorAdmissionAuthorizationRoot string
 }
 

@@ -497,6 +497,29 @@ func TestValidatorPolicyValidatesUnbondingEpochs(t *testing.T) {
 	}
 }
 
+func TestValidatorPolicyValidatesRuntimeAdmissionWindow(t *testing.T) {
+	policy := DefaultValidatorPolicy()
+	for _, value := range []int64{-1, policy.EpochLength + 1} {
+		policy.RuntimeAdmissions = true
+		policy.RuntimeAdmissionWindow = value
+		if err := validateValidatorPolicy(policy); err == nil {
+			t.Fatalf("runtime admission window %d was accepted", value)
+		}
+	}
+	policy.RuntimeAdmissions = false
+	policy.RuntimeAdmissionWindow = 1
+	if err := validateValidatorPolicy(policy); err == nil {
+		t.Fatal("runtime admission window without enabled admissions was accepted")
+	}
+	policy.RuntimeAdmissions = true
+	for _, value := range []int64{0, 1, policy.EpochLength} {
+		policy.RuntimeAdmissionWindow = value
+		if err := validateValidatorPolicy(policy); err != nil {
+			t.Fatalf("runtime admission window %d: %v", value, err)
+		}
+	}
+}
+
 func hasABCIAttribute(events []abcitypes.Event, eventType string, key string, value string) bool {
 	for _, event := range events {
 		if event.Type != eventType {
