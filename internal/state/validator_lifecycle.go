@@ -9,6 +9,7 @@ import (
 
 	chaincrypto "chainlab/internal/crypto"
 	"chainlab/internal/hash"
+	"chainlab/internal/types"
 
 	"golang.org/x/crypto/ripemd160"
 )
@@ -146,8 +147,8 @@ func validateValidatorLifecycle(lifecycle ValidatorLifecycle, validators []strin
 	if len(lifecycle.Validators) == 0 {
 		return errors.New("validator lifecycle must contain identities")
 	}
-	if len(lifecycle.Validators) != len(validators) {
-		return errors.New("validator lifecycle identity count does not match genesis validators")
+	if len(lifecycle.Validators) > types.MaxValidators {
+		return fmt.Errorf("validator lifecycle exceeds %d identities", types.MaxValidators)
 	}
 	if lifecycle.Offences == nil {
 		return errors.New("validator lifecycle offences map is missing")
@@ -155,9 +156,9 @@ func validateValidatorLifecycle(lifecycle ValidatorLifecycle, validators []strin
 	if len(lifecycle.Offences) > MaxValidatorOffences {
 		return fmt.Errorf("validator lifecycle exceeds %d offences", MaxValidatorOffences)
 	}
-	validatorAccounts := make(map[string]struct{}, len(validators))
+	genesisAccounts := make(map[string]struct{}, len(validators))
 	for _, validator := range validators {
-		validatorAccounts[validator] = struct{}{}
+		genesisAccounts[validator] = struct{}{}
 	}
 	seenAccounts := make(map[string]struct{}, len(lifecycle.Validators))
 	identitiesByAccount := make(map[string]ValidatorIdentity, len(lifecycle.Validators))
@@ -169,9 +170,6 @@ func validateValidatorLifecycle(lifecycle ValidatorLifecycle, validators []strin
 		}
 		if err := validateValidatorIdentity(identity); err != nil {
 			return err
-		}
-		if _, exists := validatorAccounts[identity.Account]; !exists {
-			return fmt.Errorf("validator lifecycle account %q is not in the genesis set", identity.Account)
 		}
 		if _, exists := seenAccounts[identity.Account]; exists {
 			return fmt.Errorf("validator lifecycle account %q is duplicated", identity.Account)
@@ -186,6 +184,11 @@ func validateValidatorLifecycle(lifecycle ValidatorLifecycle, validators []strin
 			return errors.New("validator lifecycle exceeds CometBFT maximum total voting power")
 		}
 		totalPower += identity.Power
+	}
+	for account := range genesisAccounts {
+		if _, exists := seenAccounts[account]; !exists {
+			return fmt.Errorf("validator lifecycle is missing genesis account %q", account)
+		}
 	}
 	for key, offence := range lifecycle.Offences {
 		if err := validateValidatorOffence(key, offence, identitiesByAccount); err != nil {
@@ -221,8 +224,8 @@ func validateValidatorIdentity(identity ValidatorIdentity) error {
 	if identity.Power <= 0 {
 		return errors.New("validator lifecycle power must be positive")
 	}
-	if identity.ActiveHeight != 1 {
-		return errors.New("validator lifecycle active height must equal the genesis initial height")
+	if identity.ActiveHeight <= 0 {
+		return errors.New("validator lifecycle active height must be positive")
 	}
 	if identity.InactiveHeight != 0 && identity.InactiveHeight <= identity.ActiveHeight {
 		return errors.New("validator lifecycle inactive height must exceed active height")
