@@ -406,7 +406,7 @@ The production sequence is:
 
 - production activation and Linux/amd64 evidence for the implemented deterministic WASM, included-failure, and native-contract metering rules
 - CometBFT evidence slashing, validator updates/epochs, dynamic message faults/asymmetric partitions, Comet binary rolling upgrades, staged operator drills, and broader multi-process fault tests on the implemented block/state-sync path
-- runtime validator admission/governance beyond the implemented genesis-bound stake-derived quorum certificates and evidence-removal unbonding, runtime power changes, voluntary leave/re-entry, and reward economics
+- real multi-process evidence for the implemented runtime validator admission, then re-entry, runtime power changes, voluntary leave, reward economics, and governance authority
 - isolated historical proof reads, Linux retention/migration/compaction/load evidence, restore drills, and rollback protection
 - runtime-authorized upgrades, trusted light-client integration, protected validator signing, metrics/alerts, fuzz/property/race/fault/load/soak validation
 - economics, governance security, wallet/SDK/indexer/token/oracle/interoperability ecosystem and staged public testnets

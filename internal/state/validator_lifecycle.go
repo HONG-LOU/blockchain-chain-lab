@@ -14,7 +14,10 @@ import (
 	"golang.org/x/crypto/ripemd160"
 )
 
-const MaxValidatorOffences = 1_000_000
+const (
+	MaxValidatorOffences   = 1_000_000
+	ValidatorStakePerPower = uint64(1_000)
+)
 
 // ValidatorIdentity permanently binds the application account to the CometBFT
 // consensus identity. InactiveHeight is exclusive: the validator is active at
@@ -241,6 +244,17 @@ func validateValidatorIdentity(identity ValidatorIdentity) error {
 
 func ValidateValidatorIdentity(identity ValidatorIdentity) error {
 	return validateValidatorIdentity(identity)
+}
+
+func ValidatorPowerFromStake(stake uint64) (int64, error) {
+	power := stake / ValidatorStakePerPower
+	if power == 0 {
+		return 0, fmt.Errorf("validator requires at least %d stake", ValidatorStakePerPower)
+	}
+	if power > uint64(math.MaxInt64/8) {
+		return 0, errors.New("stake-derived power exceeds the CometBFT limit")
+	}
+	return int64(power), nil
 }
 
 func validateValidatorOffence(key string, offence ValidatorOffence, identitiesByAccount map[string]ValidatorIdentity) error {

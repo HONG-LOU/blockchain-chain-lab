@@ -45,10 +45,11 @@ func (a *Application) InsertTx(_ context.Context, req *abcitypes.RequestInsertTx
 	code, err := a.mempool.insert(
 		req.Tx,
 		a.genesis.ChainID,
-		a.committed.commitment.Height+1,
-		a.committed.commitment.NextBaseFeePerGas,
 		a.genesis.BlockGasLimit,
 		a.runtime,
+		a.executionContextLocked(
+			a.committed.commitment.Height+1, a.committed.commitment.NextBaseFeePerGas,
+		),
 	)
 	if err != nil {
 		if isFatal(err) {
@@ -75,10 +76,9 @@ func (a *Application) ReapTxs(_ context.Context, req *abcitypes.RequestReapTxs) 
 func (pool *appMempool) insert(
 	raw []byte,
 	chainID string,
-	height int64,
-	baseFee uint64,
 	blockGasLimit uint64,
 	runtime *contracts.Runtime,
+	context core.ExecutionContext,
 ) (uint32, error) {
 	id := rawTransactionID(raw)
 	if _, duplicate := pool.ids[id]; duplicate {
@@ -96,10 +96,7 @@ func (pool *appMempool) insert(
 	}
 	candidate := pool.working.Clone()
 	executor := core.NewExecutor(chainID, "", runtime)
-	if _, err := executor.ExecuteWithContext(candidate, tx, core.ExecutionContext{
-		BlockHeight:   uint64(height),
-		BaseFeePerGas: baseFee,
-	}); err != nil {
+	if _, err := executor.ExecuteWithContext(candidate, tx, context); err != nil {
 		return CodeInvalidTx, err
 	}
 	pool.entries = append(pool.entries, mempoolEntry{raw: cloneBytes(raw), tx: tx})
@@ -134,10 +131,9 @@ func (pool appMempool) reap(maxBytes uint64, maxGas uint64) [][]byte {
 func (pool appMempool) rebuild(
 	base *state.Store,
 	chainID string,
-	height int64,
-	baseFee uint64,
 	blockGasLimit uint64,
 	runtime *contracts.Runtime,
+	context core.ExecutionContext,
 	included [][]byte,
 ) (appMempool, error) {
 	excluded := make(map[string]struct{}, len(included))
@@ -149,7 +145,7 @@ func (pool appMempool) rebuild(
 		if _, committed := excluded[rawTransactionID(entry.raw)]; committed {
 			continue
 		}
-		code, err := rebuilt.insert(entry.raw, chainID, height, baseFee, blockGasLimit, runtime)
+		code, err := rebuilt.insert(entry.raw, chainID, blockGasLimit, runtime, context)
 		if err != nil {
 			if isFatal(err) {
 				return appMempool{}, err

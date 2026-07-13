@@ -56,6 +56,7 @@ const (
 type ValidatorPolicy struct {
 	EpochLength                       int64  `json:"epoch_length"`
 	UnbondingEpochs                   int64  `json:"unbonding_epochs,omitempty"`
+	RuntimeAdmissions                 bool   `json:"runtime_admissions,omitempty"`
 	DuplicateVoteSlashBasisPoints     uint32 `json:"duplicate_vote_slash_basis_points"`
 	LightClientAttackSlashBasisPoints uint32 `json:"light_client_attack_slash_basis_points"`
 	EvidenceMaxAgeNumBlocks           int64  `json:"evidence_max_age_num_blocks"`
@@ -737,10 +738,12 @@ func (a *Application) Commit(context.Context, *abcitypes.RequestCommit) (*abcity
 		nextPool, err = a.mempool.rebuild(
 			a.candidate.state.store,
 			a.genesis.ChainID,
-			a.candidate.state.commitment.Height+1,
-			a.candidate.state.commitment.NextBaseFeePerGas,
 			a.genesis.BlockGasLimit,
 			a.runtime,
+			a.executionContextLocked(
+				a.candidate.state.commitment.Height+1,
+				a.candidate.state.commitment.NextBaseFeePerGas,
+			),
 			a.candidate.txs,
 		)
 		if err != nil {

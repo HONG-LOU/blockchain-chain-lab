@@ -54,10 +54,11 @@ func (a *Application) CheckTx(_ context.Context, req *abcitypes.RequestCheckTx) 
 	}
 	working := a.committed.store.Clone()
 	executor := core.NewExecutor(a.genesis.ChainID, "", a.runtime)
-	receipt, err := executor.ExecuteWithContext(working, tx, core.ExecutionContext{
-		BlockHeight:   uint64(a.committed.commitment.Height + 1),
-		BaseFeePerGas: a.committed.commitment.NextBaseFeePerGas,
-	})
+	receipt, err := executor.ExecuteWithContext(
+		working, tx, a.executionContextLocked(
+			a.committed.commitment.Height+1, a.committed.commitment.NextBaseFeePerGas,
+		),
+	)
 	if err != nil {
 		if isFatal(err) {
 			a.haltErr = err
@@ -212,6 +213,17 @@ func (a *Application) FinalizeBlock(_ context.Context, req *abcitypes.RequestFin
 	blockEvents = append(blockEvents, evidenceEvents(evidenceState.records)...)
 	blockEvents = append(blockEvents, evidenceOutcomeEvents(evidenceState.outcomes)...)
 	blockEvents = append(blockEvents, validatorOffencePrunedEvents(evidenceState.pruned)...)
+	validatorUpdates := evidenceState.updates
+	if a.genesis.Protocol == ProtocolVersionV2 {
+		lifecycle, exists := execution.store.ValidatorLifecycle()
+		if !exists {
+			return nil, errors.New("finalized validator lifecycle is missing")
+		}
+		validatorUpdates, err = validatorUpdatesAtHeight(lifecycle, req.Height)
+		if err != nil {
+			return nil, err
+		}
+	}
 	candidate := &blockCandidate{
 		state: committedState{
 			store:      execution.store,
@@ -226,7 +238,7 @@ func (a *Application) FinalizeBlock(_ context.Context, req *abcitypes.RequestFin
 	return &abcitypes.ResponseFinalizeBlock{
 		Events:                cloneABCIEvents(blockEvents),
 		TxResults:             cloneExecTxResults(execution.txResults),
-		ValidatorUpdates:      cloneValidatorUpdates(evidenceState.updates),
+		ValidatorUpdates:      cloneValidatorUpdates(validatorUpdates),
 		ConsensusParamUpdates: consensusParamUpdates,
 		AppHash:               cloneBytes(candidate.state.appHash),
 	}, nil
@@ -312,6 +324,7 @@ func (a *Application) executeProposalFromStoreLocked(
 	}
 	working := base.Clone()
 	executor := core.NewExecutor(a.genesis.ChainID, proposer, a.runtime)
+	executionContext := a.executionContextLocked(height, a.committed.commitment.NextBaseFeePerGas)
 	result := proposalExecution{
 		store:     working,
 		rawTxs:    make([][]byte, 0, min(len(rawTxs), types.MaxTransactionsPerBlock)),
@@ -342,10 +355,7 @@ func (a *Application) executeProposalFromStoreLocked(
 			continue
 		}
 		candidate := working.Clone()
-		receipt, err := executor.ExecuteWithContext(candidate, tx, core.ExecutionContext{
-			BlockHeight:   uint64(height),
-			BaseFeePerGas: a.committed.commitment.NextBaseFeePerGas,
-		})
+		receipt, err := executor.ExecuteWithContext(candidate, tx, executionContext)
 		if err != nil {
 			if isFatal(err) {
 				a.haltErr = err
@@ -377,6 +387,17 @@ func (a *Application) executeProposalFromStoreLocked(
 		result.txResults = append(result.txResults, txResult)
 	}
 	return result, nil
+}
+
+func (a *Application) executionContextLocked(height int64, baseFeePerGas uint64) core.ExecutionContext {
+	context := core.ExecutionContext{
+		BlockHeight: uint64(height), BaseFeePerGas: baseFeePerGas,
+	}
+	if a.genesis.Protocol == ProtocolVersionV2 {
+		context.ValidatorRuntimeAdmissions = a.genesis.ValidatorPolicy.RuntimeAdmissions
+		context.ValidatorEpochLength = a.genesis.ValidatorPolicy.EpochLength
+	}
+	return context
 }
 
 func cloneValidatorUpdates(updates []abcitypes.ValidatorUpdate) []abcitypes.ValidatorUpdate {

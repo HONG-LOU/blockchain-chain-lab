@@ -21,8 +21,10 @@ type Executor struct {
 }
 
 type ExecutionContext struct {
-	BlockHeight   uint64
-	BaseFeePerGas uint64
+	BlockHeight                uint64
+	BaseFeePerGas              uint64
+	ValidatorRuntimeAdmissions bool
+	ValidatorEpochLength       int64
 }
 
 const (
@@ -53,7 +55,7 @@ func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, 
 	if tx.ChainID != e.chainID {
 		return types.Receipt{}, fmt.Errorf("wrong chain id %q", tx.ChainID)
 	}
-	intrinsicGas, err := intrinsicGasForTransaction(tx)
+	intrinsicGas, err := intrinsicGasForTransaction(tx, context)
 	if err != nil {
 		return types.Receipt{}, err
 	}
@@ -163,7 +165,11 @@ func (e *Executor) ExecuteWithContext(store *state.Store, tx types.Transaction, 
 	case types.TxProposalSubmit, types.TxVote, types.TxProposalExecute:
 		return types.Receipt{}, ErrGovernanceDisabled
 	case types.TxValidatorJoin:
-		return types.Receipt{}, errors.New("dynamic validator joins require a certified epoch transition and are disabled")
+		event, err := executeRuntimeValidatorAdmission(working, tx, context)
+		if err != nil {
+			return types.Receipt{}, err
+		}
+		receipt.Events = append(receipt.Events, event)
 	case types.TxValidatorLeave:
 		return types.Receipt{}, errors.New("dynamic validator leaves require a certified epoch transition and are disabled")
 	case types.TxValidatorSlash:

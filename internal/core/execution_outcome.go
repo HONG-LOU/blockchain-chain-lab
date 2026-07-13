@@ -25,8 +25,8 @@ func IsFatalExecutionError(err error) bool {
 		errors.Is(err, contracts.ErrNativeRuntimeFault)
 }
 
-func intrinsicGasForTransaction(tx types.Transaction) (uint64, error) {
-	if err := validateTransactionSchema(tx); err != nil {
+func intrinsicGasForTransaction(tx types.Transaction, context ExecutionContext) (uint64, error) {
+	if err := validateTransactionSchema(tx, context); err != nil {
 		return 0, err
 	}
 	switch tx.Type {
@@ -43,7 +43,7 @@ func intrinsicGasForTransaction(tx types.Transaction) (uint64, error) {
 	}
 }
 
-func validateTransactionSchema(tx types.Transaction) error {
+func validateTransactionSchema(tx types.Transaction, context ExecutionContext) error {
 	if err := requireCanonicalAddress("from", tx.From); err != nil {
 		return err
 	}
@@ -208,7 +208,12 @@ func validateTransactionSchema(tx types.Transaction) error {
 		}
 	case types.TxVote, types.TxProposalSubmit, types.TxProposalExecute:
 		return ErrGovernanceDisabled
-	case types.TxValidatorJoin, types.TxValidatorLeave:
+	case types.TxValidatorJoin:
+		if !context.ValidatorRuntimeAdmissions {
+			return errors.New("dynamic validator set transactions require a certified epoch transition and are disabled")
+		}
+		return validateRuntimeValidatorAdmissionMessage(tx)
+	case types.TxValidatorLeave:
 		return errors.New("dynamic validator set transactions require a certified epoch transition and are disabled")
 	default:
 		if _, err := EstimateGas(tx.Type); err != nil {

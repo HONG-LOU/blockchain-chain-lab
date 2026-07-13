@@ -3,7 +3,6 @@ package abci
 import (
 	"errors"
 	"fmt"
-	"math"
 
 	chaincrypto "chainlab/internal/crypto"
 	"chainlab/internal/hash"
@@ -13,7 +12,6 @@ import (
 
 const (
 	validatorAdmissionDomain          = "chainlab-validator-admission-v1"
-	validatorAdmissionStakePerPower   = uint64(1_000)
 	maxValidatorAdmissionCertificates = 64
 	maxValidatorAdmissionSignatures   = types.MaxValidators
 )
@@ -94,7 +92,7 @@ func validateGenesisAdmissions(document GenesisDocument, store *state.Store) err
 			identity.InactiveHeight != 0 {
 			return fmt.Errorf("validator admission %d must activate on a future epoch without a removal", index)
 		}
-		power, err := validatorAdmissionPower(store.StakeOf(identity.Account))
+		power, err := state.ValidatorPowerFromStake(store.StakeOf(identity.Account))
 		if err != nil {
 			return fmt.Errorf("validator admission %d: %w", index, err)
 		}
@@ -112,17 +110,6 @@ func validateGenesisAdmissions(document GenesisDocument, store *state.Store) err
 		previousConsensusAddress = identity.ConsensusAddress
 	}
 	return nil
-}
-
-func validatorAdmissionPower(stake uint64) (int64, error) {
-	power := stake / validatorAdmissionStakePerPower
-	if power == 0 {
-		return 0, fmt.Errorf("validator admission requires at least %d stake", validatorAdmissionStakePerPower)
-	}
-	if power > uint64(math.MaxInt64/8) {
-		return 0, errors.New("validator admission stake-derived power exceeds the CometBFT limit")
-	}
-	return int64(power), nil
 }
 
 func validateAdmissionSignatures(
