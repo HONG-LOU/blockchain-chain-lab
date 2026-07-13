@@ -181,6 +181,7 @@ func InitializeNetwork(config NetworkConfig) (NetworkDocument, error) {
 		peers := persistentPeers(identities, index, config.P2PBasePort)
 		nodeDocument := NodeDocument{
 			Protocol:           NodeProtocol,
+			Role:               RoleValidator,
 			ChainID:            config.ChainID,
 			Moniker:            identity.name,
 			ProxyApp:           tcpAddress(config.ABCIBasePort + index),

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -12,18 +13,23 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"chainlab/examples"
+	"chainlab/internal/buildinfo"
+	"chainlab/internal/cometnode"
 	"chainlab/internal/consensus"
 	"chainlab/internal/contracts"
 	"chainlab/internal/core"
 	"chainlab/internal/crypto"
+	"chainlab/internal/desktop"
 	"chainlab/internal/node"
 	chainrpc "chainlab/internal/rpc"
 	"chainlab/internal/types"
@@ -100,6 +106,8 @@ func main() {
 	}
 
 	switch os.Args[1] {
+	case "version":
+		write(buildinfo.Current())
 	case "keygen":
 		if err := runKeygenCommand(os.Args[2:], os.Stdout); err != nil {
 			log.Fatal(err)
@@ -110,6 +118,8 @@ func main() {
 			log.Fatal(err)
 		}
 		write(summary)
+	case "desktop":
+		desktopCommand(os.Args[2:], os.Stdout)
 	case "init":
 		initCommand(os.Args[2:])
 	case "node":
@@ -300,7 +310,406 @@ func buildNodeConfig(options nodeOptions) (node.Config, error) {
 }
 
 func usage() {
-	fmt.Println("usage: chainlab <keygen|init|demo|node|faucet|tx|query|chain>")
+	fmt.Println("usage: chainlab <version|desktop|keygen|init|demo|node|faucet|tx|query|chain>")
+}
+
+func desktopCommand(args []string, out io.Writer) {
+	if len(args) == 0 {
+		log.Fatal("usage: chainlab desktop <init|identity|invitation|join|start|status|stop|account|transfer|broadcast|receipt|backup|restore|verify>")
+	}
+	switch args[0] {
+	case "init":
+		if err := runDesktopInitCommand(args[1:], out); err != nil {
+			log.Fatal(err)
+		}
+	case "identity":
+		if err := runDesktopIdentityCommand(args[1:], out); err != nil {
+			log.Fatal(err)
+		}
+	case "invitation":
+		if err := runDesktopInvitationCommand(args[1:], out); err != nil {
+			log.Fatal(err)
+		}
+	case "join":
+		if err := runDesktopJoinCommand(args[1:], out); err != nil {
+			log.Fatal(err)
+		}
+	case "start":
+		if err := runDesktopStartCommand(args[1:], out); err != nil {
+			log.Fatal(err)
+		}
+	case "status":
+		if err := runDesktopStatusCommand(args[1:], out); err != nil {
+			log.Fatal(err)
+		}
+	case "stop":
+		if err := runDesktopStopCommand(args[1:], out); err != nil {
+			log.Fatal(err)
+		}
+	case "account":
+		if err := runDesktopAccountCommand(args[1:], out); err != nil {
+			log.Fatal(err)
+		}
+	case "transfer":
+		if err := runDesktopTransferCommand(args[1:], out); err != nil {
+			log.Fatal(err)
+		}
+	case "broadcast":
+		if err := runDesktopBroadcastCommand(args[1:], out); err != nil {
+			log.Fatal(err)
+		}
+	case "receipt":
+		if err := runDesktopReceiptCommand(args[1:], out); err != nil {
+			log.Fatal(err)
+		}
+	case "backup":
+		if err := runDesktopBackupCommand(args[1:], out); err != nil {
+			log.Fatal(err)
+		}
+	case "restore":
+		if err := runDesktopRestoreCommand(args[1:], out); err != nil {
+			log.Fatal(err)
+		}
+	case "verify":
+		if err := runDesktopVerifyCommand(args[1:], out); err != nil {
+			log.Fatal(err)
+		}
+	default:
+		log.Fatalf("unknown desktop command %q", args[0])
+	}
+}
+
+func runDesktopBackupCommand(args []string, out io.Writer) error {
+	if err := rejectDuplicateFlags(args, "data-dir", "out"); err != nil {
+		return err
+	}
+	flags := flag.NewFlagSet("desktop backup", flag.ContinueOnError)
+	dataDir := flags.String("data-dir", "", "stopped desktop data directory")
+	output := flags.String("out", "", "new backup archive containing private material")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || strings.TrimSpace(*dataDir) == "" || strings.TrimSpace(*output) == "" {
+		return errors.New("desktop backup requires --data-dir and --out")
+	}
+	if err := desktop.Backup(*dataDir, *output); err != nil {
+		return err
+	}
+	absolute, err := filepath.Abs(*output)
+	if err != nil {
+		return err
+	}
+	return writeTo(out, map[string]string{"backup": absolute, "status": "created"})
+}
+
+func runDesktopRestoreCommand(args []string, out io.Writer) error {
+	if err := rejectDuplicateFlags(args, "backup", "data-dir", "chain-id"); err != nil {
+		return err
+	}
+	flags := flag.NewFlagSet("desktop restore", flag.ContinueOnError)
+	backupPath := flags.String("backup", "", "desktop backup archive")
+	dataDir := flags.String("data-dir", "", "new restored desktop data directory")
+	chainID := flags.String("chain-id", "", "expected chain id")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || strings.TrimSpace(*backupPath) == "" || strings.TrimSpace(*dataDir) == "" || strings.TrimSpace(*chainID) == "" {
+		return errors.New("desktop restore requires --backup, --data-dir, and --chain-id")
+	}
+	config, err := desktop.Restore(*backupPath, *dataDir, *chainID)
+	if err != nil {
+		return err
+	}
+	absolute, err := filepath.Abs(*dataDir)
+	if err != nil {
+		return err
+	}
+	return writeTo(out, map[string]any{"chain_id": config.ChainID, "data_dir": absolute, "profile": config.Profile, "status": "restored"})
+}
+
+func runDesktopVerifyCommand(args []string, out io.Writer) error {
+	if err := rejectDuplicateFlags(args, "data-dir", "chain-id"); err != nil {
+		return err
+	}
+	flags := flag.NewFlagSet("desktop verify", flag.ContinueOnError)
+	dataDir := flags.String("data-dir", "", "stopped desktop data directory")
+	chainID := flags.String("chain-id", "", "expected chain id")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || strings.TrimSpace(*dataDir) == "" || strings.TrimSpace(*chainID) == "" {
+		return errors.New("desktop verify requires --data-dir and --chain-id")
+	}
+	config, err := desktop.Verify(*dataDir, *chainID)
+	if err != nil {
+		return err
+	}
+	return writeTo(out, map[string]any{"chain_id": config.ChainID, "profile": config.Profile, "status": "verified"})
+}
+
+func runDesktopBroadcastCommand(args []string, out io.Writer) error {
+	if err := rejectDuplicateFlags(args, "data-dir", "raw"); err != nil {
+		return err
+	}
+	flags := flag.NewFlagSet("desktop broadcast", flag.ContinueOnError)
+	dataDir := flags.String("data-dir", "", "desktop data directory")
+	raw := flags.String("raw", "", "signed canonical raw transaction hex")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || strings.TrimSpace(*dataDir) == "" || strings.TrimSpace(*raw) == "" {
+		return errors.New("desktop broadcast requires --data-dir and --raw")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	result, err := desktop.BroadcastRaw(ctx, *dataDir, *raw)
+	if err != nil {
+		return err
+	}
+	return writeTo(out, result)
+}
+
+func runDesktopIdentityCommand(args []string, out io.Writer) error {
+	if err := rejectDuplicateFlags(args, "data-dir", "role", "name", "p2p-address"); err != nil {
+		return err
+	}
+	flags := flag.NewFlagSet("desktop identity", flag.ContinueOnError)
+	dataDir := flags.String("data-dir", "", "new local identity and desktop data directory")
+	role := flags.String("role", string(cometnode.RoleValidator), "validator or observer")
+	name := flags.String("name", "", "lowercase public node name")
+	p2pAddress := flags.String("p2p-address", "", "advertised P2P host:port")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || strings.TrimSpace(*dataDir) == "" || strings.TrimSpace(*name) == "" || strings.TrimSpace(*p2pAddress) == "" {
+		return errors.New("desktop identity requires --data-dir, --name, and --p2p-address")
+	}
+	identity, err := desktop.GenerateIdentity(*dataDir, cometnode.NodeRole(*role), *name, *p2pAddress)
+	if err != nil {
+		return err
+	}
+	return writeTo(out, identity)
+}
+
+func runDesktopInvitationCommand(args []string, out io.Writer) error {
+	if err := rejectDuplicateFlags(args, "out", "chain-id", "network-name"); err != nil {
+		return err
+	}
+	flags := flag.NewFlagSet("desktop invitation", flag.ContinueOnError)
+	output := flags.String("out", "", "new public invitation file")
+	chainID := flags.String("chain-id", "", "chain id")
+	networkName := flags.String("network-name", "", "public community network name")
+	var identityPaths stringListFlag
+	flags.Var(&identityPaths, "identity", "public identity.json path; exactly four")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || strings.TrimSpace(*output) == "" || strings.TrimSpace(*chainID) == "" || strings.TrimSpace(*networkName) == "" {
+		return errors.New("desktop invitation requires --out, --chain-id, --network-name, and four --identity files")
+	}
+	identities := make([]desktop.PublicIdentity, len(identityPaths))
+	for index, path := range identityPaths {
+		identity, err := desktop.LoadIdentity(path)
+		if err != nil {
+			return err
+		}
+		identities[index] = identity
+	}
+	invitation, err := desktop.CreateInvitation(*output, *chainID, *networkName, identities, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	return writeTo(out, map[string]any{
+		"chain_id": invitation.Payload.ChainID, "checksum": invitation.Checksum,
+		"invitation": *output, "validators": len(invitation.Payload.Validators),
+	})
+}
+
+func runDesktopJoinCommand(args []string, out io.Writer) error {
+	if err := rejectDuplicateFlags(args, "data-dir", "invitation", "abci-port", "rpc-port", "control-port", "explorer-port"); err != nil {
+		return err
+	}
+	defaults := desktop.DefaultLocalPorts()
+	flags := flag.NewFlagSet("desktop join", flag.ContinueOnError)
+	dataDir := flags.String("data-dir", "", "local identity and desktop data directory")
+	invitationPath := flags.String("invitation", "", "verified public invitation file")
+	abciPort := flags.Int("abci-port", defaults.ABCI, "loopback ABCI port")
+	rpcPort := flags.Int("rpc-port", defaults.RPC, "loopback Comet RPC port")
+	controlPort := flags.Int("control-port", defaults.Control, "loopback lifecycle control port")
+	explorerPort := flags.Int("explorer-port", defaults.Explorer, "loopback Explorer port")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || strings.TrimSpace(*dataDir) == "" || strings.TrimSpace(*invitationPath) == "" {
+		return errors.New("desktop join requires --data-dir and --invitation")
+	}
+	config, err := desktop.Join(*dataDir, *invitationPath, desktop.LocalPorts{
+		ABCI: *abciPort, RPC: *rpcPort, Control: *controlPort, Explorer: *explorerPort,
+	})
+	if err != nil {
+		return err
+	}
+	absolute, err := filepath.Abs(*dataDir)
+	if err != nil {
+		return err
+	}
+	return writeTo(out, map[string]any{
+		"chain_id": config.ChainID, "data_dir": absolute, "explorer_url": config.ExplorerURL,
+		"profile": config.Profile, "rpc_address": config.RPCAddress,
+	})
+}
+
+func runDesktopReceiptCommand(args []string, out io.Writer) error {
+	if err := rejectDuplicateFlags(args, "data-dir", "comet-hash"); err != nil {
+		return err
+	}
+	flags := flag.NewFlagSet("desktop receipt", flag.ContinueOnError)
+	dataDir := flags.String("data-dir", "", "desktop data directory")
+	cometHash := flags.String("comet-hash", "", "Comet transaction index hash")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || strings.TrimSpace(*dataDir) == "" || strings.TrimSpace(*cometHash) == "" {
+		return errors.New("desktop receipt requires --data-dir and --comet-hash")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result, err := desktop.Receipt(ctx, *dataDir, *cometHash)
+	if err != nil {
+		return err
+	}
+	return writeTo(out, result)
+}
+
+func runDesktopAccountCommand(args []string, out io.Writer) error {
+	if err := rejectDuplicateFlags(args, "data-dir", "address"); err != nil {
+		return err
+	}
+	flags := flag.NewFlagSet("desktop account", flag.ContinueOnError)
+	dataDir := flags.String("data-dir", "", "desktop data directory")
+	address := flags.String("address", "", "account address")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || strings.TrimSpace(*dataDir) == "" || strings.TrimSpace(*address) == "" {
+		return errors.New("desktop account requires --data-dir and --address")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	account, err := desktop.Account(ctx, *dataDir, *address)
+	if err != nil {
+		return err
+	}
+	return writeTo(out, account)
+}
+
+func runDesktopTransferCommand(args []string, out io.Writer) error {
+	if err := rejectDuplicateFlags(args, "data-dir", "to", "value"); err != nil {
+		return err
+	}
+	flags := flag.NewFlagSet("desktop transfer", flag.ContinueOnError)
+	dataDir := flags.String("data-dir", "", "desktop data directory")
+	to := flags.String("to", "", "recipient address")
+	value := flags.Uint64("value", 0, "test-unit amount")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || strings.TrimSpace(*dataDir) == "" || strings.TrimSpace(*to) == "" || *value == 0 {
+		return errors.New("desktop transfer requires --data-dir, --to, and positive --value")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	result, err := desktop.Transfer(ctx, *dataDir, *to, *value)
+	if err != nil {
+		return err
+	}
+	return writeTo(out, result)
+}
+
+func desktopDataDirFlag(command string, args []string) (string, error) {
+	if err := rejectDuplicateFlags(args, "data-dir"); err != nil {
+		return "", err
+	}
+	flags := flag.NewFlagSet(command, flag.ContinueOnError)
+	dataDir := flags.String("data-dir", "", "desktop data directory")
+	if err := flags.Parse(args); err != nil {
+		return "", err
+	}
+	if flags.NArg() != 0 {
+		return "", fmt.Errorf("%s does not accept positional arguments", command)
+	}
+	if strings.TrimSpace(*dataDir) == "" {
+		return "", fmt.Errorf("%s requires --data-dir", command)
+	}
+	return *dataDir, nil
+}
+
+func runDesktopStartCommand(args []string, out io.Writer) error {
+	dataDir, err := desktopDataDirFlag("desktop start", args)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return desktop.Run(ctx, dataDir, out)
+}
+
+func runDesktopStatusCommand(args []string, out io.Writer) error {
+	dataDir, err := desktopDataDirFlag("desktop status", args)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	status, err := desktop.CurrentStatus(ctx, dataDir)
+	if err != nil {
+		return err
+	}
+	return writeTo(out, status)
+}
+
+func runDesktopStopCommand(args []string, out io.Writer) error {
+	dataDir, err := desktopDataDirFlag("desktop stop", args)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := desktop.Stop(ctx, dataDir); err != nil {
+		return err
+	}
+	return writeTo(out, map[string]string{"status": "stopping"})
+}
+
+func runDesktopInitCommand(args []string, out io.Writer) error {
+	if err := rejectDuplicateFlags(args, "data-dir", "profile", "chain-id"); err != nil {
+		return err
+	}
+	flags := flag.NewFlagSet("desktop init", flag.ContinueOnError)
+	dataDir := flags.String("data-dir", "", "new desktop data directory")
+	profile := flags.String("profile", string(desktop.ProfileDesktopSolo), "desktop-solo, home-validator, or observer")
+	chainID := flags.String("chain-id", "chainlab-desktop", "chain id")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("desktop init does not accept positional arguments")
+	}
+	if strings.TrimSpace(*dataDir) == "" {
+		return errors.New("desktop init requires --data-dir")
+	}
+	config, err := desktop.Initialize(*dataDir, desktop.Profile(*profile), *chainID)
+	if err != nil {
+		return err
+	}
+	absolute, err := filepath.Abs(*dataDir)
+	if err != nil {
+		return err
+	}
+	return writeTo(out, map[string]any{
+		"chain_id": config.ChainID, "data_dir": absolute, "explorer_url": config.ExplorerURL,
+		"profile": config.Profile, "rpc_address": config.RPCAddress,
+	})
 }
 
 func rejectDuplicateFlags(args []string, uniqueNames ...string) error {

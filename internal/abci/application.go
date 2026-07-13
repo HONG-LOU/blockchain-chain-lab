@@ -122,17 +122,19 @@ func (g GenesisDocument) CanonicalBytes() ([]byte, error) {
 }
 
 type Config struct {
-	Genesis       GenesisDocument
-	DataDir       string
-	Storage       StorageProfile
-	MaxAppVersion uint64
-	persistence   applicationPersistence
+	Genesis            GenesisDocument
+	DataDir            string
+	Storage            StorageProfile
+	CometRetainHeights uint64
+	MaxAppVersion      uint64
+	persistence        applicationPersistence
 }
 
 type Application struct {
 	mu                    sync.Mutex
 	genesis               GenesisDocument
 	maxAppVersion         uint64
+	cometRetainHeights    uint64
 	committed             committedState
 	runtime               *contracts.Runtime
 	initialized           bool
@@ -217,14 +219,29 @@ func NewApplication(config Config) (*Application, error) {
 	}
 	persisted := persistedApplicationState{committed: committed, proposers: make(map[string]string)}
 	persistence := config.persistence
-	if persistence == nil && config.DataDir != "" {
-		profile, profileErr := normalizeStorageProfile(config.Storage)
-		if profileErr != nil {
-			return nil, profileErr
-		}
-		persistence, err = openApplicationDB(config.DataDir, profile)
+	var storageProfile StorageProfile
+	if config.DataDir != "" {
+		storageProfile, err = normalizeStorageProfile(config.Storage)
 		if err != nil {
 			return nil, err
+		}
+	}
+	if persistence == nil && config.DataDir != "" {
+		persistence, err = openApplicationDB(config.DataDir, storageProfile)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if config.CometRetainHeights != 0 {
+		if config.DataDir == "" || persistence == nil {
+			if persistence != nil {
+				_ = persistence.Close()
+			}
+			return nil, errors.New("Comet block retention requires persistent application storage")
+		}
+		if storageProfile.Mode != StorageModeFull || config.CometRetainHeights != storageProfile.RetainHeights {
+			_ = persistence.Close()
+			return nil, errors.New("Comet block retention must exactly match full application history retention")
 		}
 	}
 	if persistence != nil {
@@ -253,16 +270,17 @@ func NewApplication(config Config) (*Application, error) {
 	}
 	runtime := contracts.NewRuntimeWithDefaults()
 	return &Application{
-		genesis:           genesis,
-		maxAppVersion:     maxAppVersion,
-		committed:         committed,
-		runtime:           runtime,
-		initialized:       persisted.initialized,
-		proposers:         cloneStringMap(persisted.proposers),
-		mempool:           newAppMempool(committed.store),
-		persistence:       persistence,
-		committedTxs:      cloneTransactions(persisted.txs),
-		committedReceipts: cloneReceipts(persisted.receipts),
+		genesis:            genesis,
+		maxAppVersion:      maxAppVersion,
+		cometRetainHeights: config.CometRetainHeights,
+		committed:          committed,
+		runtime:            runtime,
+		initialized:        persisted.initialized,
+		proposers:          cloneStringMap(persisted.proposers),
+		mempool:            newAppMempool(committed.store),
+		persistence:        persistence,
+		committedTxs:       cloneTransactions(persisted.txs),
+		committedReceipts:  cloneReceipts(persisted.receipts),
 	}, nil
 }
 
@@ -769,7 +787,16 @@ func (a *Application) Commit(context.Context, *abcitypes.RequestCommit) (*abcity
 	a.committedReceipts = cloneReceipts(a.candidate.receipts)
 	a.candidate = nil
 	a.mempool = nextPool
-	return &abcitypes.ResponseCommit{}, nil
+	return &abcitypes.ResponseCommit{
+		RetainHeight: cometRetainHeight(a.committed.commitment.Height, a.cometRetainHeights),
+	}, nil
+}
+
+func cometRetainHeight(height int64, retainHeights uint64) int64 {
+	if retainHeights == 0 || height <= 0 || uint64(height) < retainHeights {
+		return 0
+	}
+	return height - int64(retainHeights) + 1
 }
 
 func (a *Application) requireReadyLocked() error {

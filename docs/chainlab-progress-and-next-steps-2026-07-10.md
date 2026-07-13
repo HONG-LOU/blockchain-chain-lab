@@ -13,13 +13,13 @@ The current local PoA implementation remains a fast development and differential
 
 ### Intended Release Profiles
 
-These are target profiles, not claims that their complete workflows already exist:
+These profiles now have explicit versioned contracts and implemented CLI workflows:
 
-| Profile | Intended use | Signing authority | Current gap |
+| Profile | Intended use | Signing authority | Current state |
 |---|---|---|---|
-| `desktop-solo` | One computer, local RPC/Explorer, demos, development, private state | One local development validator | Needs a unified start/status/stop and restart-safe desktop workflow |
-| `home-validator` | Four trusted operators on separate personal computers | Fixed, explicitly invited validator | Needs public-only invitations, home-network guidance, and real multi-computer evidence |
-| `observer` | Verify, sync, query, and broadcast without voting | None | Needs a first-class non-validator initialization and join workflow |
+| `desktop-solo` | One computer, local RPC/Explorer, demos, development, private state | One local development validator | Unified init/start/status/stop, transaction, receipt, backup, restore, verify, restart, and Explorer implemented |
+| `home-validator` | Four trusted operators on separate personal computers | Fixed, explicitly invited validator | Local identity, public-only invitation, join, lifecycle, 3-of-4/2-of-4/recovery process evidence implemented; real-home hardware evidence remains open |
+| `observer` | Verify, sync, query, and broadcast without voting | None | First-class local identity/join/lifecycle implemented; no validator key/state, sync/query/Explorer/external broadcast process evidence passes |
 
 The initial consumer target is Windows 10/11 amd64 with four logical cores, 8 GiB RAM, 100 GiB free SSD space, and ordinary broadband. A single node plus Explorer must fit that target. A four-validator network on one computer remains a 16 GiB-or-more developer workflow, not the 8 GiB consumer requirement. These are release targets until measured by the resource gates below, not current performance guarantees.
 
@@ -42,7 +42,7 @@ This decision supersedes the previous public-mainnet implementation priority. Ex
 - `docs/current-blockchain-tech-roadmap.md`
 - `docs/mainstream-chain-capability-and-production-gates-2026-07-10.md`
 
-The English and Chinese README files still describe the earlier production-oriented target. Synchronizing both README files is an explicit desktop-release task below; until then, this section is the authoritative current direction.
+The English and Chinese README files are synchronized with this desktop/community and non-financial boundary.
 
 ## Completed In This Milestone
 
@@ -292,6 +292,8 @@ Windows `go mod verify` is not recorded as green for the CometBFT tree. The sign
 
 ### Desktop Release Blockers
 
+Implementation update on 2026-07-13: blockers 1-5 and 7 have software implementations, focused tests, documentation, and package workflows. Blocker 6 has same-host isolated-process evidence and current-host resource baselines, but the exact 4-core/8-GiB Windows reference machine and four separately operated physical homes or equivalent isolated hosts remain external evidence gates. The acceptance descriptions below remain authoritative and are not deleted merely because their software path exists.
+
 1. **Unified node lifecycle**
    - A user still has to understand separate genesis, key, ABCI application, and Comet process commands.
    - Deliver one clear local lifecycle for initialize, start, status, stop, restart, and Explorer access. Reuse existing commands and ownership boundaries before adding another framework or GUI.
@@ -346,6 +348,8 @@ The following work remains valuable but does not block the desktop/community rel
 Implemented consensus, deterministic execution, storage integrity, resource bounds, key separation, protocol upgrade rejection, and fail-closed governance must remain tested. "Deferred" never means that an existing safety property may be removed to simplify desktop packaging.
 
 ## Next Immediate Work
+
+Execution update on 2026-07-13: the Phase 0 contract, Phase 1 lifecycle, Phase 2 invitation/validator/observer flow, Phase 3 bounded retention/recovery/status, and Phase 4 software packaging/documentation/browser gates are implemented in the current worktree. Direct evidence includes full and race suites, five-process quorum/observer coverage, backup/restore corruption rejection, a 10,000-block accelerated storage run, Windows/Linux packages, clean Linux module verification, and desktop/mobile Explorer rendering. Final release artifacts must be rebuilt from the clean committed tree. The exact reference-machine, separately operated real-home, and longer soak gates remain open and prevent claiming the complete Desktop v0.1 milestone.
 
 The next AI must work through these phases in order and start with only Phase 0 and the smallest Phase 1 implementation slice. It must not resume the old economics/HSM/public-mainnet list, introduce a GUI framework, design a new consensus protocol, or weaken current validation to make the launcher easier.
 

@@ -1,5 +1,8 @@
 /bin/
 /dist/
+/output/desktop-measurements/
+/output/playwright/
+/.playwright-cli/
 /tmp/
 /data/
 /config/genesis.json

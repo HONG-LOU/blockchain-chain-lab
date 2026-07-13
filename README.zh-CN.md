@@ -1,182 +1,100 @@
-<p align="right">
-  <a href="./README.md">English</a> · <strong>简体中文</strong>
+# ChainLab
+
+<p align="center">
+  <strong>面向桌面电脑和可信小型社区的实验性自托管区块链节点。</strong>
 </p>
 
-<div align="center">
-  <h1>ChainLab</h1>
-  <p><strong>一个用 Go 构建、以可验证性为核心的主权区块链技术栈。</strong></p>
-  <p>
-    确定性执行 · CometBFT ABCI++ · Pebble 状态 · Native/WASM 合约 · 可认证证明
-  </p>
-  <p>
-    <a href="https://go.dev/doc/devel/release#go1.25.0"><img alt="Go 1.25.12" src="https://img.shields.io/badge/Go-1.25.12-00ADD8?logo=go&logoColor=white"></a>
-    <a href="https://github.com/cometbft/cometbft/releases/tag/v0.39.3"><img alt="CometBFT 0.39.3" src="https://img.shields.io/badge/CometBFT-0.39.3-111827"></a>
-    <img alt="阶段：私有网络" src="https://img.shields.io/badge/stage-private_network-0F766E">
-    <img alt="主网：尚未就绪" src="https://img.shields.io/badge/mainnet-not_ready-B45309">
-  </p>
-</div>
+<p align="center">
+  <img alt="Go 1.25.12" src="https://img.shields.io/badge/Go-1.25.12-00ADD8?logo=go&logoColor=white">
+  <img alt="桌面目标" src="https://img.shields.io/badge/target-desktop_%2F_community-1D6F42">
+  <img alt="公共主网延后" src="https://img.shields.io/badge/public_mainnet-deferred-B45309">
+</p>
 
-> [!WARNING]
-> ChainLab 当前处于持续开发和私有网络验证阶段，尚未经过外部安全审计，也未获准用于公共主网、生产验证者密钥托管或真实资产。
+[English](README.md)
 
-## 项目概览
+ChainLab 将确定性 ABCI++ 应用、CometBFT 共识、Pebble 事务存储和统一桌面生命周期组合在一起。一个 `chainlab` 进程同时管理应用、共识节点、生命周期控制端点和本地 Explorer。
 
-ChainLab 是一个面向生产目标设计的主权区块链协议和 ABCI++ 应用。项目掌握自己的确定性状态转换、账户、费用、合约、验证者生命周期、证明和升级语义，同时集成 CometBFT 提供拜占庭共识，使用 Pebble 保存事务型状态历史。
+本仓库是实验性软件。原生余额、质押、合约 Token 和演示资产只是测试单位或社区积分，不承诺市场价值、法币兑换、发行方背书、收益、托管、持续在线或永久存在。ChainLab 尚未达到公共主网或真实价值资产使用条件。
 
-仓库明确区分两套运行环境：
+## 发布 Profile
 
-- 快速本地 PoA harness：用于应用重放、CLI 工作流、分叉/finality-lock 实验和开发工具；
-- 真实四验证者 CometBFT 网络：用于权威 ABCI++ 生命周期、P2P、提案轮次、证据、区块同步、状态同步、验证者转换和故障恢复。
+| Profile | 用途 | 签名权限 | 默认暴露范围 |
+|---|---|---|---|
+| `desktop-solo` | 一台电脑上的私有网络 | 一个本地开发验证者 | ABCI、RPC、生命周期控制、P2P、Explorer 全部 loopback |
+| `home-validator` | 四名被明确邀请的可信运营者 | 每名运营者各自在本机生成一个验证者身份 | RPC/控制/Explorer 为 loopback；P2P 使用明确填写的局域网或公网地址 |
+| `observer` | 同步、验证、查询、提供 Explorer、广播交易 | 没有验证者私钥和签名状态 | RPC/控制/Explorer 为 loopback；P2P 使用明确填写的地址 |
 
-本地 harness 不会被描述为生产共识。CometBFT 路径是生产方向，但发布、运维、经济和安全门槛仍被明确列出，尚未关闭。
-
-## 架构
-
-```mermaid
-flowchart TB
-    U[钱包 · SDK · 节点运维]
-    R[REST · EVM-shaped JSON-RPC · WebSocket · Explorer]
-    A[ChainLab ABCI++ 应用]
-    E[确定性执行<br/>账户 · 费用 · Native · WASM]
-    C[CometBFT<br/>共识 · P2P · 证据 · 同步]
-    S[Pebble Store V2<br/>历史 · 快照 · 证明]
-
-    U --> R --> A
-    A --> E
-    C <--> A
-    A --> S
-```
-
-| 层级 | 已实现能力 |
-|---|---|
-| 共识 | CometBFT v0.39.3 ABCI++、四验证者私网、提案重放、证据、区块/状态同步、epoch 更新 |
-| 执行 | 规范交易、EIP-1559 风格费用、失败交易结算、Native 合约、计量式 Wasmtime WASM |
-| 账户 | EOA、Paymaster、原子批处理、`account.v1`、`multisig.v1`、委托 EOA、Session Key、Guardian Recovery |
-| 状态 | Pebble 原子提交、增量 delta/checkpoint、archive/full/pruned、备份和验证式快照 |
-| 可验证性 | 交易/receipt/state root、精确总量证明、稀疏成员/非成员证明、独立 verifier |
-| 接口 | CLI、REST、EVM-shaped JSON-RPC 子集、Filter、WebSocket、本地有界 Explorer |
-
-## 当前可用能力
-
-### 协议与执行
-
-- secp256k1 签名、Ethereum 风格 20 字节地址、余额、nonce、stake、账户存储和确定性 root；
-- 转账、EIP-1559 风格 fee cap、base fee burn、proposer priority fee、Paymaster 赞助和最多 128 个原子 batch operation；
-- 确定性 included failure：业务写入回滚，但 nonce 和实际 gas 结算保留；out-of-gas 消耗完整 gas limit；
-- 封闭的 `chainlab-native-v1` 计量和版本固定的 Wasmtime 执行，包括确定性 fuel、固定资源、受限 host I/O 和原子回滚；
-- ChainLab-native 智能账户、阈值多签、委托 EOA 实验、transfer/call session policy 和延迟式社交恢复。
-
-### 共识与验证者生命周期
-
-- 严格的 `Info`、`Query`、`CheckTx`、proposal、finalize、commit、vote extension、snapshot 和 state sync 边界；
-- 真实 3/4 继续出块、2/4 确定停滞、2+2 分区恢复、proposer 缺失/延迟/无效提案恢复、重启、重放、区块同步和破坏数据后的状态同步；
-- Comet 验证的 duplicate vote、同高度 light-client equivocation 和跨高度 forward-lunatic 证据，以及随后的 epoch removal；
-- genesis/runtime certified stake-derived validator admission，包括 quorum 授权、committed root 绑定、证书 gas 计量、`H+2` update 和真实多进程转换证据；
-- 可选 evidence-removal unbonding 和 V5 offence retention。re-entry、运行期 power change、主动退出、奖励和 key operation 尚未完成。
-
-### 存储、升级与证明
-
-- 每个高度使用一个同步 Pebble batch，原子提交状态、结果、commitment、索引、历史元数据和 current pointer；
-- flat live state、mutation-derived delta/checkpoint、确定性迁移、compaction、一致性备份、完整性校验和验证式快照恢复；
-- genesis 承诺的 `chainlab-v2 → chainlab-v3 → chainlab-v4 → chainlab-v5` 激活路径；
-- V3 精确总量 transaction/receipt/state root、V4 mutation-aware sparse state、V5 timestamped offence 安全压缩；
-- 对当前及保留混合版本历史进行 trusted-root 独立 proof 验证。
+CometBFT 不提供自动 NAT 穿透。局域网需要可互访地址和防火墙规则；不同家庭需要显式公网地址与端口转发，或独立运营的 overlay。网络不会暗中依赖托管 seed 或 relay。
 
 ## 快速开始
 
-### 环境要求
-
-最低支持 Go **1.25.12**。这个 patch 版本属于安全边界：更早的 Go 1.25 标准库包含项目 HTTP、TLS、URL 和模板路径可达的漏洞。
+源码构建需要 Go 1.25.12 和 Git。Windows amd64、Linux amd64 发布包包含可执行文件、中英文 README、Quick Start、版本元数据和 SHA-256 文件。
 
 ```powershell
-git clone https://github.com/HONG-LOU/blockchain-chain-lab.git
-cd blockchain-chain-lab
-
-go test ./...
-go run ./cmd/chainlab demo
+go build -o .\bin\chainlab.exe .\cmd\chainlab
+$data = Join-Path $env:LOCALAPPDATA "ChainLab\solo"
+.\bin\chainlab.exe desktop init --data-dir $data --chain-id chainlab-solo
+.\bin\chainlab.exe desktop start --data-dir $data
 ```
 
-内置 demo 无需外部服务，会覆盖转账、赞助、批处理、智能账户、多签、Native 合约、WASM 上传/部署/调用、Token 状态和质押。
-
-## 启动本地 Explorer
-
-创建公开 genesis 数据和独立、不可覆盖的开发密钥文件：
+保持 start 终端开启，并访问 `http://127.0.0.1:8547/`。在另一个终端执行：
 
 ```powershell
-go run ./cmd/chainlab init `
-  --out config/genesis.json `
-  --key-out config/validator-1-key.json
-
-go run ./cmd/chainlab node `
-  --genesis config/genesis.json `
-  --key-file config/validator-1-key.json `
-  --listen :8547 `
-  --data-dir data/localnet
+.\bin\chainlab.exe desktop status --data-dir $data
+.\bin\chainlab.exe desktop stop --data-dir $data
 ```
 
-打开 [http://127.0.0.1:8547/explorer](http://127.0.0.1:8547/explorer)。
+用同一数据目录重启会保留 chain ID、高度、app hash、余额、nonce 和交易回执。第二个目录所有者会被拒绝。强制结束进程会留下 runtime 记录，但操作系统锁会释放；下次启动会校验并恢复已有存储。
 
-生成密钥仅用于隔离开发。密钥文件被 Git 忽略并以 exclusive-create 方式创建，绝不能用于生产托管。
+家庭验证者、observer、备份、恢复、更新和卸载命令见 [Desktop Quick Start](docs/desktop-quick-start.md)。
 
-常用命令：
+## 公开邀请
+
+每名运营者只在本机生成密钥，对外仅分享 `identity.json`：
 
 ```powershell
-go run ./cmd/chainlab query head
-go run ./cmd/chainlab query fees
-go run ./cmd/chainlab query mempool
-go run ./cmd/chainlab chain produce
+chainlab desktop identity --data-dir D:\ChainLab\validator-0 --role validator --name validator-0 --p2p-address 192.168.1.10:26680
 ```
 
-## 启动四验证者网络
-
-生成四套独立 CometBFT home：
+协调者将恰好四份公开身份组合成有大小上限、规范编码并带 SHA-256 的 invitation。它只包含 chain/profile 元数据、规范 genesis、公钥、公开 P2P 身份和地址，不包含验证者、P2P、账户或服务私钥。
 
 ```powershell
-go run ./cmd/chainlab-comet init `
-  --out data/comet-private `
-  --chain-id chainlab-private
+chainlab desktop invitation --out invitation.json --chain-id chainlab-home --network-name "Home Network" --identity validator-0.json --identity validator-1.json --identity validator-2.json --identity validator-3.json
+chainlab desktop join --data-dir D:\ChainLab\validator-0 --invitation invitation.json
 ```
 
-启动 `node0` 的 application 与 Comet 进程：
+checksum 篡改、错误链 genesis、重复身份/地址、未知字段、不安全地址、非成员验证者，以及包含验证者签名材料的 observer 都会 fail closed。
+
+## 存储与恢复
+
+桌面 profile 保留 120,961 个应用高度，并请求 Comet 保留同样数量的区块。在五秒出块 cadence 下，这覆盖协议的 100,000 块或 7 天证据窗口后才开始裁剪。`desktop status` 会展示 profile、当前 retained range、数据路径、磁盘字节数和最近备份元数据。
 
 ```powershell
-go run ./cmd/chainlab-abci `
-  --genesis data/comet-private/node0/config/chainlab-genesis.json `
-  --data-dir data/comet-private/node0/data/chainlab-app `
-  --listen tcp://127.0.0.1:26658
-
-go run ./cmd/chainlab-comet node --home data/comet-private/node0
+chainlab desktop stop --data-dir $data
+chainlab desktop backup --data-dir $data --out D:\Backups\chainlab-solo.zip
+chainlab desktop verify --data-dir $data --chain-id chainlab-solo
+chainlab desktop restore --backup D:\Backups\chainlab-solo.zip --data-dir D:\ChainLab\restored --chain-id chainlab-solo
 ```
 
-按照 `network.json` 中的地址为 `node1` 到 `node3` 重复启动。生成网络包含独立 validator/P2P identity、full-mesh peer topology、有界连续出块，以及每节点一个 single-writer Pebble 应用数据库。
+备份包含私密签名材料，必须按 secret 保存。每个普通文件都记录规范路径、大小、权限和 SHA-256。恢复先解压到 staging，拒绝路径穿越、symlink、重复、损坏、错误链和不兼容材料；Comet 与 Pebble 全部验证通过后才原子发布目标目录。
 
-自动化真实进程证据：
+## 已实现协议能力
 
-```powershell
-go test ./internal/cometnode -count=1
-```
+- 确定性账户、费用、EIP-1559 风格 type-2 交易、typed raw transaction、receipt、log、mempool replacement、future nonce 队列、session key、delegated EOA 和社交恢复；
+- 原生 account/token/counter 合约，以及对模块大小、内存、fuel、调用深度和 host API 有明确上限的确定性 WASM；
+- CometBFT ABCI++ proposal、vote extension、evidence、state sync、block sync、quorum halt/recovery、验证者生命周期，以及到 ChainLab V5 的 fail-closed 升级；
+- Pebble 原子状态、mutation delta、checkpoint、sparse proof、历史查询、snapshot、backup、compaction、完整性验证和重启恢复；
+- 有界 RPC、WebSocket subscription、filter、query、txpool 和 loopback Desktop Explorer。
 
-精确测试边界见 [CometBFT 故障网络证据](docs/chainlab-comet-fault-network.md)。
+本地 PoA harness 只用于开发和 differential test；CometBFT 才是权威多机路径。
 
-## 存储模式
+## 资源证据
 
-| 模式 | 保留契约 |
-|---|---|
-| `archive` | 保留所有本地可用高度 |
-| `full` | 从 checkpoint 边界保留配置的近期窗口 |
-| `pruned` | 只保留最新 committed height |
+消费者目标是 Windows 10/11 amd64、四个逻辑核、8 GiB 内存和 100 GiB 可用 SSD。只有同时给出准确机器、持续时间、高度增量和 artifact 的结果才算证据，见 [Desktop Resource Evidence](docs/desktop-resource-evidence-2026-07-13.md)。
 
-```powershell
-go run ./cmd/chainlab-abci --genesis genesis.json --data-dir app-data --storage-mode archive
-go run ./cmd/chainlab-abci --genesis genesis.json --data-dir app-data --storage-mode full --retain-heights 50000 --checkpoint-interval 500
-go run ./cmd/chainlab-abci --genesis genesis.json --data-dir app-data --storage-mode pruned
-```
-
-精确定义见 [Application Store V2](docs/chainlab-application-storage-v2.md)。
+当前开发机是 Windows 11 amd64、Intel i5-14400F（10 核/16 逻辑处理器）、47.79 GiB 可见内存和 NTFS 存储。该机器的测量不能证明 4 核/8 GiB 目标。没有完成对应运行前，不声明 24 小时、10,000 块或长期资源表现。
 
 ## 验证
-
-仓库当前在 Go 1.25.12 / Windows amd64 上通过：
 
 ```powershell
 go test -count=1 ./...
@@ -184,58 +102,39 @@ go test -race -short -count=1 ./...
 go vet ./...
 go build ./cmd/...
 go run ./cmd/chainlab demo
-go mod tidy -diff
+git diff --check
 ```
 
-完整测试包含确定性执行、重启/损坏边界、proof/upgrade、资源上限和真实多进程 CometBFT 网络。这是强开发证据，但不能替代 Linux 发布资格、持续负载、外部审计或公共对抗测试网。
+发布 gate 还包括隔离的五进程 validator/observer 流程、Markdown/link 检查、桌面/移动端浏览器验证、Windows/Linux 打包、SHA-256 校验，以及使用干净 module cache 的 Linux `go mod verify`。
 
-## 生产边界
+## 发布打包
 
-| 当前已实现并验证 | 公共主网上线前仍需完成 |
-|---|---|
-| 确定性应用重放与有界执行 | 固定 Linux/amd64 replay、fuzz/property/load/soak、JIT/RSS 硬证据 |
-| CometBFT ABCI++ 私网和故障恢复 | 动态 packet fault、非对称分区、更广 Byzantine 行为、Comet binary rolling drill |
-| runtime certified admission 和 evidence removal | re-entry、运行期 power change、主动退出、reward/slashing economics、key rotation |
-| Pebble 原子历史、快照、备份和证明 | 运维恢复演练、外部 rollback protection、生产容量证据 |
-| genesis-scheduled V2–V5 upgrade | runtime-authorized upgrade、签名兼容 manifest、rollback policy |
-| 有界 RPC、Filter、WebSocket、CLI、Explorer | principal-aware 限流、生产 indexer/wallet/SDK、metrics、alert、audit log |
-| 开发密钥分离与进程锁 | Remote signer/HSM、monotonic last-sign recovery、operator security runbook |
-| 内部自动安全/故障测试 | 可复现 release、SBOM/provenance、独立安全与共识审计 |
+```powershell
+.\scripts\package-windows.ps1 -Version v0.1.0
+```
 
-治理交易名称已预留，但会在 admission 前 fail closed。ChainLab 不声称通用 EVM 执行兼容、正式 ERC-4337/EIP-7702 兼容、生产 Token 经济、官方稳定币可用或主网就绪。
+```bash
+scripts/package-linux.sh v0.1.0
+```
+
+`chainlab version` 输出版本、commit、构建时间、Go 版本、操作系统和架构。卸载默认只移除程序包，绝不会自动删除用户数据。
+
+## 延后的公共主网门槛
+
+Desktop v0.1 不包含 permissionless membership、验证者奖励、完整质押经济、treasury、公共治理、remote signer/HSM、sentry/多区域运维、官方稳定币、法币入口、交易所/桥/oracle 集成、金融托管、金融级灾难恢复或公共主网可用性承诺。
+
+延后要求保留在 [Mainstream Chain Capability And Production Gates](docs/mainstream-chain-capability-and-production-gates-2026-07-10.md)。在 ChainLab 支持陌生人、真实价值资产、兑换承诺或公共金融网络前，必须显式重新启用这些门槛。
 
 ## 文档
 
-| 文档 | 用途 |
+| 文档 | 范围 |
 |---|---|
-| [生产完成门槛](docs/mainstream-chain-capability-and-production-gates-2026-07-10.md) | 权威完成标准与上游参考 |
-| [技术路线图](docs/current-blockchain-tech-roadmap.md) | 有序实施路径 |
-| [进度与下一步](docs/chainlab-progress-and-next-steps-2026-07-10.md) | 已验证里程碑和当前阻塞 |
-| [验证者生命周期](docs/chainlab-v2-validator-lifecycle.md) | V2 identity、evidence、admission、epoch 和 unbonding 规则 |
-| [CometBFT 故障网络](docs/chainlab-comet-fault-network.md) | 真实进程 availability/fault 证据 |
-| [Application Store V2](docs/chainlab-application-storage-v2.md) | 原子布局、retention、migration、backup 和 recovery |
-| [V3 Proof 与 Upgrade](docs/chainlab-v3-proofs-and-upgrades.md) | 定时激活和精确总量证明 |
-| [V4 Sparse State](docs/chainlab-v4-sparse-state.md) | mutation-aware sparse 成员/非成员证明 |
-| [V5 Offence Retention](docs/chainlab-v5-offence-retention.md) | timestamped offence 压缩规则 |
-
-## 仓库结构
-
-```text
-cmd/                 CLI、ABCI server、proof verifier、Comet network tool
-internal/abci/       ABCI++ application 与 protocol lifecycle
-internal/cometnode/  network generation 与真实进程证据
-internal/core/       确定性 transaction execution 与 fee settlement
-internal/contracts/  Native 和 Wasmtime contract runtime
-internal/state/      canonical state 与 validator lifecycle
-internal/node/       本地 PoA 开发 harness 与 persistence
-internal/rpc/        REST、JSON-RPC、WebSocket、Filter 与 Explorer
-internal/types/      canonical protocol schema 与 raw envelope
-pkg/proof/           独立 proof verification
-docs/                协议契约、证据和生产门槛
-```
-
----
-
-<div align="center">
-  <strong>只构建可以重放的系统，只声明已经验证的能力。</strong>
-</div>
+| [Desktop Quick Start](docs/desktop-quick-start.md) | 生命周期、可信家庭网络、observer、恢复、更新、卸载 |
+| [Progress And Next Steps](docs/chainlab-progress-and-next-steps-2026-07-10.md) | 桌面优先决策、完成审计、实现证据 |
+| [Desktop Resource Evidence](docs/desktop-resource-evidence-2026-07-13.md) | 机器规格、命令、持续时间、资源 artifact |
+| [Application Store V2](docs/chainlab-application-storage-v2.md) | 原子存储、retention、migration、backup、recovery |
+| [Comet Fault Network](docs/chainlab-comet-fault-network.md) | quorum loss、partition、delay、proposal、evidence 保证 |
+| [V2 Validator Lifecycle](docs/chainlab-v2-validator-lifecycle.md) | 验证者身份和生命周期契约 |
+| [V3 Proofs And Upgrades](docs/chainlab-v3-proofs-and-upgrades.md) | 协议升级和 inclusion proof |
+| [V4 Sparse State](docs/chainlab-v4-sparse-state.md) | Sparse membership/non-membership proof |
+| [V5 Offence Retention](docs/chainlab-v5-offence-retention.md) | 认证 offence retention 与 compaction |

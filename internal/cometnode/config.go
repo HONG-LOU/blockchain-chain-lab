@@ -20,6 +20,7 @@ import (
 	chaintypes "chainlab/internal/types"
 
 	cmtcfg "github.com/cometbft/cometbft/config"
+	cmtcrypto "github.com/cometbft/cometbft/crypto"
 	cmtsecp256k1 "github.com/cometbft/cometbft/crypto/secp256k1"
 	cmtflags "github.com/cometbft/cometbft/libs/cli/flags"
 	cmtjson "github.com/cometbft/cometbft/libs/json"
@@ -27,11 +28,13 @@ import (
 	"github.com/cometbft/cometbft/node"
 	"github.com/cometbft/cometbft/p2p"
 	"github.com/cometbft/cometbft/privval"
+	cmtproto "github.com/cometbft/cometbft/proto/tendermint/types"
+	"github.com/cometbft/cometbft/proxy"
 	cmttypes "github.com/cometbft/cometbft/types"
 )
 
 const (
-	NodeProtocol          = "chainlab-comet-node-v1"
+	NodeProtocol          = "chainlab-comet-node-v2"
 	NodeDocumentPath      = "config/chainlab-node.json"
 	AppGenesisPath        = "config/chainlab-genesis.json"
 	AppDataPath           = "data/chainlab-app"
@@ -42,19 +45,34 @@ const (
 	maxNodeKeyBytes       = 16 * 1024
 )
 
+type NodeRole string
+
+const (
+	RoleValidator NodeRole = "validator"
+	RoleObserver  NodeRole = "observer"
+)
+
 type NodeDocument struct {
-	Protocol           string `json:"protocol"`
-	ChainID            string `json:"chain_id"`
-	Moniker            string `json:"moniker"`
-	ProxyApp           string `json:"proxy_app"`
-	RPCListenAddress   string `json:"rpc_listen_address"`
-	P2PListenAddress   string `json:"p2p_listen_address"`
-	PersistentPeers    string `json:"persistent_peers"`
-	ApplicationGenesis string `json:"application_genesis"`
+	Protocol           string   `json:"protocol"`
+	Role               NodeRole `json:"role"`
+	ChainID            string   `json:"chain_id"`
+	Moniker            string   `json:"moniker"`
+	ProxyApp           string   `json:"proxy_app"`
+	RPCListenAddress   string   `json:"rpc_listen_address"`
+	P2PListenAddress   string   `json:"p2p_listen_address"`
+	PersistentPeers    string   `json:"persistent_peers"`
+	ApplicationGenesis string   `json:"application_genesis"`
 }
 
 type RunOptions struct {
 	StateSync *StateSyncOptions
+	Consensus *ConsensusOptions
+}
+
+type ConsensusOptions struct {
+	CreateEmptyBlocks         bool
+	CreateEmptyBlocksInterval time.Duration
+	TimeoutCommit             time.Duration
 }
 
 type StateSyncOptions struct {
@@ -187,12 +205,22 @@ func RunWithOptions(ctx context.Context, home string, out io.Writer, options Run
 			return err
 		}
 	}
+	if options.Consensus != nil {
+		if err := applyConsensusOptions(config, *options.Consensus); err != nil {
+			return err
+		}
+	}
 	baseLogger := cmtlog.NewTMLogger(cmtlog.NewSyncWriter(out))
 	logger, err := cmtflags.ParseLogLevel(config.LogLevel, baseLogger, cmtcfg.DefaultLogLevel)
 	if err != nil {
 		return fmt.Errorf("parse CometBFT log level: %w", err)
 	}
-	cometNode, err := node.DefaultNewNode(config, logger)
+	var cometNode *node.Node
+	if document.Role == RoleObserver {
+		cometNode, err = newObserverNode(config, logger)
+	} else {
+		cometNode, err = node.DefaultNewNode(config, logger)
+	}
 	if err != nil {
 		return fmt.Errorf("create CometBFT node: %w", err)
 	}
@@ -209,6 +237,58 @@ func RunWithOptions(ctx context.Context, home string, out io.Writer, options Run
 	case <-cometNode.Quit():
 		return errors.New("CometBFT node stopped unexpectedly")
 	}
+}
+
+type observerPrivValidator struct {
+	publicKey cmtcrypto.PubKey
+}
+
+func (validator observerPrivValidator) GetPubKey() (cmtcrypto.PubKey, error) {
+	return validator.publicKey, nil
+}
+
+func (observerPrivValidator) SignVote(string, *cmtproto.Vote) error {
+	return errors.New("observer nodes cannot sign votes")
+}
+
+func (observerPrivValidator) SignProposal(string, *cmtproto.Proposal) error {
+	return errors.New("observer nodes cannot sign proposals")
+}
+
+func newObserverNode(config *cmtcfg.Config, logger cmtlog.Logger) (*node.Node, error) {
+	nodeKey, err := p2p.LoadNodeKey(config.NodeKeyFile())
+	if err != nil {
+		return nil, fmt.Errorf("load observer P2P node key: %w", err)
+	}
+	return node.NewNode(
+		config,
+		observerPrivValidator{publicKey: nodeKey.PrivKey.PubKey()},
+		nodeKey,
+		proxy.DefaultClientCreator(config.ProxyApp, config.ABCI, config.DBDir()),
+		node.DefaultGenesisDocProviderFunc(config),
+		cmtcfg.DefaultDBProvider,
+		node.DefaultMetricsProvider(config.Instrumentation),
+		logger,
+	)
+}
+
+func applyConsensusOptions(config *cmtcfg.Config, options ConsensusOptions) error {
+	if options.CreateEmptyBlocksInterval < 0 {
+		return errors.New("empty-block interval must not be negative")
+	}
+	if options.CreateEmptyBlocks && options.CreateEmptyBlocksInterval == 0 {
+		return errors.New("managed empty blocks require a positive interval")
+	}
+	if options.TimeoutCommit <= 0 {
+		return errors.New("managed commit timeout must be positive")
+	}
+	config.Consensus.CreateEmptyBlocks = options.CreateEmptyBlocks
+	config.Consensus.CreateEmptyBlocksInterval = options.CreateEmptyBlocksInterval
+	config.Consensus.TimeoutCommit = options.TimeoutCommit
+	if err := config.ValidateBasic(); err != nil {
+		return fmt.Errorf("validate managed consensus options: %w", err)
+	}
+	return nil
 }
 
 func applyStateSyncOptions(config *cmtcfg.Config, options StateSyncOptions) error {
@@ -247,6 +327,9 @@ func applyStateSyncOptions(config *cmtcfg.Config, options StateSyncOptions) erro
 func validateNodeDocument(document NodeDocument) error {
 	if document.Protocol != NodeProtocol {
 		return fmt.Errorf("node protocol must be %q", NodeProtocol)
+	}
+	if document.Role != RoleValidator && document.Role != RoleObserver {
+		return errors.New("node role must be validator or observer")
 	}
 	if err := chaintypes.ValidateChainID(document.ChainID); err != nil {
 		return fmt.Errorf("invalid chain id: %w", err)
@@ -342,6 +425,16 @@ func validateNodeFiles(config *cmtcfg.Config, document NodeDocument) error {
 		return errors.New("application genesis file does not match CometBFT app state")
 	}
 
+	if document.Role == RoleObserver {
+		for _, path := range []string{config.PrivValidatorKeyFile(), config.PrivValidatorStateFile()} {
+			if _, err := os.Lstat(path); err == nil {
+				return errors.New("observer home must not contain private validator key or signing state")
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("inspect observer validator material: %w", err)
+			}
+		}
+		return validateP2PNodeKey(config)
+	}
 	keyRaw, err := readRegularFile(config.PrivValidatorKeyFile(), maxPrivateKeyBytes, "private validator key")
 	if err != nil {
 		return err
@@ -379,6 +472,10 @@ func validateNodeFiles(config *cmtcfg.Config, document NodeDocument) error {
 	if signState.Height < 0 || signState.Round < 0 || signState.Step < 0 || signState.Step > 3 {
 		return errors.New("private validator state has an invalid height/round/step")
 	}
+	return validateP2PNodeKey(config)
+}
+
+func validateP2PNodeKey(config *cmtcfg.Config) error {
 	if _, err := readRegularFile(config.NodeKeyFile(), maxNodeKeyBytes, "P2P node key"); err != nil {
 		return err
 	}

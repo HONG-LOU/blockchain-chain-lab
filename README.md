@@ -1,182 +1,100 @@
-<p align="right">
-  <strong>English</strong> · <a href="./README.zh-CN.md">简体中文</a>
+# ChainLab
+
+<p align="center">
+  <strong>Experimental self-hosted blockchain nodes for desktops and trusted small communities.</strong>
 </p>
 
-<div align="center">
-  <h1>ChainLab</h1>
-  <p><strong>A verifiable sovereign blockchain stack, built in Go.</strong></p>
-  <p>
-    Deterministic execution · CometBFT ABCI++ · Pebble state · Native and WASM contracts · Authenticated proofs
-  </p>
-  <p>
-    <a href="https://go.dev/doc/devel/release#go1.25.0"><img alt="Go 1.25.12" src="https://img.shields.io/badge/Go-1.25.12-00ADD8?logo=go&logoColor=white"></a>
-    <a href="https://github.com/cometbft/cometbft/releases/tag/v0.39.3"><img alt="CometBFT 0.39.3" src="https://img.shields.io/badge/CometBFT-0.39.3-111827"></a>
-    <img alt="Stage: private network" src="https://img.shields.io/badge/stage-private_network-0F766E">
-    <img alt="Mainnet: not ready" src="https://img.shields.io/badge/mainnet-not_ready-B45309">
-  </p>
-</div>
+<p align="center">
+  <img alt="Go 1.25.12" src="https://img.shields.io/badge/Go-1.25.12-00ADD8?logo=go&logoColor=white">
+  <img alt="Desktop target" src="https://img.shields.io/badge/target-desktop_%2F_community-1D6F42">
+  <img alt="Public mainnet deferred" src="https://img.shields.io/badge/public_mainnet-deferred-B45309">
+</p>
 
-> [!WARNING]
-> ChainLab is in active development and private-network validation. It has not been externally audited or approved for public mainnet deployment, production validator custody, or real assets.
+[简体中文](README.zh-CN.md)
 
-## Overview
+ChainLab combines a deterministic ABCI++ application, CometBFT consensus, transactional Pebble storage, and a single desktop lifecycle. One `chainlab` process owns the application, consensus node, lifecycle control endpoint, and local Explorer together.
 
-ChainLab is a production-oriented sovereign blockchain protocol and ABCI++ application. It owns its deterministic state transition, accounts, fees, contracts, validator lifecycle, proofs, and upgrade semantics while integrating CometBFT for Byzantine consensus and Pebble for transactional state history.
+This repository is experimental software. Native balances, stake, contract tokens, and demo assets are test units or community points. They have no promised market value, fiat redemption, issuer backing, yield, custody, guaranteed uptime, or guaranteed permanence. ChainLab is not ready for public mainnet or valuable assets.
 
-The repository contains two deliberately separate execution environments:
+## Release Profiles
 
-- a fast local PoA harness for application replay, CLI workflows, fork/finality-lock experiments, and developer tooling;
-- a real four-validator CometBFT network for authoritative ABCI++ lifecycle, P2P, proposal rounds, evidence, block sync, state sync, validator transitions, and fault recovery.
+| Profile | Purpose | Signing authority | Default exposure |
+|---|---|---|---|
+| `desktop-solo` | One private network on one computer | One local development validator | ABCI, RPC, lifecycle control, P2P, and Explorer on loopback |
+| `home-validator` | Four explicitly invited trusted operators | One locally generated validator identity per operator | RPC/control/Explorer on loopback; P2P on the explicit advertised LAN/public address |
+| `observer` | Sync, verify, query, serve Explorer, and broadcast | No validator key or signing state | RPC/control/Explorer on loopback; P2P on the explicit advertised address |
 
-The local harness is not presented as production consensus. The CometBFT path is the production direction, but the remaining release, operations, economics, and security gates are explicit and still open.
-
-## Architecture
-
-```mermaid
-flowchart TB
-    U[Wallets · SDKs · Operators]
-    R[REST · EVM-shaped JSON-RPC · WebSocket · Explorer]
-    A[ChainLab ABCI++ Application]
-    E[Deterministic Execution<br/>Accounts · Fees · Native · WASM]
-    C[CometBFT<br/>Consensus · P2P · Evidence · Sync]
-    S[Pebble Store V2<br/>History · Snapshots · Proofs]
-
-    U --> R --> A
-    A --> E
-    C <--> A
-    A --> S
-```
-
-| Layer | Implemented surface |
-|---|---|
-| Consensus | CometBFT v0.39.3 ABCI++, four-validator private networks, proposal replay, evidence, block/state sync, epoch updates |
-| Execution | Canonical transactions, EIP-1559-style fees, included-failure settlement, native contracts, metered Wasmtime WASM |
-| Accounts | EOAs, paymasters, atomic batches, `account.v1`, `multisig.v1`, delegated EOAs, session keys, guardian recovery |
-| State | Atomic Pebble commits, incremental deltas/checkpoints, archive/full/pruned profiles, backup and verified snapshots |
-| Verifiability | Transaction, receipt, and state roots; exact-total and sparse membership/non-membership proofs; standalone verifier |
-| Interfaces | CLI, REST, EVM-shaped JSON-RPC subsets, filters, WebSocket subscriptions, bounded local explorer |
-
-## What Works Today
-
-### Protocol and execution
-
-- secp256k1 signatures, Ethereum-style 20-byte addresses, balances, nonces, stake, account storage, and deterministic roots;
-- transfers, EIP-1559-style fee caps, base-fee burn, proposer priority fees, paymaster sponsorship, and up to 128 atomic batch operations;
-- deterministic included failures: business writes roll back while nonce and actual gas settlement remain committed; out-of-gas consumes the full gas limit;
-- sealed `chainlab-native-v1` metering and version-pinned Wasmtime execution with deterministic fuel, bounded memory/tables, bounded host I/O, and atomic rollback;
-- ChainLab-native smart accounts, threshold multisig, delegated EOA experiments, transfer/call session policies, and delayed social recovery.
-
-### Consensus and validator lifecycle
-
-- strict `Info`, `Query`, `CheckTx`, proposal, finalize, commit, vote-extension, snapshot, and state-sync boundaries;
-- real 3-of-4 progress, deterministic 2-of-4 halt, symmetric 2+2 partition/heal, missing/delayed/invalid proposer recovery, restart, replay, block sync, and destructive-data state sync;
-- Comet-verified duplicate-vote, same-height light-client equivocation, and cross-height forward-lunatic evidence followed by epoch removal;
-- genesis-certified and runtime-certified stake-derived validator admission with quorum authorization, committed-root binding, gas-metered certificates, `H+2` updates, and real multi-process transition evidence;
-- optional evidence-removal unbonding and V5 offence retention. Re-entry, runtime power changes, voluntary leave, rewards, and key operations remain incomplete.
-
-### Storage, upgrades, and proofs
-
-- one synchronized Pebble batch per height for state, results, commitments, indexes, history metadata, and current pointer;
-- flat live state plus mutation-derived deltas and checkpoints, deterministic migration, compaction, consistent backups, integrity validation, and verified snapshot restore;
-- genesis-committed `chainlab-v2 → chainlab-v3 → chainlab-v4 → chainlab-v5` activation;
-- V3 exact-total transaction/receipt/state roots, V4 mutation-aware sparse state, and V5 safe compaction for timestamped validator offences;
-- standalone trusted-root proof verification for current and retained mixed-version history.
+CometBFT does not provide automatic NAT traversal. LAN operation requires reachable local addresses and firewall rules. Different homes require explicit public addresses and port forwarding, or an independently operated overlay. No undocumented hosted seed or relay is required.
 
 ## Quick Start
 
-### Prerequisite
-
-Go **1.25.12** is the minimum supported toolchain. The patch version is security-sensitive because older Go 1.25 standard libraries contain vulnerabilities reachable from HTTP, TLS, URL, and template paths used by this project.
+Requirements for source builds: Go 1.25.12 and Git. Windows amd64 and Linux amd64 release packages include the executable, this README, the Chinese README, Quick Start, version metadata, and SHA-256 files.
 
 ```powershell
-git clone https://github.com/HONG-LOU/blockchain-chain-lab.git
-cd blockchain-chain-lab
-
-go test ./...
-go run ./cmd/chainlab demo
+go build -o .\bin\chainlab.exe .\cmd\chainlab
+$data = Join-Path $env:LOCALAPPDATA "ChainLab\solo"
+.\bin\chainlab.exe desktop init --data-dir $data --chain-id chainlab-solo
+.\bin\chainlab.exe desktop start --data-dir $data
 ```
 
-The demo exercises transfers, sponsorship, batching, smart accounts, multisig, native contracts, WASM upload/deploy/call, token state, and staking without requiring external services.
-
-## Run a Local Explorer
-
-Create public genesis data and a separate non-overwriting development key file:
+Keep the start terminal open. Open `http://127.0.0.1:8547/`. From another terminal:
 
 ```powershell
-go run ./cmd/chainlab init `
-  --out config/genesis.json `
-  --key-out config/validator-1-key.json
-
-go run ./cmd/chainlab node `
-  --genesis config/genesis.json `
-  --key-file config/validator-1-key.json `
-  --listen :8547 `
-  --data-dir data/localnet
+.\bin\chainlab.exe desktop status --data-dir $data
+.\bin\chainlab.exe desktop stop --data-dir $data
 ```
 
-Open [http://127.0.0.1:8547/explorer](http://127.0.0.1:8547/explorer).
+Restarting the same data directory preserves chain ID, height, application hash, balances, nonces, and transaction receipts. A second owner is rejected. Forced process termination leaves a stale runtime record but the operating-system lock is released; the next start verifies and recovers the existing stores.
 
-Generated keys are for isolated development only. Key files are excluded from Git, created with exclusive-create semantics, and must never be used for production custody.
+See [Desktop Quick Start](docs/desktop-quick-start.md) for home-validator, observer, backup, restore, update, and uninstall commands.
 
-Useful commands:
+## Public Invitations
+
+Every operator creates keys locally and shares only `identity.json`:
 
 ```powershell
-go run ./cmd/chainlab query head
-go run ./cmd/chainlab query fees
-go run ./cmd/chainlab query mempool
-go run ./cmd/chainlab chain produce
+chainlab desktop identity --data-dir D:\ChainLab\validator-0 --role validator --name validator-0 --p2p-address 192.168.1.10:26680
 ```
 
-## Run a Four-Validator Network
-
-Generate four independent CometBFT homes:
+One coordinator combines exactly four public identities into a bounded, canonical, SHA-256-protected invitation. The invitation contains chain/profile metadata, canonical genesis bytes, public validator keys, public P2P identities, and advertised addresses. It contains no validator, P2P, account, or service private key.
 
 ```powershell
-go run ./cmd/chainlab-comet init `
-  --out data/comet-private `
-  --chain-id chainlab-private
+chainlab desktop invitation --out invitation.json --chain-id chainlab-home --network-name "Home Network" --identity validator-0.json --identity validator-1.json --identity validator-2.json --identity validator-3.json
+chainlab desktop join --data-dir D:\ChainLab\validator-0 --invitation invitation.json
 ```
 
-Start the application and Comet process for `node0`:
+Tampered checksums, wrong-chain genesis, duplicate identities/addresses, unknown fields, unsafe advertised addresses, non-members, and observer directories containing validator signing material fail closed.
+
+## Storage And Recovery
+
+Desktop profiles retain 120,961 application heights and request the same Comet block retention. At the five-second block cadence this covers the protocol's 100,000-block or seven-day evidence window before pruning. The status output reports the configured profile, current retained range, data path, disk bytes, and latest backup metadata.
 
 ```powershell
-go run ./cmd/chainlab-abci `
-  --genesis data/comet-private/node0/config/chainlab-genesis.json `
-  --data-dir data/comet-private/node0/data/chainlab-app `
-  --listen tcp://127.0.0.1:26658
-
-go run ./cmd/chainlab-comet node --home data/comet-private/node0
+chainlab desktop stop --data-dir $data
+chainlab desktop backup --data-dir $data --out D:\Backups\chainlab-solo.zip
+chainlab desktop verify --data-dir $data --chain-id chainlab-solo
+chainlab desktop restore --backup D:\Backups\chainlab-solo.zip --data-dir D:\ChainLab\restored --chain-id chainlab-solo
 ```
 
-Repeat for `node1` through `node3` using the addresses in `network.json`. The generated network uses independent validator and P2P identities, a full-mesh peer topology, bounded continuous blocks, and one single-writer Pebble application database per node.
+Backups include private signing material and must be stored as secrets. Each regular file is bounded and recorded with canonical path, size, mode, and SHA-256. Restore extracts into a staging directory, rejects traversal/symlinks/duplicates/corruption/wrong-chain/incompatible material, validates Comet and Pebble state, and publishes only after every check passes.
 
-For automated process evidence:
+## Implemented Protocol
 
-```powershell
-go test ./internal/cometnode -count=1
-```
+- deterministic accounts, fees, EIP-1559-style type-2 transactions, typed raw transactions, receipts, logs, mempool replacement, queued nonces, session keys, delegated EOAs, and social recovery;
+- native account/token/counter contracts and deterministic metered WASM execution with bounded modules, memory, fuel, call depth, and host APIs;
+- CometBFT ABCI++ proposal processing, vote extensions, evidence handling, state sync, block sync, quorum halt/recovery, validator lifecycle, and fail-closed protocol upgrades through ChainLab V5;
+- atomic Pebble state, mutation-derived deltas, checkpoints, sparse proofs, historical reads, snapshots, backup, compaction, integrity validation, and restart recovery;
+- bounded RPC, WebSocket subscriptions, filters, queries, transaction pools, and a loopback desktop Explorer.
 
-See [CometBFT Fault Network Evidence](docs/chainlab-comet-fault-network.md) for the exact tested boundary.
+The local PoA harness remains a development/differential-test tool. CometBFT is the authoritative multi-computer path.
 
-## Storage Profiles
+## Resource Evidence
 
-| Profile | Retention contract |
-|---|---|
-| `archive` | Retain every locally available height |
-| `full` | Retain a configured recent window from a checkpoint boundary |
-| `pruned` | Retain only the latest committed height |
+The consumer target is Windows 10/11 amd64, four logical cores, 8 GiB RAM, and 100 GiB free SSD. Results are claims only when tied to the exact machine, duration, height delta, and artifacts in [Desktop Resource Evidence](docs/desktop-resource-evidence-2026-07-13.md).
 
-```powershell
-go run ./cmd/chainlab-abci --genesis genesis.json --data-dir app-data --storage-mode archive
-go run ./cmd/chainlab-abci --genesis genesis.json --data-dir app-data --storage-mode full --retain-heights 50000 --checkpoint-interval 500
-go run ./cmd/chainlab-abci --genesis genesis.json --data-dir app-data --storage-mode pruned
-```
-
-Read the precise guarantees in [Application Store V2](docs/chainlab-application-storage-v2.md).
+The current development host is Windows 11 amd64 with an Intel i5-14400F (10 cores/16 logical processors), 47.79 GiB visible RAM, and NTFS storage. Its measurements do not prove the 4-core/8-GiB target. No 24-hour, 10,000-block, or long-term resource claim is made without the corresponding completed run.
 
 ## Verification
-
-The repository currently passes the following local validation on Go 1.25.12 / Windows amd64:
 
 ```powershell
 go test -count=1 ./...
@@ -184,58 +102,39 @@ go test -race -short -count=1 ./...
 go vet ./...
 go build ./cmd/...
 go run ./cmd/chainlab demo
-go mod tidy -diff
+git diff --check
 ```
 
-The full suite includes deterministic execution, restart/corruption boundaries, proofs/upgrades, resource limits, and real multi-process CometBFT networks. This is strong development evidence, not a substitute for Linux release qualification, sustained load, external review, or a public adversarial testnet.
+The release gate also runs the isolated five-process validator/observer flow, Markdown/link checks, desktop/mobile browser validation, Windows packaging, Linux packaging, SHA-256 verification, and Linux `go mod verify` using a clean module cache.
 
-## Production Boundary
+## Release Packaging
 
-| Available and tested now | Required before public mainnet |
-|---|---|
-| Deterministic application replay and bounded execution | Pinned Linux/amd64 replay, fuzz/property/load/soak programs, hard JIT/RSS evidence |
-| CometBFT ABCI++ private networks and tested fault recovery | Dynamic packet faults, asymmetric partitions, broader Byzantine cases, Comet binary rolling drills |
-| Runtime-certified admission and evidence-driven removal | Re-entry, runtime power changes, voluntary leave, reward/slashing economics, key rotation |
-| Pebble atomic history, snapshots, backup, and proofs | Operational restore drills, external rollback protection, production capacity evidence |
-| Genesis-scheduled V2–V5 upgrades | Runtime-authorized upgrades, signed compatibility manifests, rollback policy |
-| Bounded RPC, filters, WebSocket, CLI, and explorer | Principal-aware limits, production indexer/wallet/SDK, metrics, alerts, audit logs |
-| Development key separation and process locking | Remote signer/HSM, monotonic last-sign recovery, operator security runbooks |
-| Internal automated security and fault tests | Reproducible release/SBOM/provenance and independent security/consensus review |
+```powershell
+.\scripts\package-windows.ps1 -Version v0.1.0
+```
 
-Governance transaction names are reserved but fail closed before admission. ChainLab does not claim general EVM execution compatibility, canonical ERC-4337/EIP-7702 compatibility, production token economics, official stablecoin availability, or mainnet readiness.
+```bash
+scripts/package-linux.sh v0.1.0
+```
+
+`chainlab version` reports version, commit, build time, Go version, OS, and architecture. Uninstall removes only the program package; user data is never deleted by default.
+
+## Deferred Public-Mainnet Gates
+
+Desktop v0.1 does not include permissionless membership, validator rewards, full staking economics, treasury, public governance, remote signer/HSM, sentry/multi-region operations, official stablecoins, fiat gateways, exchange/bridge/oracle integration, financial custody, financial-grade disaster recovery, or public-mainnet availability claims.
+
+The deferred requirements remain documented in [Mainstream Chain Capability And Production Gates](docs/mainstream-chain-capability-and-production-gates-2026-07-10.md). They must be explicitly reactivated before ChainLab supports strangers, valuable assets, redemption promises, or a public financial network.
 
 ## Documentation
 
-| Document | Purpose |
+| Document | Scope |
 |---|---|
-| [Production Gates](docs/mainstream-chain-capability-and-production-gates-2026-07-10.md) | Authoritative completion criteria and upstream references |
-| [Technology Roadmap](docs/current-blockchain-tech-roadmap.md) | Ordered implementation path |
-| [Progress and Next Steps](docs/chainlab-progress-and-next-steps-2026-07-10.md) | Verified milestones and current blockers |
-| [Validator Lifecycle](docs/chainlab-v2-validator-lifecycle.md) | V2 identity, evidence, admission, epoch, and unbonding rules |
-| [CometBFT Fault Network](docs/chainlab-comet-fault-network.md) | Exact real-process availability and fault evidence |
-| [Application Store V2](docs/chainlab-application-storage-v2.md) | Atomic layout, retention, migration, backup, and recovery |
-| [V3 Proofs and Upgrades](docs/chainlab-v3-proofs-and-upgrades.md) | Scheduled activation and exact-total proofs |
-| [V4 Sparse State](docs/chainlab-v4-sparse-state.md) | Mutation-aware sparse membership/non-membership |
-| [V5 Offence Retention](docs/chainlab-v5-offence-retention.md) | Timestamped offence compaction rules |
-
-## Repository Map
-
-```text
-cmd/                 CLI, ABCI server, proof verifier, Comet network tools
-internal/abci/       ABCI++ application and protocol lifecycle
-internal/cometnode/  Network generation and real-process evidence
-internal/core/       Deterministic transaction execution and fee settlement
-internal/contracts/  Native and Wasmtime contract runtimes
-internal/state/      Canonical state and validator lifecycle
-internal/node/       Local PoA development harness and persistence
-internal/rpc/        REST, JSON-RPC, WebSocket, filters, and explorer
-internal/types/      Canonical protocol schemas and raw envelopes
-pkg/proof/           Independent proof verification
-docs/                Protocol contracts, evidence, and production gates
-```
-
----
-
-<div align="center">
-  <strong>Build what can be replayed. Claim only what has been verified.</strong>
-</div>
+| [Desktop Quick Start](docs/desktop-quick-start.md) | Lifecycle, trusted-home join, observer, recovery, update, uninstall |
+| [Progress And Next Steps](docs/chainlab-progress-and-next-steps-2026-07-10.md) | Desktop-first decision, completion audit, implementation evidence |
+| [Desktop Resource Evidence](docs/desktop-resource-evidence-2026-07-13.md) | Machine specifications, commands, durations, resource artifacts |
+| [Application Store V2](docs/chainlab-application-storage-v2.md) | Atomic storage, retention, migration, backup, recovery |
+| [Comet Fault Network](docs/chainlab-comet-fault-network.md) | Quorum loss, partition, delay, proposal and evidence guarantees |
+| [V2 Validator Lifecycle](docs/chainlab-v2-validator-lifecycle.md) | Validator identity and lifecycle contract |
+| [V3 Proofs And Upgrades](docs/chainlab-v3-proofs-and-upgrades.md) | Protocol upgrades and inclusion proofs |
+| [V4 Sparse State](docs/chainlab-v4-sparse-state.md) | Sparse membership/non-membership proofs |
+| [V5 Offence Retention](docs/chainlab-v5-offence-retention.md) | Authenticated offence retention and compaction |
