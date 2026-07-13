@@ -13,7 +13,7 @@ This document records measurements, not estimates. Results apply only to the sta
 | Visible RAM | 51,318,800,384 bytes (47.79 GiB) |
 | Measurement volume | C:, NTFS, 644,036,972,544 bytes total, about 89.3 GB free during the runs |
 | Go | `go version go1.25.12 windows/amd64` |
-| Candidate | Windows amd64 `v0.1.0-dev` worktree candidate; final release artifacts must be rebuilt from a clean committed tree |
+| Candidate | Windows/Linux amd64 `v0.1.0-rc1`, commit `1cb93261a9404a65e5a471b243acb9017699d922` |
 
 The reference target remains Windows 10/11 amd64, four logical cores, 8 GiB RAM, and 100 GiB free SSD. This development host has materially more CPU and memory and therefore cannot close that hardware gate.
 
@@ -30,47 +30,58 @@ The PowerShell harness creates GUID-owned data below `%TEMP%`, starts the packag
 
 ## Solo Baseline
 
-Artifact: `output/desktop-measurements/20260713T052433Z-solo-13cbd474/measurement.json`
+Artifact: `output/desktop-measurements/20260713T060951Z-solo-172218ca/measurement.json`
 
-Artifact SHA-256: `849603597bf51885f428685c6bd52e8c80247c360d75d00c33b5018168c27b8e`
+Artifact SHA-256: `d55426278ea0ef0188edf595f44d1ab7852307dfba09fb4d38b58d7b54c27654`
 
 | Metric | Result |
 |---|---:|
 | Measured idle duration | 30 s |
-| Startup through committed height 1 | 6.224 s |
+| Startup through committed height 1 | 7.198 s |
 | Height | 1 to 7 (+6) |
-| Peak RSS | 53,383,168 bytes |
-| Steady sampled RSS average | 53,295,514 bytes |
-| CPU as percent of all 16 logical processors | 0.020% |
-| Data bytes growth | 60,221 bytes |
+| Peak RSS | 53,788,672 bytes |
+| Steady sampled RSS average | 53,675,008 bytes |
+| CPU as percent of all 16 logical processors | 0.039% |
+| Data bytes growth | 60,114 bytes |
 | Listening ports while running | 5, all `127.0.0.1` |
 | ChainLab-managed child processes | 0 |
 | Windows console-host processes from hidden measurement launcher | 1 `conhost.exe` |
 | Clean stop | process exited; 0 managed listeners; 0 runtime files |
 
-System-wide adapter delta was 5,126,488 received bytes and 5,882,604 sent bytes. This includes unrelated machine traffic and is not a process-isolated ChainLab network measurement, so it is not promoted as an idle-traffic claim.
+System-wide adapter delta was 7,360,320 received bytes and 8,906,112 sent bytes. This includes unrelated machine traffic and is not a process-isolated ChainLab network measurement, so it is not promoted as an idle-traffic claim.
 
 ## Four-Validator Baseline
 
-Artifact: `output/desktop-measurements/20260713T052535Z-four-validator-fd8543f6/measurement.json`
+Artifact: `output/desktop-measurements/20260713T061057Z-four-validator-33179304/measurement.json`
 
-Artifact SHA-256: `1695969b1e2a7f81691a63c25bf4c86f4c4a2ce9caee646b94814c2d352fea89`
+Artifact SHA-256: `8067dfe1e3a39bdd2723c356fe02473a3f048ee75048d9772fefc05b7df3829a`
 
 | Metric | Result |
 |---|---:|
 | Measured idle duration | 30 s |
-| Four nodes through committed height 1 | 6.981 s |
+| Four nodes through committed height 1 | 7.249 s |
 | Height delta per node | +6, +6, +6, +6 |
-| Maximum per-process peak RSS | 56,832,000 bytes |
-| Steady sampled per-process RSS average | 55,001,771 bytes |
-| Aggregate CPU as percent of all 16 logical processors | 0.247% |
-| Aggregate data bytes growth | 429,164 bytes |
+| Maximum per-process peak RSS | 60,018,688 bytes |
+| Steady sampled per-process RSS average | 56,330,069 bytes |
+| Aggregate CPU as percent of all 16 logical processors | 0.225% |
+| Aggregate data bytes growth | 421,120 bytes |
 | Listening ports while running | 20, all `127.0.0.1` |
 | ChainLab-managed child processes per node | 0 |
 | Windows console-host processes per hidden launcher | 1 `conhost.exe` |
 | Clean stop | all processes exited; 0 managed listeners; 0 runtime files |
 
-System-wide adapter delta was 4,877,849 received bytes and 4,371,894 sent bytes. It is retained as raw environmental context only.
+System-wide adapter delta was 6,230,182 received bytes and 9,547,259 sent bytes. It is retained as raw environmental context only.
+
+## RC Package Evidence
+
+Both packages report `v0.1.0-rc1` and commit `1cb93261a9404a65e5a471b243acb9017699d922` when executed on their target operating system.
+
+| Artifact | SHA-256 |
+|---|---|
+| Windows amd64 `chainlab.exe` | `746c510c4955b617feaad62400aaa78fa4b965c0795ac3ba0766ecbab0097bad` |
+| Windows amd64 zip | `b4573be5cc740e73237799d4460292fe708da9c10c33e317b54a5dfc38bb8e4b` |
+| Linux amd64 `chainlab` | `0f0fbb948e41b684dc98220382f31de5b938667f862b400ba81fb1feb1b97c3e` |
+| Linux amd64 tar.gz | `d9678986cef312158c845f22f9058105bcc77ad8f87663c3d056e83eb29da9fe` |
 
 ## 10,000-Block Storage Run
 
