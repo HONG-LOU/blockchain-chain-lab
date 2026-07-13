@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +21,7 @@ import (
 	"time"
 
 	chainabci "chainlab/internal/abci"
+	"chainlab/internal/core"
 	chaincrypto "chainlab/internal/crypto"
 	"chainlab/internal/state"
 	chaintypes "chainlab/internal/types"
@@ -28,6 +30,7 @@ import (
 	abciserver "github.com/cometbft/cometbft/abci/server"
 	abcitypes "github.com/cometbft/cometbft/abci/types"
 	cmtcrypto "github.com/cometbft/cometbft/crypto"
+	cmtsecp256k1 "github.com/cometbft/cometbft/crypto/secp256k1"
 	cmtjson "github.com/cometbft/cometbft/libs/json"
 	cmtlog "github.com/cometbft/cometbft/libs/log"
 	"github.com/cometbft/cometbft/privval"
@@ -812,6 +815,161 @@ func TestFourValidatorV2EvidenceSlashingAndEpochRemoval(t *testing.T) {
 	})
 }
 
+func TestFourValidatorV2RuntimeAdmission(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping multi-process CometBFT runtime-admission network in short mode")
+	}
+	if processRaceEnabled {
+		t.Skip("the process-boundary test is covered by the non-race run; package logic remains race-tested")
+	}
+	const epochLength = int64(10)
+	policy := chainabci.ValidatorPolicy{
+		EpochLength: epochLength, DuplicateVoteSlashBasisPoints: 5_000,
+		LightClientAttackSlashBasisPoints: 5_000, RuntimeAdmissions: true,
+		EvidenceMaxAgeNumBlocks: 1_000, EvidenceMaxAgeDurationNanos: int64(24 * time.Hour),
+	}
+	started := startFourValidatorV2ProcessNetwork(t, "chainlab-v2-runtime-admission", policy)
+	root, network, clients := started.root, started.document, started.clients
+
+	candidateKey, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := chaincrypto.AddressFromPrivateKey(candidateKey)
+	senderKey := loadChainPrivateValidatorKey(
+		t, filepath.Join(root, network.Nodes[0].Home, "config", "priv_validator_key.json"),
+	)
+	sender := chaincrypto.AddressFromPrivateKey(senderKey)
+	baselineHeight := waitForConsistentNetworkState(t, clients, 1, sender, 0, 45*time.Second)
+	broadcastTransfer(t, clients[0], senderKey, network.ChainID, sender, candidate, 0, 200_000)
+	fundedHeight := waitForConsistentNetworkState(t, clients, baselineHeight+1, sender, 1, 45*time.Second)
+	broadcastSignedTransaction(t, clients[0], candidateKey, chaintypes.Transaction{
+		ChainID: network.ChainID, Type: chaintypes.TxStake, From: candidate,
+		Nonce: 0, Value: state.ValidatorStakePerPower, GasLimit: 30_000, GasPrice: 1,
+	})
+	_ = waitForConsistentNetworkState(t, clients, fundedHeight+1, candidate, 1, 45*time.Second)
+
+	for _, index := range []int{2, 3} {
+		if err := started.cometNodes[index].stop(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	authorizationHeight := waitForStableNetworkHeight(t, clients[:2], 2*time.Second, 20*time.Second)
+	assertNetworkHeightUnchanged(t, clients[:2], authorizationHeight, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	appResult, err := clients[0].ABCIQuery(ctx, "/app", nil)
+	cancel()
+	if err != nil || appResult == nil || appResult.Response.Code != chainabci.CodeOK ||
+		appResult.Response.Height != authorizationHeight {
+		t.Fatalf("authorization app query=%+v err=%v", appResult, err)
+	}
+	var commitment struct {
+		ValidatorRoot string `json:"validator_root"`
+	}
+	if err := json.Unmarshal(appResult.Response.Value, &commitment); err != nil || commitment.ValidatorRoot == "" {
+		t.Fatalf("authorization commitment=%+v err=%v", commitment, err)
+	}
+	minimumActivation := authorizationHeight + 3
+	activeHeight := ((minimumActivation-1+epochLength-1)/epochLength)*epochLength + 1
+	publicKey := candidateKey.PubKey().SerializeCompressed()
+	certificate := core.RuntimeValidatorAdmissionCertificate{
+		AuthorizationHeight: authorizationHeight,
+		ValidatorRoot:       commitment.ValidatorRoot,
+		Identity: state.ValidatorIdentity{
+			Account: candidate, ConsensusAddress: hex.EncodeToString(cmtsecp256k1.PubKey(publicKey).Address()),
+			PublicKey: hex.EncodeToString(publicKey), Power: 1, ActiveHeight: activeHeight,
+		},
+	}
+	payload, err := core.RuntimeValidatorAdmissionSigningBytes(network.ChainID, certificate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, generatedNode := range network.Nodes {
+		key := loadChainPrivateValidatorKey(
+			t, filepath.Join(root, generatedNode.Home, "config", "priv_validator_key.json"),
+		)
+		signature, err := chaincrypto.Sign(key, payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		certificate.Signatures = append(certificate.Signatures, core.RuntimeValidatorAdmissionSignature{
+			Validator: chaincrypto.AddressFromPrivateKey(key), Signature: signature,
+		})
+	}
+	sort.Slice(certificate.Signatures, func(left int, right int) bool {
+		return certificate.Signatures[left].Validator < certificate.Signatures[right].Validator
+	})
+	encoded, err := core.EncodeRuntimeValidatorAdmission(certificate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	broadcastSignedTransaction(t, clients[0], candidateKey, chaintypes.Transaction{
+		ChainID: network.ChainID, Type: chaintypes.TxValidatorJoin, From: candidate,
+		Nonce: 1, GasLimit: 150_000, GasPrice: 1,
+		Payload: map[string]string{"certificate": encoded},
+	})
+	assertNetworkHeightUnchanged(t, clients[:2], authorizationHeight, time.Second)
+	restartValidatorV2CometNode(t, started, 2, "runtime-admission-comet-2")
+	waitForRPCReady(t, clients[:3], 30*time.Second)
+
+	updateHeight := activeHeight - 2
+	waitForCondition(t, 60*time.Second, func() (bool, string) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		results, err := clients[0].BlockResults(ctx, &updateHeight)
+		cancel()
+		if err != nil || results == nil {
+			return false, fmt.Sprintf("block results height %d=%+v err=%v", updateHeight, results, err)
+		}
+		if len(results.ValidatorUpdates) != 1 || results.ValidatorUpdates[0].Power != 1 ||
+			!bytes.Equal(results.ValidatorUpdates[0].PubKey.GetSecp256K1(), publicKey) {
+			return false, fmt.Sprintf("height %d validator updates=%+v", updateHeight, results.ValidatorUpdates)
+		}
+		return true, ""
+	})
+	waitForCondition(t, 60*time.Second, func() (bool, string) {
+		for index, client := range clients[:3] {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			query, err := client.ABCIQuery(ctx, "/validator", []byte(candidate))
+			cancel()
+			if err != nil || query == nil || query.Response.Code != chainabci.CodeOK {
+				return false, fmt.Sprintf("node %d candidate query=%+v err=%v", index, query, err)
+			}
+			var result struct {
+				Identity state.ValidatorIdentity `json:"identity"`
+				Stake    uint64                  `json:"stake"`
+			}
+			if err := json.Unmarshal(query.Response.Value, &result); err != nil ||
+				result.Identity != certificate.Identity || result.Stake != state.ValidatorStakePerPower {
+				return false, fmt.Sprintf("node %d candidate=%+v err=%v", index, result, err)
+			}
+			page, perPage := 1, 100
+			ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+			validators, err := client.Validators(ctx, nil, &page, &perPage)
+			cancel()
+			if err != nil || validators == nil || validators.Total != 5 {
+				return false, fmt.Sprintf("node %d validators=%+v err=%v", index, validators, err)
+			}
+			found := false
+			for _, validator := range validators.Validators {
+				if bytes.Equal(validator.Address, cmtsecp256k1.PubKey(publicKey).Address()) && validator.VotingPower == 1 {
+					found = true
+				}
+			}
+			if !found {
+				return false, fmt.Sprintf("node %d validator set lacks admitted candidate", index)
+			}
+		}
+		return true, ""
+	})
+
+	restartValidatorV2CometNode(t, started, 3, "runtime-admission-comet-3")
+	waitForRPCReady(t, clients, 30*time.Second)
+	waitForPeerMesh(t, clients, 45*time.Second)
+	convergedHeight := waitForConsistentNetworkState(t, clients, activeHeight, candidate, 2, 60*time.Second)
+	broadcastTransfer(t, clients[0], senderKey, network.ChainID, sender, "0x9999999999999999999999999999999999999999", 1, 1)
+	_ = waitForConsistentNetworkState(t, clients, convergedHeight+1, sender, 2, 60*time.Second)
+}
+
 func TestFourValidatorV2SimultaneousEpochRemovals(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping multi-process CometBFT simultaneous validator-removal network in short mode")
@@ -1354,13 +1512,31 @@ func startFourValidatorV2EvidenceNetwork(
 	epochLength int64,
 ) (string, NetworkDocument, []*rpchttp.HTTP) {
 	t.Helper()
-	basePort := availablePortRange(t, 12)
-	root := filepath.Join(t.TempDir(), "validator-v2-network")
 	policy := chainabci.ValidatorPolicy{
 		EpochLength: epochLength, DuplicateVoteSlashBasisPoints: 10_000,
 		LightClientAttackSlashBasisPoints: 10_000,
 		EvidenceMaxAgeNumBlocks:           1_000, EvidenceMaxAgeDurationNanos: int64(24 * time.Hour),
 	}
+	started := startFourValidatorV2ProcessNetwork(t, chainID, policy)
+	return started.root, started.document, started.clients
+}
+
+type validatorV2ProcessNetwork struct {
+	root       string
+	document   NetworkDocument
+	clients    []*rpchttp.HTTP
+	processes  []*helperProcess
+	cometNodes []*helperProcess
+}
+
+func startFourValidatorV2ProcessNetwork(
+	t *testing.T,
+	chainID string,
+	policy chainabci.ValidatorPolicy,
+) *validatorV2ProcessNetwork {
+	t.Helper()
+	basePort := availablePortRange(t, 12)
+	root := filepath.Join(t.TempDir(), "validator-v2-network")
 	network, err := InitializeNetwork(NetworkConfig{
 		OutputRoot: root, ChainID: chainID, ValidatorCount: 4,
 		GenesisTime:  time.Date(2026, time.July, 10, 12, 0, 0, 0, time.UTC),
@@ -1370,18 +1546,22 @@ func startFourValidatorV2EvidenceNetwork(
 	if err != nil {
 		t.Fatal(err)
 	}
-	processes := make([]*helperProcess, 0, len(network.Nodes)*2)
+	started := &validatorV2ProcessNetwork{
+		root: root, document: network, clients: make([]*rpchttp.HTTP, len(network.Nodes)),
+		processes:  make([]*helperProcess, 0, len(network.Nodes)*2),
+		cometNodes: make([]*helperProcess, len(network.Nodes)),
+	}
 	t.Cleanup(func() {
 		if !t.Failed() {
 			return
 		}
-		for _, process := range processes {
+		for _, process := range started.processes {
 			t.Logf("%s log:\n%s", process.name, process.tailLog())
 		}
 	})
 	for index, generatedNode := range network.Nodes {
 		home := filepath.Join(root, generatedNode.Home)
-		processes = append(processes, startHelperProcess(t, root, fmt.Sprintf("v2-app-%d", index), map[string]string{
+		started.processes = append(started.processes, startHelperProcess(t, root, fmt.Sprintf("v2-app-%d", index), map[string]string{
 			processHelperModeEnv: "abci", processHelperGenesisEnv: filepath.Join(home, filepath.FromSlash(AppGenesisPath)),
 			processHelperListenEnv:  generatedNode.ABCIListenAddress,
 			processHelperDataDirEnv: filepath.Join(root, filepath.FromSlash(generatedNode.ApplicationData)),
@@ -1391,21 +1571,36 @@ func startFourValidatorV2EvidenceNetwork(
 		waitForTCP(t, generatedNode.ABCIListenAddress, 15*time.Second)
 	}
 	for index, generatedNode := range network.Nodes {
-		processes = append(processes, startHelperProcess(t, root, fmt.Sprintf("v2-comet-%d", index), map[string]string{
+		started.cometNodes[index] = startHelperProcess(t, root, fmt.Sprintf("v2-comet-%d", index), map[string]string{
 			processHelperModeEnv: "comet", processHelperHomeEnv: filepath.Join(root, generatedNode.Home),
-		}))
+		})
+		started.processes = append(started.processes, started.cometNodes[index])
 	}
-	clients := make([]*rpchttp.HTTP, len(network.Nodes))
 	for index, generatedNode := range network.Nodes {
 		client, err := rpchttp.New(httpAddress(generatedNode.RPCListenAddress), "/websocket")
 		if err != nil {
 			t.Fatal(err)
 		}
-		clients[index] = client
+		started.clients[index] = client
 	}
-	waitForRPCReady(t, clients, 45*time.Second)
-	waitForPeerMesh(t, clients, 45*time.Second)
-	return root, network, clients
+	waitForRPCReady(t, started.clients, 45*time.Second)
+	waitForPeerMesh(t, started.clients, 45*time.Second)
+	return started
+}
+
+func restartValidatorV2CometNode(
+	t *testing.T,
+	started *validatorV2ProcessNetwork,
+	index int,
+	name string,
+) {
+	t.Helper()
+	generatedNode := started.document.Nodes[index]
+	started.cometNodes[index] = startHelperProcess(t, started.root, name, map[string]string{
+		processHelperModeEnv: "comet",
+		processHelperHomeEnv: filepath.Join(started.root, generatedNode.Home),
+	})
+	started.processes = append(started.processes, started.cometNodes[index])
 }
 
 func stableEvidenceHeight(t *testing.T, client *rpchttp.HTTP) int64 {
@@ -2255,7 +2450,7 @@ func broadcastTransfer(
 	value uint64,
 ) {
 	t.Helper()
-	transaction := chaintypes.Transaction{
+	broadcastSignedTransaction(t, client, key, chaintypes.Transaction{
 		ChainID:  chainID,
 		Type:     chaintypes.TxTransfer,
 		From:     from,
@@ -2264,7 +2459,16 @@ func broadcastTransfer(
 		Value:    value,
 		GasLimit: 21_000,
 		GasPrice: 1,
-	}
+	})
+}
+
+func broadcastSignedTransaction(
+	t *testing.T,
+	client *rpchttp.HTTP,
+	key chaincrypto.PrivateKey,
+	transaction chaintypes.Transaction,
+) {
+	t.Helper()
 	signature, err := chaincrypto.Sign(key, transaction.SigningBytes())
 	if err != nil {
 		t.Fatal(err)
@@ -2282,7 +2486,7 @@ func broadcastTransfer(
 	result, err := client.BroadcastTxSync(ctx, cmttypes.Tx(raw))
 	cancel()
 	if err != nil || result.Code != chainabci.CodeOK {
-		t.Fatalf("broadcast tx nonce %d = %+v err=%v", nonce, result, err)
+		t.Fatalf("broadcast %s tx nonce %d = %+v err=%v", transaction.Type, transaction.Nonce, result, err)
 	}
 }
 

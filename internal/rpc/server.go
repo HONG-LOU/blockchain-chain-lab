@@ -45,6 +45,7 @@ const (
 	MaxWebSocketSubscriptionsPerConnection = 64
 	MaxWebSocketLogSubscriptions           = 64
 	MaxWebSocketLogMatchChecksPerBlock     = 100_000
+	WebSocketSubscriptionTTL               = 30 * time.Minute
 	WebSocketPongTimeout                   = 60 * time.Second
 	WebSocketPingInterval                  = 25 * time.Second
 	WebSocketWriteTimeout                  = 10 * time.Second
@@ -78,6 +79,8 @@ func newServer(n *node.Node, peers []string) *Server {
 		livenessSlots:         make(chan struct{}, MaxConcurrentLivenessRequests),
 		wsTimeouts:            defaultWebSocketTimeouts(),
 		wsConnections:         make(map[string]*webSocketConnection),
+		wsSubscriptionTTL:     WebSocketSubscriptionTTL,
+		wsSubscriptionTimers:  make(map[string]*time.Timer),
 	}
 }
 
@@ -99,6 +102,8 @@ type Server struct {
 	livenessSlots         chan struct{}
 	wsConnectionSlots     chan struct{}
 	wsTimeouts            webSocketTimeouts
+	wsSubscriptionTTL     time.Duration
+	wsSubscriptionTimers  map[string]*time.Timer
 	pendingHashes         func() []string
 	pendingHashMu         sync.Mutex
 	pendingHashSnapshot   []string
@@ -758,6 +763,7 @@ func (s *Server) handleWebSocketJSONRPC(w http.ResponseWriter, r *http.Request) 
 				}
 				continue
 			}
+			s.pruneLocalWebSocketSubscriptions(localSubscriptions)
 			if len(localSubscriptions) >= MaxWebSocketSubscriptionsPerConnection {
 				if !respond(rpcResponse{ID: request.ID, Error: fmt.Sprintf("connection subscription limit %d reached", MaxWebSocketSubscriptionsPerConnection)}) {
 					return
@@ -990,6 +996,7 @@ func (s *Server) registerNewHeadSubscription(connection *webSocketConnection) (s
 	events := make(chan types.Block, 8)
 	s.wsNewHeads[id] = events
 	s.bindWebSocketConnectionLocked(id, connection)
+	s.scheduleWebSocketSubscriptionExpiryLocked(id)
 	return id, events, nil
 }
 
@@ -1002,6 +1009,7 @@ func (s *Server) unregisterNewHeadSubscription(id string) bool {
 	}
 	delete(s.wsNewHeads, id)
 	delete(s.wsConnections, id)
+	s.cancelWebSocketSubscriptionExpiryLocked(id)
 	close(events)
 	return true
 }
@@ -1020,6 +1028,7 @@ func (s *Server) registerLogSubscription(filter logFilter, connection *webSocket
 	events := make(chan map[string]any, 16)
 	s.wsLogs[id] = &wsLogSubscription{filter: filter, events: events}
 	s.bindWebSocketConnectionLocked(id, connection)
+	s.scheduleWebSocketSubscriptionExpiryLocked(id)
 	return id, events, nil
 }
 
@@ -1032,6 +1041,7 @@ func (s *Server) unregisterLogSubscription(id string) bool {
 	}
 	delete(s.wsLogs, id)
 	delete(s.wsConnections, id)
+	s.cancelWebSocketSubscriptionExpiryLocked(id)
 	close(subscription.events)
 	return true
 }
@@ -1056,6 +1066,43 @@ func (s *Server) bindWebSocketConnectionLocked(id string, connection *webSocketC
 	s.wsConnections[id] = connection
 }
 
+func (s *Server) scheduleWebSocketSubscriptionExpiryLocked(id string) {
+	ttl := s.wsSubscriptionTTL
+	if ttl <= 0 {
+		ttl = WebSocketSubscriptionTTL
+	}
+	if s.wsSubscriptionTimers == nil {
+		s.wsSubscriptionTimers = make(map[string]*time.Timer)
+	}
+	s.wsSubscriptionTimers[id] = time.AfterFunc(ttl, func() {
+		s.unregisterWebSocketSubscription(id)
+	})
+}
+
+func (s *Server) cancelWebSocketSubscriptionExpiryLocked(id string) {
+	timer := s.wsSubscriptionTimers[id]
+	delete(s.wsSubscriptionTimers, id)
+	if timer != nil {
+		timer.Stop()
+	}
+}
+
+func (s *Server) pruneLocalWebSocketSubscriptions(subscriptions map[string]struct{}) {
+	s.wsMu.Lock()
+	defer s.wsMu.Unlock()
+	for id := range subscriptions {
+		if _, ok := s.wsNewHeads[id]; ok {
+			continue
+		}
+		if _, ok := s.wsLogs[id]; ok {
+			continue
+		}
+		if _, ok := s.wsPendingTransactions[id]; !ok {
+			delete(subscriptions, id)
+		}
+	}
+}
+
 func (s *Server) closeSlowWebSocketConnectionLocked(id string) {
 	connection := s.wsConnections[id]
 	delete(s.wsConnections, id)
@@ -1073,6 +1120,7 @@ func (s *Server) notifyNewHead(block types.Block) {
 		case events <- block:
 		default:
 			delete(s.wsNewHeads, id)
+			s.cancelWebSocketSubscriptionExpiryLocked(id)
 			close(events)
 			s.closeSlowWebSocketConnectionLocked(id)
 		}
@@ -1186,6 +1234,7 @@ func (s *Server) notifyLogsWithLimit(block types.Block, workLimit int) (int, boo
 				case subscription.events <- log:
 				default:
 					delete(s.wsLogs, id)
+					s.cancelWebSocketSubscriptionExpiryLocked(id)
 					close(subscription.events)
 					s.closeSlowWebSocketConnectionLocked(id)
 				}
@@ -1198,6 +1247,7 @@ func (s *Server) notifyLogsWithLimit(block types.Block, workLimit int) (int, boo
 func (s *Server) closeAllLogSubscriptionsLocked() {
 	for id, subscription := range s.wsLogs {
 		delete(s.wsLogs, id)
+		s.cancelWebSocketSubscriptionExpiryLocked(id)
 		close(subscription.events)
 		s.closeSlowWebSocketConnectionLocked(id)
 	}
@@ -1214,6 +1264,7 @@ func (s *Server) registerPendingTransactionSubscription(connection *webSocketCon
 	events := make(chan string, 16)
 	s.wsPendingTransactions[id] = events
 	s.bindWebSocketConnectionLocked(id, connection)
+	s.scheduleWebSocketSubscriptionExpiryLocked(id)
 	return id, events, nil
 }
 
@@ -1236,6 +1287,7 @@ func (s *Server) unregisterPendingTransactionSubscription(id string) bool {
 	}
 	delete(s.wsPendingTransactions, id)
 	delete(s.wsConnections, id)
+	s.cancelWebSocketSubscriptionExpiryLocked(id)
 	close(events)
 	return true
 }
@@ -1250,6 +1302,7 @@ func (s *Server) notifyPendingTransaction(tx types.Transaction) {
 		case events <- hash:
 		default:
 			delete(s.wsPendingTransactions, id)
+			s.cancelWebSocketSubscriptionExpiryLocked(id)
 			close(events)
 			s.closeSlowWebSocketConnectionLocked(id)
 		}

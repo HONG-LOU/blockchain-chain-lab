@@ -38,6 +38,8 @@ func intrinsicGasForTransaction(tx types.Transaction, context ExecutionContext) 
 			return 0, err
 		}
 		return EstimateWASMUploadGas(bytecode), nil
+	case types.TxValidatorJoin:
+		return estimateRuntimeValidatorAdmissionGas(tx.Payload["certificate"])
 	default:
 		return EstimateGas(tx.Type)
 	}

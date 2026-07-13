@@ -13,7 +13,7 @@ ChainLab's production path uses CometBFT v0.39.3 rather than the local PoA harne
 - two validators unavailable: 2-of-4 cannot advance consensus or committed application state;
 - a symmetric 2+2 P2P topology partition: neither side commits, transaction gossip stays on its originating side, and healing converges without divergent application state.
 
-Separate evidence networks also exercise same-height light-client equivocation and cross-height forward-lunatic proofs through Comet RPC and its evidence pool. These are Windows/amd64 development-network results, not public-network or hostile-infrastructure claims.
+Separate lifecycle/evidence networks also exercise certified runtime admission, same-height light-client equivocation, and cross-height forward-lunatic proofs through the real Comet process/RPC boundary. These are Windows/amd64 development-network results, not public-network or hostile-infrastructure claims.
 
 ## Quorum-Loss Test
 
@@ -55,8 +55,14 @@ The full peer mesh must remain present. Height `H+1` must use its predicted prop
 
 Height `H+1` must still use its predicted proposer. The targeted proposer must not produce the committed block at `H+2`, and the commit round must be greater than zero. The valid transaction broadcast before the fault must remain available, commit successfully, and converge all four block/application hashes, state roots, and sender nonces. The scenario passed five consecutive real-process runs. The final tree also passed the full unit and race suites, vet, dependency-tidiness diff, four production command builds, height-18 demo, formatting/diff checks, and fixed `govulncheck` v1.6.0 with zero reachable vulnerabilities. It proves application-level proposal rejection and consensus round recovery; it does not prove packet corruption handling or arbitrary Byzantine proposer behavior.
 
+## Runtime Admission Test
+
+`TestFourValidatorV2RuntimeAdmission` funds and stakes a locally generated candidate, then stops two validators to prove the 2-of-4 network cannot commit the candidate's certified join. The certificate binds the last committed validator root and height and is signed by all four active test validators. Restoring a third validator commits the join and returns the candidate's power-one update at `H+2`; restoring the fourth keeps four of five voting-power units online, strictly above the liveness threshold. All four applications and Comet validator-set queries must converge before a later transaction commits.
+
+This proves one non-removal validator-set expansion across the application/socket/Comet process boundary. It does not cover simultaneous admissions, re-entry, runtime power changes, admission during a partition, or operation of the newly admitted validator process.
+
 ## Evidence Boundary
 
 The tests cover process outage, a targeted missing round-0 proposer, validator-local delayed proposal construction while connected, application rejection of a malformed proposal, and a symmetric disjoint P2P topology. Separate V2 lifecycle networks cover simultaneous evidence-driven power-zero removals, a Comet-verified same-height light-client equivocation proof, and a cross-height forward-lunatic proof. The forward-lunatic test uses common height `H`, an invalid conflicting application hash at `H+1`, and waits until the full nodes have committed `H+2`; three historical validators sign the conflicting header, Comet derives those signers as Byzantine, and the application removes them before proving post-transition liveness and convergence. It does not provide an externally operated light-client detector or test a conflicting height ahead of the full node's local block store.
 
-The suite does not emulate dynamic packet delay, drop, duplication, corruption, or reordering; bandwidth exhaustion; asymmetric one-way reachability; amnesia light-client evidence; simultaneous admission or non-removal power changes; sentry topology; or sustained load. Those remain production gates and require a controllable network-fault environment rather than relabeling application delay, proposal-content injection, or process shutdown as a packet-level fault.
+The suite does not emulate dynamic packet delay, drop, duplication, corruption, or reordering; bandwidth exhaustion; asymmetric one-way reachability; amnesia light-client evidence; simultaneous admission, re-entry, or non-removal power changes; sentry topology; or sustained load. Those remain production gates and require a controllable network-fault environment rather than relabeling application delay, proposal-content injection, or process shutdown as a packet-level fault.

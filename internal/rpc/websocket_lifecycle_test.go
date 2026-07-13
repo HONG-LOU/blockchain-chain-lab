@@ -223,6 +223,61 @@ func TestWebSocketNotificationBackpressureClosesConnectionAndUnregisters(t *test
 	})
 }
 
+func TestWebSocketSubscriptionsExpireAndReleaseCapacity(t *testing.T) {
+	server := newServer(newResourceLimitTestNode(t, 0), nil)
+	server.wsSubscriptionTTL = 25 * time.Millisecond
+
+	newHeadID, newHeads, err := server.registerNewHeadSubscription(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logID, logs, err := server.registerLogSubscription(logFilter{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendingID, pending, err := server.registerPendingTransactionSubscription(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := map[string]struct{}{newHeadID: {}, logID: {}, pendingID: {}}
+
+	waitForWebSocketLifecycle(t, time.Second, func() bool {
+		connections, subscriptions := webSocketLifecycleCounts(server)
+		server.wsMu.Lock()
+		timers := len(server.wsSubscriptionTimers)
+		server.wsMu.Unlock()
+		return connections == 0 && subscriptions == 0 && timers == 0
+	})
+	if _, ok := <-newHeads; ok {
+		t.Fatal("expired new-head subscription remained open")
+	}
+	if _, ok := <-logs; ok {
+		t.Fatal("expired log subscription remained open")
+	}
+	if _, ok := <-pending; ok {
+		t.Fatal("expired pending-transaction subscription remained open")
+	}
+
+	server.wsMu.Lock()
+	server.wsSubscriptionTTL = time.Second
+	server.wsMu.Unlock()
+	activeID, _, err := server.registerNewHeadSubscription(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	local[activeID] = struct{}{}
+	server.pruneLocalWebSocketSubscriptions(local)
+	if len(local) != 1 {
+		t.Fatalf("local subscriptions after expiry = %v", local)
+	}
+	if _, ok := local[activeID]; !ok {
+		t.Fatal("active local subscription was pruned")
+	}
+	if !server.unregisterNewHeadSubscription(activeID) {
+		t.Fatal("active subscription was not unregistered")
+	}
+}
+
 func newBackpressureTestServer(t *testing.T) (*Server, *webSocketConnection, func()) {
 	t.Helper()
 	serverConn, clientConn := net.Pipe()

@@ -21,10 +21,11 @@ type Executor struct {
 }
 
 type ExecutionContext struct {
-	BlockHeight                uint64
-	BaseFeePerGas              uint64
-	ValidatorRuntimeAdmissions bool
-	ValidatorEpochLength       int64
+	BlockHeight                         uint64
+	BaseFeePerGas                       uint64
+	ValidatorRuntimeAdmissions          bool
+	ValidatorEpochLength                int64
+	ValidatorAdmissionAuthorizationRoot string
 }
 
 const (

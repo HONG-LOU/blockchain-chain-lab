@@ -14,13 +14,14 @@ const explorerRecentBlockLimit = 8
 const explorerRecentEventLimit = 32
 
 type explorerPageData struct {
-	ChainID             string
-	Head                explorerBlock
-	Finality            node.FinalityCheckpoint
-	Mempool             node.MempoolSnapshot
-	PendingTransactions []explorerTransaction
-	Validators          []string
-	Blocks              []explorerBlock
+	ChainID            string
+	Head               explorerBlock
+	Finality           node.FinalityCheckpoint
+	Mempool            node.MempoolSnapshot
+	PoolTransactions   []explorerTransaction
+	MempoolListLimited bool
+	Validators         []string
+	Blocks             []explorerBlock
 }
 
 type explorerBlock struct {
@@ -56,6 +57,7 @@ type explorerTransaction struct {
 	AuthCount    int
 	Paymaster    string
 	PaymasterURL string
+	PoolStatus   string
 }
 
 type explorerTransactionPageData struct {
@@ -67,6 +69,7 @@ type explorerTransactionPageData struct {
 	BlockURL    string
 	Index       int
 	Status      string
+	Committed   bool
 }
 
 type explorerAccountPageData struct {
@@ -146,7 +149,23 @@ func (s *Server) handleExplorerTransaction(w http.ResponseWriter, r *http.Reques
 	}
 	record, ok := s.node.Transaction(hash)
 	if !ok {
-		http.NotFound(w, r)
+		tx, found := s.node.PendingTransaction(hash)
+		if !found {
+			http.NotFound(w, r)
+			return
+		}
+		status := "queued"
+		for _, pendingHash := range s.node.PendingTransactionHashes() {
+			if strings.EqualFold(pendingHash, hash) {
+				status = "pending"
+				break
+			}
+		}
+		writeExplorerHTML(w, explorerTransactionTemplate, explorerTransactionPageData{
+			ChainID:     s.node.ChainID(),
+			Transaction: newExplorerPoolTransaction(tx, status),
+			Status:      status,
+		})
 		return
 	}
 	status := "failed"
@@ -162,6 +181,7 @@ func (s *Server) handleExplorerTransaction(w http.ResponseWriter, r *http.Reques
 		BlockURL:    explorerBlockURL(record.BlockHeight),
 		Index:       record.Index,
 		Status:      status,
+		Committed:   true,
 	}
 	writeExplorerHTML(w, explorerTransactionTemplate, data)
 }
@@ -194,6 +214,7 @@ func (s *Server) explorerData() explorerPageData {
 	head := s.node.Head()
 	finality := s.node.Finality()
 	pool, err := s.node.TxPoolBounded(MaxTxPoolResponseSourceBytes)
+	mempoolListLimited := err != nil
 	if err != nil {
 		pending, queued := s.node.TxPoolCounts()
 		pool.PendingCount = pending
@@ -212,19 +233,23 @@ func (s *Server) explorerData() explorerPageData {
 			break
 		}
 	}
-	pendingTransactions := make([]explorerTransaction, 0, len(pool.Pending))
+	poolTransactions := make([]explorerTransaction, 0, len(pool.Pending)+len(pool.Queued))
 	for _, tx := range pool.Pending {
-		pendingTransactions = append(pendingTransactions, newExplorerTransaction(tx))
+		poolTransactions = append(poolTransactions, newExplorerPoolTransaction(tx, "pending"))
+	}
+	for _, tx := range pool.Queued {
+		poolTransactions = append(poolTransactions, newExplorerPoolTransaction(tx, "queued"))
 	}
 
 	return explorerPageData{
-		ChainID:             s.node.ChainID(),
-		Head:                newExplorerBlock(head),
-		Finality:            finality,
-		Mempool:             pool,
-		PendingTransactions: pendingTransactions,
-		Validators:          validators,
-		Blocks:              blocks,
+		ChainID:            s.node.ChainID(),
+		Head:               newExplorerBlock(head),
+		Finality:           finality,
+		Mempool:            pool,
+		PoolTransactions:   poolTransactions,
+		MempoolListLimited: mempoolListLimited,
+		Validators:         validators,
+		Blocks:             blocks,
 	}
 }
 
@@ -311,6 +336,12 @@ func newExplorerTransaction(tx types.Transaction) explorerTransaction {
 	}
 }
 
+func newExplorerPoolTransaction(tx types.Transaction, status string) explorerTransaction {
+	transaction := newExplorerTransaction(tx)
+	transaction.PoolStatus = status
+	return transaction
+}
+
 func explorerBlockURL(height uint64) string {
 	return "/explorer/block/" + strconv.FormatUint(height, 10)
 }
@@ -344,6 +375,7 @@ var explorerTemplate = template.Must(template.New("explorer").Parse(`<!doctype h
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
   <title>ChainLab Explorer</title>
   <style>
     :root {
@@ -542,18 +574,20 @@ var explorerTemplate = template.Must(template.New("explorer").Parse(`<!doctype h
 
       <aside class="section">
         <h2>Mempool</h2>
-        {{if .PendingTransactions}}
+        {{if .PoolTransactions}}
         <ul class="list">
-          {{range .PendingTransactions}}
+          {{range .PoolTransactions}}
           <li class="row">
-            <span><span class="pill warn">{{.Type}}</span> value {{.Value}}</span>
+            <span><span class="pill warn">{{.PoolStatus}}</span> <span class="pill">{{.Type}}</span> value {{.Value}}</span>
             <a class="hash" href="{{.URL}}">{{.Hash}}</a>
             <span class="hash"><a href="{{.FromURL}}">{{.From}}</a> -> {{if .ToURL}}<a href="{{.ToURL}}">{{.To}}</a>{{else}}-{{end}}</span>
           </li>
           {{end}}
         </ul>
+        {{else if .MempoolListLimited}}
+        <div class="empty">Transaction list exceeds the explorer display limit.</div>
         {{else}}
-        <div class="empty">No pending transactions.</div>
+        <div class="empty">No pending or queued transactions.</div>
         {{end}}
       </aside>
     </section>
@@ -567,6 +601,7 @@ func explorerDetailHTML(title string, body string) string {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
   <title>` + title + ` - ChainLab Explorer</title>
   <style>
     :root {
@@ -723,7 +758,7 @@ var explorerTransactionTemplate = template.Must(template.New("explorer-transacti
         {{if .Transaction.Paymaster}}<div class="field"><div class="label">Paymaster</div><div><a class="hash" href="{{.Transaction.PaymasterURL}}">{{.Transaction.Paymaster}}</a></div></div>{{end}}
       </div>
 
-      <div class="section">
+      {{if .Committed}}<div class="section">
         <h2>Receipt</h2>
         <div class="field"><div class="label">Status</div><div>{{.Status}}</div></div>
         <div class="field"><div class="label">Gas Used</div><div>{{.Receipt.GasUsed}}</div></div>
@@ -733,7 +768,10 @@ var explorerTransactionTemplate = template.Must(template.New("explorer-transacti
         {{if .Receipt.FeePayer}}<div class="field"><div class="label">Fee Payer</div><div><a class="hash" href="/explorer/account/{{.Receipt.FeePayer}}">{{.Receipt.FeePayer}}</a></div></div>{{end}}
         {{if .Receipt.ContractAddress}}<div class="field"><div class="label">Contract</div><div><a class="hash" href="/explorer/account/{{.Receipt.ContractAddress}}">{{.Receipt.ContractAddress}}</a></div></div>{{end}}
         {{if .Receipt.Error}}<div class="field"><div class="label">Error</div><div>{{.Receipt.Error}}</div></div>{{end}}
-      </div>
+      </div>{{else}}<div class="section">
+        <h2>Transaction Pool</h2>
+        <div class="field"><div class="label">Status</div><div><span class="pill warn">{{.Status}}</span></div></div>
+      </div>{{end}}
     </section>`)))
 
 var explorerAccountTemplate = template.Must(template.New("explorer-account").Parse(explorerDetailHTML("Account Details", `

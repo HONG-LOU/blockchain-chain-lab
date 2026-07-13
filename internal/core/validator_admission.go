@@ -17,6 +17,8 @@ import (
 const (
 	runtimeValidatorAdmissionDomain     = "chainlab-runtime-validator-admission-v1"
 	maxRuntimeAdmissionCertificateBytes = 512 * 1024
+	runtimeAdmissionByteGas             = uint64(16)
+	runtimeAdmissionSignatureGas        = uint64(5_000)
 )
 
 type RuntimeValidatorAdmissionSignature struct {
@@ -128,7 +130,7 @@ func executeRuntimeValidatorAdmission(
 		return types.Event{}, errors.New("validator join sender must equal the candidate account")
 	}
 	if certificate.AuthorizationHeight != int64(context.BlockHeight)-1 ||
-		certificate.ValidatorRoot != store.ValidatorRoot() {
+		certificate.ValidatorRoot != context.ValidatorAdmissionAuthorizationRoot {
 		return types.Event{}, errors.New("runtime validator admission does not authorize the current state")
 	}
 	if _, exists := store.ValidatorIdentityByAccount(identity.Account); exists {
@@ -160,6 +162,30 @@ func executeRuntimeValidatorAdmission(
 		"power":         fmt.Sprintf("%d", identity.Power),
 		"active_height": fmt.Sprintf("%d", identity.ActiveHeight),
 	}}, nil
+}
+
+func estimateRuntimeValidatorAdmissionGas(raw string) (uint64, error) {
+	certificate, err := parseRuntimeValidatorAdmission(raw)
+	if err != nil {
+		return 0, err
+	}
+	base, err := EstimateGas(types.TxValidatorJoin)
+	if err != nil {
+		return 0, err
+	}
+	byteGas, err := checkedMul(uint64(len(raw)), runtimeAdmissionByteGas)
+	if err != nil {
+		return 0, err
+	}
+	signatureGas, err := checkedMul(uint64(len(certificate.Signatures)), runtimeAdmissionSignatureGas)
+	if err != nil {
+		return 0, err
+	}
+	total, err := checkedAdd(base, byteGas)
+	if err != nil {
+		return 0, err
+	}
+	return checkedAdd(total, signatureGas)
 }
 
 func validateRuntimeAdmissionQuorum(

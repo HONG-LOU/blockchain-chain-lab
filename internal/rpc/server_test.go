@@ -2210,6 +2210,57 @@ func TestExplorerRendersDetailPages(t *testing.T) {
 	getHTML(t, server.URL+"/explorer/tx/0xmissing", http.StatusNotFound)
 }
 
+func TestExplorerRendersPendingAndQueuedTransactionDetails(t *testing.T) {
+	key, err := chaincrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := chaincrypto.AddressFromPrivateKey(key)
+	bob := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	n, err := node.NewDevelopment(node.Config{
+		ChainID:        "chainlab-local",
+		ProposerKey:    key,
+		GenesisBalance: map[string]uint64{alice: 1_000_000}, GenesisTimeUnix: node.DeterministicDevGenesisTimeUnix,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := signedTransfer(t, key, alice, bob, 0, 10)
+	if err := n.SubmitTx(pending); err != nil {
+		t.Fatal(err)
+	}
+	queued := signedTransfer(t, key, alice, bob, 2, 20)
+	if err := n.SubmitTx(queued); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(chainrpc.NewServer(n))
+	defer server.Close()
+
+	overview := getHTML(t, server.URL+"/explorer", http.StatusOK)
+	for _, expected := range []string{
+		`<span class="pill warn">pending</span> <span class="pill">transfer</span> value 10`,
+		`<span class="pill warn">queued</span> <span class="pill">transfer</span> value 20`,
+		`href="/explorer/tx/` + pending.Hash() + `"`,
+		`href="/explorer/tx/` + queued.Hash() + `"`,
+	} {
+		if !strings.Contains(overview, expected) {
+			t.Fatalf("overview missing %q:\n%s", expected, overview)
+		}
+	}
+
+	for status, tx := range map[string]types.Transaction{"pending": pending, "queued": queued} {
+		page := getHTML(t, server.URL+"/explorer/tx/"+tx.Hash(), http.StatusOK)
+		for _, expected := range []string{"Transaction Details", "Transaction Pool", tx.Hash(), status} {
+			if !strings.Contains(page, expected) {
+				t.Fatalf("%s transaction page missing %q:\n%s", status, expected, page)
+			}
+		}
+		if strings.Contains(page, "<h2>Receipt</h2>") {
+			t.Fatalf("%s transaction page rendered a committed receipt:\n%s", status, page)
+		}
+	}
+}
+
 func TestExplorerRendersEventPages(t *testing.T) {
 	key, err := chaincrypto.GenerateKey()
 	if err != nil {

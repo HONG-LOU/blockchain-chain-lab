@@ -216,20 +216,26 @@ func TestGenesisCertifiedValidatorAdmissionRejectsInvalidCertificates(t *testing
 	}
 }
 
-func TestRuntimeCertifiedValidatorAdmissionActivatesCandidate(t *testing.T) {
+func TestRuntimeCertifiedValidatorAdmissionsShareCommittedRoot(t *testing.T) {
 	fixture := newValidatorV2Fixture(t, "")
-	candidateKey, err := chaincrypto.GenerateKey()
-	if err != nil {
-		t.Fatal(err)
+	candidateKeys := make([]chaincrypto.PrivateKey, 2)
+	for index := range candidateKeys {
+		key, err := chaincrypto.GenerateKey()
+		if err != nil {
+			t.Fatal(err)
+		}
+		candidateKeys[index] = key
 	}
 	store, err := state.NewStoreFromSnapshot(fixture.genesis.State)
 	if err != nil {
 		t.Fatal(err)
 	}
-	candidate := chaincrypto.AddressFromPrivateKey(candidateKey)
-	store.SetBalance(candidate, 1_000_000)
-	if err := store.AddStake(candidate, state.ValidatorStakePerPower); err != nil {
-		t.Fatal(err)
+	for _, candidateKey := range candidateKeys {
+		candidate := chaincrypto.AddressFromPrivateKey(candidateKey)
+		store.SetBalance(candidate, 1_000_000)
+		if err := store.AddStake(candidate, state.ValidatorStakePerPower); err != nil {
+			t.Fatal(err)
+		}
 	}
 	fixture.genesis.State = store.Snapshot()
 	fixture.genesis.ValidatorPolicy.RuntimeAdmissions = true
@@ -244,20 +250,101 @@ func TestRuntimeCertifiedValidatorAdmissionActivatesCandidate(t *testing.T) {
 	}
 	fixture.initialize(t)
 
+	authorizationRoot := fixture.app.committed.store.ValidatorRoot()
+	certificates := make([]core.RuntimeValidatorAdmissionCertificate, len(candidateKeys))
+	joinRaw := make([][]byte, len(candidateKeys))
+	for index, candidateKey := range candidateKeys {
+		certificate := signedRuntimeValidatorAdmission(
+			t, fixture.genesis.ChainID, candidateKey, 0, authorizationRoot, 5, fixture.keys,
+		)
+		encoded, err := core.EncodeRuntimeValidatorAdmission(certificate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		join := signFixtureTransaction(t, candidateKey, types.Transaction{
+			ChainID: fixture.genesis.ChainID, Type: types.TxValidatorJoin,
+			From: certificate.Identity.Account, Nonce: 0, GasLimit: 100_000, GasPrice: 1,
+			Payload: map[string]string{"certificate": encoded},
+		})
+		certificates[index] = certificate
+		joinRaw[index] = rawFixtureTransaction(t, join)
+	}
+	heightOne, err := fixture.app.FinalizeBlock(context.Background(), &abcitypes.RequestFinalizeBlock{
+		Hash: blockHash(1), Height: 1, Time: validatorV2BlockTime(1),
+		ProposerAddress: fixture.proposerAddresses[0], Txs: joinRaw,
+	})
+	if err != nil || len(heightOne.TxResults) != len(candidateKeys) {
+		t.Fatalf("runtime admission response=%+v err=%v", heightOne, err)
+	}
+	for index, result := range heightOne.TxResults {
+		if result.Code != CodeOK {
+			t.Fatalf("runtime admission %d result=%+v", index, result)
+		}
+	}
+	if _, err := fixture.app.Commit(context.Background(), &abcitypes.RequestCommit{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, certificate := range certificates {
+		identity, exists := fixture.app.committed.store.ValidatorIdentityByAccount(certificate.Identity.Account)
+		if !exists || identity != certificate.Identity {
+			t.Fatalf("runtime admitted identity=%+v exists=%t", identity, exists)
+		}
+	}
+	fixture.finalizeAndCommit(t, 2, 0, nil)
+	heightThree := fixture.finalizeAndCommit(t, 3, 0, nil)
+	if len(heightThree.ValidatorUpdates) != len(candidateKeys) {
+		t.Fatalf("runtime admission update=%+v", heightThree.ValidatorUpdates)
+	}
+	wantPublicKeys := make(map[string]struct{}, len(candidateKeys))
+	for _, candidateKey := range candidateKeys {
+		wantPublicKeys[bytesToHex(candidateKey.PubKey().SerializeCompressed())] = struct{}{}
+	}
+	for _, update := range heightThree.ValidatorUpdates {
+		key := bytesToHex(update.PubKey.GetSecp256K1())
+		if update.Power != 1 {
+			t.Fatalf("runtime admission update=%+v", update)
+		}
+		delete(wantPublicKeys, key)
+	}
+	if len(wantPublicKeys) != 0 {
+		t.Fatalf("runtime admission updates missed %d candidates", len(wantPublicKeys))
+	}
+	fixture.finalizeAndCommit(t, 4, 0, nil)
+	publicKey := candidateKeys[0].PubKey().SerializeCompressed()
+	response, err := fixture.app.FinalizeBlock(context.Background(), &abcitypes.RequestFinalizeBlock{
+		Hash: blockHash(5), Height: 5, Time: validatorV2BlockTime(5),
+		ProposerAddress: cmtsecp256k1.PubKey(publicKey).Address(),
+	})
+	if err != nil || response == nil {
+		t.Fatalf("runtime candidate proposer response=%+v err=%v", response, err)
+	}
+}
+
+func signedRuntimeValidatorAdmission(
+	t *testing.T,
+	chainID string,
+	candidateKey chaincrypto.PrivateKey,
+	authorizationHeight int64,
+	validatorRoot string,
+	activeHeight int64,
+	signerKeys []chaincrypto.PrivateKey,
+) core.RuntimeValidatorAdmissionCertificate {
+	t.Helper()
 	publicKey := candidateKey.PubKey().SerializeCompressed()
 	certificate := core.RuntimeValidatorAdmissionCertificate{
-		AuthorizationHeight: 0,
-		ValidatorRoot:       fixture.app.committed.store.ValidatorRoot(),
+		AuthorizationHeight: authorizationHeight,
+		ValidatorRoot:       validatorRoot,
 		Identity: state.ValidatorIdentity{
-			Account: candidate, ConsensusAddress: bytesToHex(cmtsecp256k1.PubKey(publicKey).Address()),
-			PublicKey: bytesToHex(publicKey), Power: 1, ActiveHeight: 5,
+			Account:          chaincrypto.AddressFromPrivateKey(candidateKey),
+			ConsensusAddress: bytesToHex(cmtsecp256k1.PubKey(publicKey).Address()),
+			PublicKey:        bytesToHex(publicKey), Power: 1, ActiveHeight: activeHeight,
 		},
 	}
-	payload, err := core.RuntimeValidatorAdmissionSigningBytes(fixture.genesis.ChainID, certificate)
+	payload, err := core.RuntimeValidatorAdmissionSigningBytes(chainID, certificate)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range fixture.keys {
+	for _, key := range signerKeys {
 		signature, err := chaincrypto.Sign(key, payload)
 		if err != nil {
 			t.Fatal(err)
@@ -269,43 +356,7 @@ func TestRuntimeCertifiedValidatorAdmissionActivatesCandidate(t *testing.T) {
 	sort.Slice(certificate.Signatures, func(left int, right int) bool {
 		return certificate.Signatures[left].Validator < certificate.Signatures[right].Validator
 	})
-	encoded, err := core.EncodeRuntimeValidatorAdmission(certificate)
-	if err != nil {
-		t.Fatal(err)
-	}
-	join := signFixtureTransaction(t, candidateKey, types.Transaction{
-		ChainID: fixture.genesis.ChainID, Type: types.TxValidatorJoin, From: candidate,
-		Nonce: 0, GasLimit: 100_000, GasPrice: 1, Payload: map[string]string{"certificate": encoded},
-	})
-	joinRaw := rawFixtureTransaction(t, join)
-	heightOne, err := fixture.app.FinalizeBlock(context.Background(), &abcitypes.RequestFinalizeBlock{
-		Hash: blockHash(1), Height: 1, Time: validatorV2BlockTime(1),
-		ProposerAddress: fixture.proposerAddresses[0], Txs: [][]byte{joinRaw},
-	})
-	if err != nil || len(heightOne.TxResults) != 1 || heightOne.TxResults[0].Code != CodeOK {
-		t.Fatalf("runtime admission response=%+v err=%v", heightOne, err)
-	}
-	if _, err := fixture.app.Commit(context.Background(), &abcitypes.RequestCommit{}); err != nil {
-		t.Fatal(err)
-	}
-	identity, exists := fixture.app.committed.store.ValidatorIdentityByAccount(candidate)
-	if !exists || identity != certificate.Identity {
-		t.Fatalf("runtime admitted identity=%+v exists=%t", identity, exists)
-	}
-	fixture.finalizeAndCommit(t, 2, 0, nil)
-	heightThree := fixture.finalizeAndCommit(t, 3, 0, nil)
-	if len(heightThree.ValidatorUpdates) != 1 || heightThree.ValidatorUpdates[0].Power != 1 ||
-		!bytes.Equal(heightThree.ValidatorUpdates[0].PubKey.GetSecp256K1(), publicKey) {
-		t.Fatalf("runtime admission update=%+v", heightThree.ValidatorUpdates)
-	}
-	fixture.finalizeAndCommit(t, 4, 0, nil)
-	response, err := fixture.app.FinalizeBlock(context.Background(), &abcitypes.RequestFinalizeBlock{
-		Hash: blockHash(5), Height: 5, Time: validatorV2BlockTime(5),
-		ProposerAddress: cmtsecp256k1.PubKey(publicKey).Address(),
-	})
-	if err != nil || response == nil {
-		t.Fatalf("runtime candidate proposer response=%+v err=%v", response, err)
-	}
+	return certificate
 }
 
 func signedValidatorAdmission(
