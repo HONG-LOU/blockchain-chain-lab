@@ -7,10 +7,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"chainlab/internal/cometnode"
 	"chainlab/internal/hash"
 )
 
@@ -146,10 +148,35 @@ func TestDesktopForcedTerminationRecoversStaleRuntime(t *testing.T) {
 func initializeTestDesktop(t *testing.T, root string, chainID string) Config {
 	t.Helper()
 	base := availablePortBlock(t, 5)
-	config, err := initializeSolo(root, ProfileDesktopSolo, chainID, soloServicePorts{
-		ABCI: base, RPC: base + 1, P2P: base + 2, Control: base + 3, Explorer: base + 4,
-	})
+	config, err := Initialize(root, ProfileDesktopSolo, chainID)
 	if err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(root, filepath.FromSlash(config.NodeHome))
+	document, err := cometnode.LoadNodeDocument(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document.ProxyApp = "tcp://127.0.0.1:" + strconv.Itoa(base)
+	document.RPCListenAddress = "tcp://127.0.0.1:" + strconv.Itoa(base+1)
+	document.P2PListenAddress = "tcp://127.0.0.1:" + strconv.Itoa(base+2)
+	documentRaw, err := document.CanonicalBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, filepath.FromSlash(cometnode.NodeDocumentPath)), documentRaw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	config.ABCIAddress = document.ProxyApp
+	config.RPCAddress = document.RPCListenAddress
+	config.P2PAddress = document.P2PListenAddress
+	config.ControlURL = "http://127.0.0.1:" + strconv.Itoa(base+3)
+	config.ExplorerURL = "http://127.0.0.1:" + strconv.Itoa(base+4) + "/"
+	configRaw, err := config.CanonicalBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ConfigPath), configRaw, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return config

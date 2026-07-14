@@ -68,19 +68,6 @@ func TestInitializeDesktopSoloPublishesRestartSafeConfig(t *testing.T) {
 	}
 }
 
-func TestInitializeSoloRejectsInvalidServicePorts(t *testing.T) {
-	tests := []soloServicePorts{
-		{ABCI: 0, RPC: 2, P2P: 3, Control: 4, Explorer: 5},
-		{ABCI: 1, RPC: 2, P2P: 3, Control: 4, Explorer: 65536},
-		{ABCI: 1, RPC: 2, P2P: 3, Control: 4, Explorer: 4},
-	}
-	for _, ports := range tests {
-		if _, err := initializeSolo(filepath.Join(t.TempDir(), "desktop"), ProfileDesktopSolo, "chainlab-test", ports); err == nil {
-			t.Fatalf("invalid service ports accepted: %+v", ports)
-		}
-	}
-}
-
 func TestInitializeRejectsJoinProfilesWithoutInvitation(t *testing.T) {
 	for _, profile := range []Profile{ProfileHomeValidator, ProfileObserver} {
 		_, err := Initialize(filepath.Join(t.TempDir(), string(profile)), profile, "chainlab-test")

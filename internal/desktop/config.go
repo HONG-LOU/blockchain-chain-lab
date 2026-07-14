@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	chainabci "chainlab/internal/abci"
@@ -28,19 +27,9 @@ const (
 	defaultRPCPort      = 26670
 	defaultP2PPort      = 26680
 	defaultABCIPort     = 26658
-	defaultControlPort  = 26659
-	defaultExplorerPort = 8547
 	defaultRetainBlocks = 120_961
 	maxConfigBytes      = 64 * 1024
 )
-
-type soloServicePorts struct {
-	ABCI     int
-	RPC      int
-	P2P      int
-	Control  int
-	Explorer int
-}
 
 type Profile string
 
@@ -100,22 +89,12 @@ func Contract(profile Profile) (ProfileContract, error) {
 }
 
 func Initialize(root string, profile Profile, chainID string) (Config, error) {
-	return initializeSolo(root, profile, chainID, soloServicePorts{
-		ABCI: defaultABCIPort, RPC: defaultRPCPort, P2P: defaultP2PPort,
-		Control: defaultControlPort, Explorer: defaultExplorerPort,
-	})
-}
-
-func initializeSolo(root string, profile Profile, chainID string, ports soloServicePorts) (Config, error) {
 	contract, err := Contract(profile)
 	if err != nil {
 		return Config{}, err
 	}
 	if profile != ProfileDesktopSolo {
 		return Config{}, fmt.Errorf("profile %q requires a verified public invitation", profile)
-	}
-	if err := validateSoloServicePorts(ports); err != nil {
-		return Config{}, err
 	}
 	if strings.TrimSpace(root) == "" {
 		return Config{}, errors.New("desktop data directory is required")
@@ -149,9 +128,9 @@ func initializeSolo(root string, profile Profile, chainID string, ports soloServ
 		OutputRoot:          filepath.Join(stage, "network"),
 		ChainID:             chainID,
 		ValidatorCount:      contract.ValidatorCount,
-		ABCIBasePort:        ports.ABCI,
-		RPCBasePort:         ports.RPC,
-		P2PBasePort:         ports.P2P,
+		ABCIBasePort:        defaultABCIPort,
+		RPCBasePort:         defaultRPCPort,
+		P2PBasePort:         defaultP2PPort,
 		ApplicationProtocol: chainabci.ProtocolVersionV2,
 		ValidatorPolicy:     &policy,
 		ProtocolUpgrades: []chainabci.ProtocolUpgrade{
@@ -175,8 +154,8 @@ func initializeSolo(root string, profile Profile, chainID string, ports soloServ
 		ABCIAddress:     node.ABCIListenAddress,
 		RPCAddress:      node.RPCListenAddress,
 		P2PAddress:      node.P2PListenAddress,
-		ControlURL:      "http://127.0.0.1:" + strconv.Itoa(ports.Control),
-		ExplorerURL:     "http://127.0.0.1:" + strconv.Itoa(ports.Explorer) + "/",
+		ControlURL:      "http://127.0.0.1:26659",
+		ExplorerURL:     "http://127.0.0.1:8547/",
 	}
 	raw, err := config.CanonicalBytes()
 	if err != nil {
@@ -190,21 +169,6 @@ func initializeSolo(root string, profile Profile, chainID string, ports soloServ
 	}
 	published = true
 	return config, nil
-}
-
-func validateSoloServicePorts(ports soloServicePorts) error {
-	values := []int{ports.ABCI, ports.RPC, ports.P2P, ports.Control, ports.Explorer}
-	seen := make(map[int]struct{}, len(values))
-	for _, port := range values {
-		if port < 1 || port > 65535 {
-			return errors.New("solo service ports must be between 1 and 65535")
-		}
-		if _, exists := seen[port]; exists {
-			return errors.New("solo service ports must be distinct")
-		}
-		seen[port] = struct{}{}
-	}
-	return nil
 }
 
 func (config Config) CanonicalBytes() ([]byte, error) {
