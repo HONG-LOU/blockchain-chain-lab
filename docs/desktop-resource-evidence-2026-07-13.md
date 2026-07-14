@@ -199,6 +199,23 @@ The remediation retains synchronous durability and does not disable `O_SYNC` saf
 
 This remediation evidence does not replace the failed release-cadence soak. A new immutable RC must run a fresh uninterrupted 24 hours before that gate can pass.
 
+## RC3 Pre-Soak Release Evidence
+
+RC3 was built from pushed commit `36739c9cff38fed66f6e44d391bc24185f61b0ad` after the full, short-race, vet, tidy, build, demo, link, and vulnerability gates passed. Windows used Go 1.26.5; a clean official Linux container used Go 1.25.12 and reported `all modules verified` before packaging.
+
+| Artifact | SHA-256 |
+|---|---|
+| Windows amd64 `chainlab.exe` | `df750eba4614959a088254de3b687744c3f7ed835d235feab8351d00f2b5656e` |
+| Windows amd64 zip | `715b3a381c500831dfc45d1e28fe66546a9d5f1c349f14e4341d0e7b463d911a` |
+| Linux amd64 `chainlab` | `6c8d1aa561d0474df6c09dbb851b819d51d09d0dbc956c4b91309e06213dce96` |
+| Linux amd64 tar.gz | `0a9c55c883f7aea5b36c85e6fb884c9778733a0c21aa451313d25c91f2c9511f` |
+
+The packaged Windows executable initialized a new solo chain, reached `running` with `catching_up=false`, and served the real Explorer. Microsoft Edge checks at 1440x1000 and 390x844 found body/document widths within the viewport, zero overflowing elements, and zero console errors or warnings. Direct screenshot inspection found no blank content, overlap, clipping, or unreadable path/hash wrapping. Screenshot SHA-256 values are `0dfbd8f05d5c67c1ccfd785e47bb9269cb7abd01784334ec8b388c0fcadd9047` for desktop, `31026dbac5515b8ee2d4291b5ceae169f07f05f8a0b872ce64475b34c79bc8fe` for the mobile first viewport, and `6f5184ee650aef9e6571235faee57c9bf16be26a0dfcd90c2d23182a9b6f33a8` for the mobile long-field/footer viewport. Normal stop left zero process/listener/runtime entries, stderr remained empty, and the owned temporary root was removed.
+
+The RC3 Linux package also passed a new five-container run, `20260714T060257Z-container-hosts-e6e55d61`; artifact SHA-256 `905c5d88547aaa2156f28636dd7693476a9cd01fda5b301a79aeacebbb0fd81f`. Four validators used distinct IP/network/mount/PID namespaces, named volumes, read-only roots, four-CPU quotas, and 8-GiB memory limits. Initial and restored peer counts were 3/3/3/3; 3-of-4 progressed, 2-of-4 held equal heights for 12 seconds with one queued transaction, recovery committed it, and all validators converged with recipient balance 300. The observer caught up, queried balance 300, rendered Explorer, contained no validator key/state, and rejected local signing. Cleanup recorded zero containers, volumes, networks, and runtime files.
+
+These are RC3 packaging and short functional gates, not the open 24-hour, exact Windows reference-machine, physical-home WAN/power, or Windows sleep/interruption gates.
+
 ## Open Resource Gates
 
 - repeat solo measurements on the exact 4-core/8-GiB/100-GiB-free-SSD Windows reference machine;
