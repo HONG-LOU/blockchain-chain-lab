@@ -48,6 +48,13 @@ func TestInitializeDesktopSoloPublishesRestartSafeConfig(t *testing.T) {
 	if loaded != config {
 		t.Fatalf("loaded config = %+v, want %+v", loaded, config)
 	}
+	if config.ABCIAddress != "tcp://127.0.0.1:26658" ||
+		config.RPCAddress != "tcp://127.0.0.1:26670" ||
+		config.P2PAddress != "tcp://127.0.0.1:26680" ||
+		config.ControlURL != "http://127.0.0.1:26659" ||
+		config.ExplorerURL != "http://127.0.0.1:8547/" {
+		t.Fatalf("default solo endpoints changed: %+v", config)
+	}
 	for _, path := range []string{config.Network, config.NodeHome} {
 		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(path))); err != nil {
 			t.Fatalf("generated path %q: %v", path, err)
@@ -58,6 +65,19 @@ func TestInitializeDesktopSoloPublishesRestartSafeConfig(t *testing.T) {
 	}
 	if _, err := Initialize(root, ProfileDesktopSolo, "chainlab-other"); err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("second initialization error = %v", err)
+	}
+}
+
+func TestInitializeSoloRejectsInvalidServicePorts(t *testing.T) {
+	tests := []soloServicePorts{
+		{ABCI: 0, RPC: 2, P2P: 3, Control: 4, Explorer: 5},
+		{ABCI: 1, RPC: 2, P2P: 3, Control: 4, Explorer: 65536},
+		{ABCI: 1, RPC: 2, P2P: 3, Control: 4, Explorer: 4},
+	}
+	for _, ports := range tests {
+		if _, err := initializeSolo(filepath.Join(t.TempDir(), "desktop"), ProfileDesktopSolo, "chainlab-test", ports); err == nil {
+			t.Fatalf("invalid service ports accepted: %+v", ports)
+		}
 	}
 }
 

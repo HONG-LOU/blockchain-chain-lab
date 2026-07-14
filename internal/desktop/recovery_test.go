@@ -2,20 +2,21 @@ package desktop
 
 import (
 	"context"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	chainabci "chainlab/internal/abci"
+	"chainlab/internal/cometnode"
 )
 
 func TestDesktopBackupRestoreAndIntegrityRejection(t *testing.T) {
 	parent := t.TempDir()
 	root := filepath.Join(parent, "live")
-	config, err := Initialize(root, ProfileDesktopSolo, "chainlab-backup-test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	config := initializeTestDesktop(t, root, "chainlab-backup-test")
 	command, result := startTestDesktop(t, root)
 	_ = waitForTestStatus(t, root, result, 30*time.Second)
 	if err := Backup(root, filepath.Join(parent, "running.zip")); err == nil || !strings.Contains(err.Error(), "stopped") {
@@ -30,6 +31,7 @@ func TestDesktopBackupRestoreAndIntegrityRejection(t *testing.T) {
 	}
 	before := currentTestStatus(t, root)
 	stopTestDesktop(t, root, command, result)
+	backupHeight, backupAppHash := persistedApplicationIdentity(t, root)
 
 	backupPath := filepath.Join(parent, "chainlab-backup.zip")
 	if err := Backup(root, backupPath); err != nil {
@@ -59,6 +61,13 @@ func TestDesktopBackupRestoreAndIntegrityRejection(t *testing.T) {
 	}
 	if restored.ChainID != config.ChainID || restored.Profile != config.Profile {
 		t.Fatalf("restored config = %+v", restored)
+	}
+	restoredHeight, restoredAppHash := persistedApplicationIdentity(t, restoredRoot)
+	if restoredHeight != backupHeight || restoredAppHash != backupAppHash {
+		t.Fatalf(
+			"restored application identity = %d/%s, want %d/%s",
+			restoredHeight, restoredAppHash, backupHeight, backupAppHash,
+		)
 	}
 	if _, err := Restore(backupPath, restoredRoot, config.ChainID); err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("existing destination error = %v", err)
@@ -95,4 +104,34 @@ func TestDesktopBackupRestoreAndIntegrityRejection(t *testing.T) {
 	if _, err := Restore(corruptPath, filepath.Join(parent, "corrupt-restore"), config.ChainID); err == nil {
 		t.Fatal("corrupt backup should fail closed")
 	}
+}
+
+func persistedApplicationIdentity(t *testing.T, root string) (int64, string) {
+	t.Helper()
+	config, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(root, filepath.FromSlash(config.NodeHome))
+	genesis, err := chainabci.LoadGenesisDocument(filepath.Join(home, filepath.FromSlash(cometnode.AppGenesisPath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	application, err := chainabci.NewApplication(chainabci.Config{
+		Genesis: genesis, DataDir: filepath.Join(root, filepath.FromSlash(config.ApplicationData)),
+		Storage:            config.Contract.ApplicationStorage,
+		CometRetainHeights: config.Contract.CometRetainBlocks,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, infoErr := application.Info(context.Background(), nil)
+	closeErr := application.Close()
+	if infoErr != nil {
+		t.Fatal(infoErr)
+	}
+	if closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	return info.LastBlockHeight, hex.EncodeToString(info.LastBlockAppHash)
 }

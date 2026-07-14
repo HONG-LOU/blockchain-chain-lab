@@ -65,10 +65,7 @@ func TestLoadRuntimeBindsCanonicalControlRecordToConfig(t *testing.T) {
 
 func TestDesktopLifecycleTransferAndRestart(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "desktop")
-	config, err := Initialize(root, ProfileDesktopSolo, "chainlab-desktop-lifecycle")
-	if err != nil {
-		t.Fatal(err)
-	}
+	config := initializeTestDesktop(t, root, "chainlab-desktop-lifecycle")
 
 	firstProcess, firstResult := startTestDesktop(t, root)
 	first := waitForTestStatus(t, root, firstResult, 30*time.Second)
@@ -122,9 +119,7 @@ func TestDesktopLifecycleTransferAndRestart(t *testing.T) {
 
 func TestDesktopForcedTerminationRecoversStaleRuntime(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "desktop")
-	if _, err := Initialize(root, ProfileDesktopSolo, "chainlab-desktop-forced-recovery"); err != nil {
-		t.Fatal(err)
-	}
+	_ = initializeTestDesktop(t, root, "chainlab-desktop-forced-recovery")
 	firstProcess, firstResult := startTestDesktop(t, root)
 	first := waitForTestStatus(t, root, firstResult, 30*time.Second)
 	if err := firstProcess.Process.Kill(); err != nil {
@@ -146,6 +141,18 @@ func TestDesktopForcedTerminationRecoversStaleRuntime(t *testing.T) {
 		t.Fatalf("same-height recovery changed committed hashes: recovered=%+v first=%+v", second, first)
 	}
 	stopTestDesktop(t, root, secondProcess, secondResult)
+}
+
+func initializeTestDesktop(t *testing.T, root string, chainID string) Config {
+	t.Helper()
+	base := availablePortBlock(t, 5)
+	config, err := initializeSolo(root, ProfileDesktopSolo, chainID, soloServicePorts{
+		ABCI: base, RPC: base + 1, P2P: base + 2, Control: base + 3, Explorer: base + 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return config
 }
 
 func startTestDesktop(t *testing.T, root string) (*exec.Cmd, <-chan error) {
