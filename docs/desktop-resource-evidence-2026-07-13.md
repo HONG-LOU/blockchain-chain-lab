@@ -181,6 +181,24 @@ The packaged Windows RC2 initialized and ran a real solo Desktop node, served Ex
 
 Direct screenshot inspection found no blank page, overlap, clipped control, or unreadable long path/hash. The mobile layout wrapped the data path and both hashes within the viewport.
 
+## RC2 24-Hour Soak Failure And Remediation
+
+Formal attempt 2 used RC2 commit `c87e291c154cba89d979a4306d02ae9ce19b0e86`, release cadence 5 seconds, and run ID `20260713T140449Z-solo-941b42c9`. It is a failed run, not partial PASS evidence.
+
+| Evidence | Result |
+|---|---|
+| Launch manifest | `output/desktop-measurements/soak-24h-rc2-c87e291-attempt2-launch.json`; SHA-256 `1c1b756b97317b0800af8263cd9bf2b96637ef70ba017900ee11425d005f5836` |
+| Node log | `output/desktop-measurements/20260713T140449Z-solo-941b42c9/node-0.log`; SHA-256 `13560aed345dcb1281ddfe122833e04a9462607a97fe461c5867018957325e62` |
+| Last committed height | 10,019 |
+| Failure height and time | 10,020 at `2026-07-14T04:09:01.829Z` |
+| Exact failure | Windows denied replacement of `priv_validator_state.json` while another process held the destination |
+| Safety state | persisted destination remained prevote step 2; completed temporary file contained precommit step 3 |
+| Misleading liveness | RPC and process remained alive after Comet stopped only its consensus state |
+
+The remediation retains synchronous durability and does not disable `O_SYNC` safety as a performance workaround. ChainLab's compatible local signer writes, flushes, closes, retries only transient Windows rename conflicts, replaces, synchronizes the directory, and only then publishes its new in-memory HRS. Persistent replacement failure and Comet consensus panics now terminate the outer node instead of leaving a false-running RPC process. A real Windows lock-release test passes, a persistent-lock process test exits fail closed, and an accelerated single-validator run committed 10,000 blocks with about 30,000 durable signing-state replacements in 198.608 seconds. Its local artifact is `output/desktop-measurements/10000-blocks-durable-validator-20260714.json`, SHA-256 `fbed6c7e01ffe77b6287cc950df472b902aa53b165cd9f06d6e9eb7a7f69105b`.
+
+This remediation evidence does not replace the failed release-cadence soak. A new immutable RC must run a fresh uninterrupted 24 hours before that gate can pass.
+
 ## Open Resource Gates
 
 - repeat solo measurements on the exact 4-core/8-GiB/100-GiB-free-SSD Windows reference machine;

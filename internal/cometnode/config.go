@@ -235,7 +235,7 @@ func RunWithOptions(ctx context.Context, home string, out io.Writer, options Run
 			return err
 		}
 	}
-	baseLogger := cmtlog.NewTMLogger(cmtlog.NewSyncWriter(out))
+	baseLogger, consensusFailure := newConsensusFailureLogger(cmtlog.NewTMLogger(cmtlog.NewSyncWriter(out)))
 	logger, err := cmtflags.ParseLogLevel(config.LogLevel, baseLogger, cmtcfg.DefaultLogLevel)
 	if err != nil {
 		return fmt.Errorf("parse CometBFT log level: %w", err)
@@ -262,6 +262,10 @@ func RunWithOptions(ctx context.Context, home string, out io.Writer, options Run
 		return closeManagedDatabase(databaseProvider, nil)
 	case <-cometNode.Quit():
 		return closeManagedDatabase(databaseProvider, errors.New("CometBFT node stopped unexpectedly"))
+	case failure := <-consensusFailure:
+		stopErr := cometNode.Stop()
+		<-cometNode.Quit()
+		return closeManagedDatabase(databaseProvider, errors.Join(failure, stopErr))
 	}
 }
 
@@ -281,9 +285,13 @@ func newValidatorNode(config *cmtcfg.Config, logger cmtlog.Logger, databaseProvi
 	if err != nil {
 		return nil, fmt.Errorf("load or generate node key: %w", err)
 	}
+	validator, err := loadDurablePrivValidator(config.PrivValidatorKeyFile(), config.PrivValidatorStateFile())
+	if err != nil {
+		return nil, fmt.Errorf("load private validator: %w", err)
+	}
 	return node.NewNode(
 		config,
-		privval.LoadOrGenFilePV(config.PrivValidatorKeyFile(), config.PrivValidatorStateFile()),
+		validator,
 		nodeKey,
 		proxy.DefaultClientCreator(config.ProxyApp, config.ABCI, config.DBDir()),
 		node.DefaultGenesisDocProviderFunc(config),
